@@ -1,0 +1,47 @@
+.firecrawl/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.venv/
+venv/
+.python-version
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# Build / packaging
+*.whl
+*.tar.gz
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Corpus cache (binary PDFs — never commit)
+tests/corpus/_cache/
+tests/corpus/_generated/
+
+# Local dev detritus
+*.pdf.bak
+scratch/
+
+# Git worktrees
+.worktrees/
