@@ -127,16 +127,26 @@ def _parser() -> argparse.ArgumentParser:
             "report.warnings. Use only after visually verifying the output."
         ),
     )
-    p.add_argument(
-        "--skip-verify",
+    # --verify / --skip-verify: content-drift verifier. Off by default (skipped
+    # for speed). --verify re-enables it (with --accept-drift controlling
+    # whether drift aborts or just warns). --skip-verify is retained as a
+    # no-op for backward compatibility — it matches the new default behavior.
+    verify_group = p.add_mutually_exclusive_group()
+    verify_group.add_argument(
+        "--verify",
         action="store_true",
         help=(
-            "Skip the content-drift verifier entirely. Fastest option: no "
-            "output re-rasterization, no OCR comparison, no SSIM. Use when "
-            "you trust the compressor and want speed over post-hoc safety "
-            "checks. With --no-ocr this also skips input OCR. Typically "
-            "2-3x faster per page."
+            "Enable the content-drift verifier (off by default since v0.0.x). "
+            "Re-rasterizes the output, re-runs OCR, compares against input. "
+            "Adds ~2-5 s/page. Use for clinical / legal / archival runs "
+            "where post-hoc content-preservation proof matters. Drift "
+            "behavior is controlled by --accept-drift (default: abort)."
         ),
+    )
+    verify_group.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help=argparse.SUPPRESS,  # retained as alias; default is to skip
     )
     p.add_argument(
         "--max-workers",
@@ -196,7 +206,9 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         target_color_quality=args.target_color_quality,
         force_monochrome=args.force_monochrome,
         accept_drift=args.accept_drift,
-        skip_verify=args.skip_verify,
+        # Verifier is OFF by default (skip_verify=True). --verify opts in.
+        # --skip-verify still accepted as a no-op alias for the default.
+        skip_verify=not args.verify,
         max_workers=args.max_workers,
         legal_codec_profile="ccitt-g4" if args.legal_mode else None,
         target_pdf_a=args.target_pdfa,

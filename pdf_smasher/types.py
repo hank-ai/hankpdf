@@ -52,9 +52,12 @@ class CompressOptions:
     allow_certified_invalidation: bool = False
     allow_embedded_files: bool = False
     accept_drift: bool = False  # if True, drift → warning instead of abort
-    skip_verify: bool = (
-        False  # if True, skip the content-drift verifier entirely (fastest; no OCR, no SSIM)
-    )
+    # Skip the content-drift verifier by default. It's slow (adds ~3s/page for
+    # re-OCR on the output) and in its current form produces too many false
+    # positives on realistic scans (Tesseract OCR is noisy between antialiased
+    # source text and crisp binary-encoded output). Users who need the gate
+    # (clinical, legal archival) can turn it on with verify=True / --verify.
+    skip_verify: bool = True
     password: str | None = None
 
     # Thresholds
