@@ -28,6 +28,8 @@ from pdf_smasher import (
     compress,
     triage,
 )
+from pdf_smasher.engine.chunking import split_pdf_by_size
+from pdf_smasher.engine.image_export import render_pages_as_images
 
 # Exit codes per SPEC.md §2.2. Kept in sync with the CompressError class tree.
 EXIT_OK = 0
@@ -373,8 +375,6 @@ def _run_image_export(
     requested page as JPEG/PNG. Invoked from main() when the user picks
     jpeg/png via --output-format or an image extension on -o.
     """
-    from pdf_smasher.image_export import render_pages_as_images
-
     # Determine total page count via a triage.
     try:
         tri = triage(input_bytes)
@@ -607,8 +607,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.max_output_mb is None:
             args.output.write_bytes(output_bytes)
         else:
-            from pdf_smasher.chunking import split_pdf_by_size
-
             max_bytes = int(args.max_output_mb * 1024 * 1024)
             chunks = split_pdf_by_size(output_bytes, max_bytes=max_bytes)
             if len(chunks) == 1:

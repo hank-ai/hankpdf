@@ -8,7 +8,7 @@ import pikepdf
 import pypdfium2 as pdfium
 import pytest
 
-from pdf_smasher.chunking import split_pdf_by_size
+from pdf_smasher.engine.chunking import split_pdf_by_size
 
 
 def _make_n_page_pdf(n: int, payload_kb_per_page: int = 0) -> bytes:

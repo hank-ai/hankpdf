@@ -8,7 +8,7 @@ import pikepdf
 import pytest
 from PIL import Image
 
-from pdf_smasher.image_export import render_pages_as_images
+from pdf_smasher.engine.image_export import render_pages_as_images
 
 
 def _make_pdf(n_pages: int) -> bytes:
