@@ -103,3 +103,16 @@ def test_max_output_mb_negative_rejected(tmp_path) -> None:  # type: ignore[no-u
     with pytest.raises(SystemExit) as exc_info:
         main([str(in_path), "-o", str(out_path), "--max-output-mb", "-5"])
     assert exc_info.value.code == 2
+
+
+@pytest.mark.integration
+def test_empty_pages_spec_on_pdf_returns_usage_exit(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """Empty --pages in PDF output mode must return EXIT_USAGE=40,
+    matching the image-export path. Previously this reached compress()
+    which raised CompressError and routed to EXIT_ENGINE_ERROR=30."""
+    in_path = _make_big_pdf(tmp_path, n_pages=2)
+    out_path = tmp_path / "out.pdf"
+    rc = main([str(in_path), "-o", str(out_path), "--pages", ""])
+    assert rc == 40, f"expected EXIT_USAGE=40, got {rc}"
+    err = capsys.readouterr().err
+    assert "--pages" in err

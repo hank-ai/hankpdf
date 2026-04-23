@@ -682,6 +682,18 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"error: --pages {e}", file=sys.stderr)
             return EXIT_USAGE
+        # Empty spec (e.g., --pages "" from env-var expansion) must be
+        # treated as a usage error regardless of output format. Without
+        # this shared guard, the PDF path used to fall through to
+        # compress() → CompressError → EXIT_ENGINE_ERROR=30, while the
+        # image-export path returned EXIT_USAGE=40. Unify.
+        if not only_pages:
+            print(
+                "error: --pages parsed to an empty set (no pages "
+                "selected); provide at least one 1-indexed page number",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
 
     # Resolve output format. --output-format wins; otherwise infer from
     # the output file extension; default to pdf.
