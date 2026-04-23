@@ -30,7 +30,7 @@ from pdf_smasher import (
     triage,
 )
 from pdf_smasher.engine.chunking import split_pdf_by_size
-from pdf_smasher.engine.image_export import render_pages_as_images
+from pdf_smasher.engine.image_export import iter_pages_as_images
 
 _MAX_IMAGE_DPI = 1200  # 300 archival + 4x headroom; above this = OOM risk
 _MAX_PAGES_RANGE = 1_000_000  # cap --pages "lo-hi" span to prevent DoS via
@@ -452,29 +452,20 @@ def _run_image_export(
         )
         return EXIT_USAGE
 
-    images = render_pages_as_images(
-        input_bytes,
-        page_indices=page_indices,
-        image_format=image_format,  # type: ignore[arg-type]
-        dpi=args.image_dpi,
-        jpeg_quality=args.jpeg_quality,
-        png_compress_level=args.png_compress_level,
-        webp_quality=args.webp_quality,
-        webp_lossless=args.webp_lossless,
-    )
+    # Stdout (-o -) only supports a single image. Check up front so we
+    # don't spin up rasterize just to reject after the fact.
+    n = len(page_indices)
+    if str(args.output) == "-" and n != 1:
+        print(
+            f"error: -o - (stdout) supports exactly one image; "
+            f"got {n} (use --pages to select a single page)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
-    if str(args.output) == "-":
-        if len(images) != 1:
-            print(
-                f"error: -o - (stdout) supports exactly one image; "
-                f"got {len(images)} (use --pages to select a single page)",
-                file=sys.stderr,
-            )
-            return EXIT_USAGE
-        sys.stdout.buffer.write(images[0])
-        return EXIT_OK
+    if str(args.output) != "-":
+        args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     out_ext = {"jpeg": ".jpg", "png": ".png", "webp": ".webp"}[image_format]
     valid_image_exts = {"jpg", "jpeg", "png", "webp"}
     base = args.output.stem
@@ -482,34 +473,80 @@ def _run_image_export(
     # Keep the user's image extension if present; else append the canonical one.
     requested_ext = args.output.suffix.lower()
     final_ext = requested_ext if requested_ext.lstrip(".") in valid_image_exts else out_ext
-    if len(images) == 1:
-        # Single page → write exactly to -o (with ext normalization).
-        if requested_ext.lstrip(".") not in valid_image_exts:
-            target = parent / f"{base}{final_ext}"
-        else:
-            target = args.output
-        target.write_bytes(images[0])
-        if not args.quiet:
-            print(
-                f"wrote {target} ({len(images[0]):,} bytes, {image_format} @ {args.image_dpi} DPI)",
-                file=sys.stderr,
+
+    # Progress: tqdm bar ticks on each encoded page, so a 400-page PNG
+    # export shows real progress (was silent while ~8 GB buffered in
+    # memory pre-Task-8). --quiet suppresses it.
+    from tqdm import tqdm  # type: ignore[import-untyped]
+
+    _bar: tqdm | None = None
+    if not args.quiet:
+        _bar = tqdm(
+            total=n,
+            desc=f"{image_format}",
+            unit="pg",
+            file=sys.stderr,
+            dynamic_ncols=True,
+            leave=True,
+        )
+
+    def _progress(phase: str, _current: int, _total: int) -> None:
+        if _bar is not None and phase == "page_done":
+            _bar.update(1)
+
+    try:
+        pages_iter = iter_pages_as_images(
+            input_bytes,
+            page_indices=page_indices,
+            image_format=image_format,  # type: ignore[arg-type]
+            dpi=args.image_dpi,
+            jpeg_quality=args.jpeg_quality,
+            png_compress_level=args.png_compress_level,
+            webp_quality=args.webp_quality,
+            webp_lossless=args.webp_lossless,
+            progress_callback=_progress,
+        )
+
+        if n == 1:
+            # Single-page fast path: either stream to stdout or write to
+            # the (possibly-ext-normalized) -o target.
+            blob = next(iter(pages_iter))
+            if str(args.output) == "-":
+                sys.stdout.buffer.write(blob)
+                return EXIT_OK
+            target = (
+                args.output
+                if requested_ext.lstrip(".") in valid_image_exts
+                else parent / f"{base}{final_ext}"
             )
-    else:
-        for page_idx, blob in zip(page_indices, images, strict=True):
-            target = parent / f"{base}_{page_idx + 1:03d}{final_ext}"
             target.write_bytes(blob)
             if not args.quiet:
                 print(
-                    f"wrote {target.name} ({len(blob):,} bytes, page {page_idx + 1})",
+                    f"wrote {target} ({len(blob):,} bytes, "
+                    f"{image_format} @ {args.image_dpi} DPI)",
                     file=sys.stderr,
                 )
-        if not args.quiet:
-            total = sum(len(b) for b in images)
-            print(
-                f"[hankpdf] exported {len(images)} {image_format} pages "
-                f"({total:,} total bytes, {args.image_dpi} DPI)",
-                file=sys.stderr,
-            )
+        else:
+            total_bytes = 0
+            for page_idx, blob in zip(page_indices, pages_iter, strict=True):
+                target = parent / f"{base}_{page_idx + 1:03d}{final_ext}"
+                target.write_bytes(blob)
+                total_bytes += len(blob)
+                if not args.quiet:
+                    print(
+                        f"wrote {target.name} ({len(blob):,} bytes, "
+                        f"page {page_idx + 1})",
+                        file=sys.stderr,
+                    )
+            if not args.quiet:
+                print(
+                    f"[hankpdf] exported {n} {image_format} pages "
+                    f"({total_bytes:,} total bytes, {args.image_dpi} DPI)",
+                    file=sys.stderr,
+                )
+    finally:
+        if _bar is not None:
+            _bar.close()
     return EXIT_OK
 
 
@@ -564,7 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     # Progress: tqdm bar for the per-page phase + plain stderr lines for
     # the triage/merge/verify milestones. All output goes to stderr so that
     # --report json on stdout stays clean for piping. --quiet suppresses both.
-    from tqdm import tqdm  # type: ignore[import-untyped]
+    from tqdm import tqdm
 
     from pdf_smasher import ProgressEvent
 

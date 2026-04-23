@@ -8,7 +8,7 @@ import pikepdf
 import pytest
 from PIL import Image
 
-from pdf_smasher.engine.image_export import render_pages_as_images
+from pdf_smasher.engine.image_export import iter_pages_as_images, render_pages_as_images
 
 
 def _make_pdf(n_pages: int) -> bytes:
@@ -285,3 +285,22 @@ def test_render_pages_per_page_error_context() -> None:
             dpi=72,
             _force_rasterize_error_for_test=True,  # new test hook
         )
+
+
+def test_iter_pages_yields_bytes_lazily() -> None:
+    """iter_pages_as_images must be a generator, yielding one encoded
+    image per iteration without materializing the whole list."""
+    import types
+
+    pdf_bytes = _make_pdf(3)
+    it = iter_pages_as_images(
+        pdf_bytes,
+        page_indices=[0, 1, 2],
+        image_format="jpeg",
+        dpi=72,
+    )
+    assert isinstance(it, types.GeneratorType)
+    first = next(it)
+    assert first[:2] == b"\xff\xd8"
+    rest = list(it)
+    assert len(rest) == 2
