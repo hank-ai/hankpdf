@@ -455,9 +455,18 @@ def _run_image_export(
             file=sys.stderr,
         )
 
-    # Determine total page count via a triage.
+    # Determine total page count via a triage. Route specific
+    # CompressError subclasses to their own exit codes BEFORE the
+    # generic catch-all, so upstream can distinguish a decompression
+    # bomb or malicious PDF from a plain corrupt one.
     try:
         tri = triage(input_bytes)
+    except MaliciousPDFError as e:
+        print(f"refused: malicious PDF ({e})", file=sys.stderr)
+        return EXIT_MALICIOUS
+    except DecompressionBombError as e:
+        print(f"refused: decompression bomb ({e})", file=sys.stderr)
+        return EXIT_DECOMPRESSION_BOMB
     except CompressError as e:
         print(f"refused: {e}", file=sys.stderr)
         return EXIT_CORRUPT

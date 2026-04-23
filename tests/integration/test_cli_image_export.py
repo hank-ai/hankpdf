@@ -177,6 +177,44 @@ def test_output_format_override_corrects_extension(tmp_path) -> None:  # type: i
 
 
 @pytest.mark.integration
+def test_image_export_routes_malicious_to_specific_exit(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """If triage raises MaliciousPDFError, image-export must return
+    EXIT_MALICIOUS=14, not the generic EXIT_CORRUPT=13."""
+    import pdf_smasher.cli.main as cli_main
+    from pdf_smasher.exceptions import MaliciousPDFError
+
+    def fake_triage(_b):  # type: ignore[no-untyped-def]
+        msg = "synthetic malicious content"
+        raise MaliciousPDFError(msg)
+
+    monkeypatch.setattr(cli_main, "triage", fake_triage)
+
+    in_path = _make_pdf(tmp_path, n_pages=1)
+    out_path = tmp_path / "out.jpg"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 14, f"expected EXIT_MALICIOUS=14, got {rc}"
+
+
+@pytest.mark.integration
+def test_image_export_routes_bomb_to_specific_exit(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """If triage raises DecompressionBombError, image-export must
+    return EXIT_DECOMPRESSION_BOMB=16, not EXIT_CORRUPT=13."""
+    import pdf_smasher.cli.main as cli_main
+    from pdf_smasher.exceptions import DecompressionBombError
+
+    def fake_triage(_b):  # type: ignore[no-untyped-def]
+        msg = "synthetic bomb"
+        raise DecompressionBombError(msg)
+
+    monkeypatch.setattr(cli_main, "triage", fake_triage)
+
+    in_path = _make_pdf(tmp_path, n_pages=1)
+    out_path = tmp_path / "out.jpg"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 16, f"expected EXIT_DECOMPRESSION_BOMB=16, got {rc}"
+
+
+@pytest.mark.integration
 def test_image_export_pad_width_scales_past_999(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Regression: DCR Wave 2 flagged the hard-coded {:03d} pad in the
     multi-page image-export branch. 1200-page jobs must produce
