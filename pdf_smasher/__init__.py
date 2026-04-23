@@ -322,13 +322,28 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     _ocr_pool: ThreadPoolExecutor | None = None
     with contextlib.ExitStack() as _ocr_stack:
         if need_input_ocr:
-            _ocr_pool = _ocr_stack.enter_context(
-                ThreadPoolExecutor(max_workers=2),  # 1 for input, 1 for output
+            _ocr_pool = ThreadPoolExecutor(max_workers=2)  # 1 for input, 1 for output
+            # Register an explicit shutdown callback that cancels pending
+            # futures and skips waiting. The default ExitStack + `with`
+            # on a ThreadPoolExecutor invokes shutdown(wait=True,
+            # cancel_futures=False) — if a Tesseract subprocess is wedged
+            # (timeout kwarg saves us for normal hangs, but signals like
+            # SIGSTOP can defeat it), we'd block forever on worker-pool
+            # exit. cancel_futures=True tells any queued-but-unstarted
+            # tasks to abandon, and wait=False doesn't block.
+            # Pytesseract's timeout kwarg already kills subprocesses on
+            # overrun, so in-flight work almost always completes.
+            # Pin to the local binding so the lambda captures a non-None
+            # ThreadPoolExecutor (mypy can't narrow across the lambda).
+            _pool = _ocr_pool
+            _ocr_stack.callback(
+                lambda: _pool.shutdown(wait=False, cancel_futures=True),
             )
             _input_ocr_future = _ocr_pool.submit(
                 tesseract_word_boxes,
                 raster,
                 language=options.ocr_language,
+                timeout_seconds=options.per_page_timeout_seconds,
             )
 
         # Source-truth: prefer native PDF text layer when present.
@@ -480,6 +495,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
                     tesseract_word_boxes,
                     output_raster,
                     language=options.ocr_language,
+                    timeout_seconds=options.per_page_timeout_seconds,
                 )
             else:
                 _output_ocr_future = None
@@ -493,7 +509,11 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             if _output_ocr_future is not None:
                 _out_wb = _output_ocr_future.result()
             else:
-                _out_wb = tesseract_word_boxes(output_raster, language=options.ocr_language)
+                _out_wb = tesseract_word_boxes(
+                    output_raster,
+                    language=options.ocr_language,
+                    timeout_seconds=options.per_page_timeout_seconds,
+                )
             output_ocr_text = " ".join(b.text for b in _out_wb)
             per_page_input_estimate = raster.width * raster.height * 3
             per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))

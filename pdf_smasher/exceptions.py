@@ -53,3 +53,30 @@ class EnvironmentError(CompressError):  # noqa: A001 — this is our own subclas
 
     The ``--doctor`` subcommand provides a full diagnostic report.
     """
+
+
+class OcrTimeoutError(CompressError):
+    """Tesseract subprocess exceeded the configured per-page timeout.
+
+    Raised by :func:`pdf_smasher.engine.ocr.tesseract_word_boxes` when
+    ``pytesseract`` propagates a :class:`subprocess.TimeoutExpired`. The
+    subprocess is already killed by the time we see this; the exception
+    lets callers distinguish "we killed it" from "tesseract crashed"
+    (which surfaces as ``pytesseract.TesseractError``).
+    """
+
+
+class PerPageTimeoutError(CompressError):
+    """Per-page worker exceeded ``CompressOptions.per_page_timeout_seconds``.
+
+    Raised by :func:`pdf_smasher.compress` when a ProcessPoolExecutor
+    worker's ``future.result(timeout=…)`` hits the per-page budget.
+    """
+
+
+class TotalTimeoutError(CompressError):
+    """Job exceeded ``CompressOptions.total_timeout_seconds``.
+
+    Top-level wall-clock watchdog raised when the cumulative elapsed time
+    in :func:`pdf_smasher.compress` exceeds the configured total budget.
+    """
