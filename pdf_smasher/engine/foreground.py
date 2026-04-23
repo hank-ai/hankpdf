@@ -17,7 +17,46 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
+from pdf_smasher.engine.verifier import CHANNEL_SPREAD_COLOR_TOLERANCE
+
 _DEFAULT_INK = (0, 0, 0)  # black when there's no mask coverage to sample
+
+# Mirrors CHANNEL_SPREAD_COLOR_TOLERANCE so the mono-detector and the verifier's
+# color-parity check agree on what "color" means.  Named separately to make the
+# coupling explicit and testable.
+_MONOCHROME_CHANNEL_SPREAD_TOLERANCE = CHANNEL_SPREAD_COLOR_TOLERANCE
+_MONOCHROME_TOLERANCE_PERCENTILE = 99.0
+_MONOCHROME_COLORED_PIXEL_FRACTION = 0.001
+_MONOCHROME_SCAN_DOWNSAMPLE_MAX_PX = 512
+
+
+def is_effectively_monochrome(
+    raster: Image.Image,
+    *,
+    tolerance: int = _MONOCHROME_CHANNEL_SPREAD_TOLERANCE,
+) -> bool:
+    """Return True if *raster* has no meaningful color content.
+
+    Two-pass noise-tolerant test:
+    1. 99th-percentile channel spread ≤ tolerance — catches nearly-uniform tints.
+    2. Fraction of "colored" pixels > 0.1% — catches small stamps / logos.
+
+    Downsamples large images to ≤512px before analysis for speed.
+    """
+    if raster.mode in {"L", "1"}:
+        return True
+    thumb = raster.copy()
+    thumb.thumbnail(
+        (_MONOCHROME_SCAN_DOWNSAMPLE_MAX_PX, _MONOCHROME_SCAN_DOWNSAMPLE_MAX_PX),
+        Image.Resampling.LANCZOS,
+    )
+    arr = np.asarray(thumb.convert("RGB"), dtype=np.int16)
+    channel_spread = arr.max(axis=-1) - arr.min(axis=-1)
+    percentile_value = float(np.percentile(channel_spread, _MONOCHROME_TOLERANCE_PERCENTILE))
+    if percentile_value > tolerance:
+        return False
+    colored_pixel_fraction = float((channel_spread > tolerance).sum()) / channel_spread.size
+    return colored_pixel_fraction <= _MONOCHROME_COLORED_PIXEL_FRACTION
 
 
 @dataclass(frozen=True)
