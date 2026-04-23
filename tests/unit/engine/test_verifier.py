@@ -325,3 +325,21 @@ def test_page_has_color_jpeg_ringing_not_detected_as_color() -> None:
     assert not _page_has_color(img), (
         "JPEG ringing halos (spread=10, fraction=5%) must NOT be detected as color"
     )
+
+
+# ---------- anomaly ratio gate threshold ordering ----------
+
+
+def test_anomaly_ratio_gate_triggers_safe_threshold() -> None:
+    """Safe tile floor must be strictly tighter than standard.
+
+    Pre-Mortem Wave 3: a mostly-blank page can hit 100× ratio and pass the
+    standard tile floor even with a faint watermark stripped. The anomaly
+    gate adds a second pass at safe thresholds for outlier-ratio pages.
+    """
+    from pdf_smasher.engine.verifier import (
+        _DEFAULT_TILE_SSIM_FLOOR_SAFE,
+        _DEFAULT_TILE_SSIM_FLOOR_STANDARD,
+    )
+
+    assert _DEFAULT_TILE_SSIM_FLOOR_SAFE > _DEFAULT_TILE_SSIM_FLOOR_STANDARD
