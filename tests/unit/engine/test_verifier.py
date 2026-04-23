@@ -345,3 +345,26 @@ def test_anomaly_ratio_gate_triggers_safe_threshold() -> None:
     )
 
     assert _DEFAULT_TILE_SSIM_FLOOR_SAFE > _DEFAULT_TILE_SSIM_FLOOR_STANDARD
+
+
+def test_verifier_aggregator_skipped_result() -> None:
+    """When skip_verify is set, aggregator.skipped_result() returns a
+    VerifierResult with status='skipped' and NaN-ish metrics rather than
+    a fake 'pass' with perfect metrics."""
+    from pdf_smasher.engine.verifier import _VerifierAggregator
+
+    agg = _VerifierAggregator()
+    result = agg.skipped_result()
+    assert result.status == "skipped"
+    # No pages were ever merged, so there are no failing pages to report.
+    assert result.failing_pages == ()
+    # Metrics should NOT claim perfect fidelity — callers reading the
+    # dataclass must not mistake "skipped" for "verified clean".
+    # We use sentinel values (0.0 for ratios that would be 1.0 on pass,
+    # 1.0 for ratios that would be 0.0 on pass) so any gating code keying
+    # on e.g. `ssim_global >= 0.92` WILL fail-closed.
+    assert result.ssim_global == 0.0
+    assert result.ssim_min_tile == 0.0
+    assert result.ocr_levenshtein == 1.0  # max possible = "total drift"
+    assert result.digit_multiset_match is False
+    assert result.color_preserved is False

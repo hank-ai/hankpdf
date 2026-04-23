@@ -121,11 +121,15 @@ def test_compress_signed_without_opt_in_raises() -> None:
 
 @pytest.mark.integration
 def test_compress_respects_mode_safe() -> None:
-    """Safe mode runs but enforces stricter gates. On valid content, still passes."""
+    """Safe mode runs but enforces stricter gates. On valid content, still passes.
+
+    skip_verify defaults to True, so verifier status will be 'skipped' unless
+    explicitly enabled. This test verifies safe mode completes without error.
+    """
     pdf_in = _make_fake_scan(["HELLO WORLD"])
     pdf_out, report = compress(pdf_in, options=CompressOptions(mode="safe"))
     assert pdf_out.startswith(b"%PDF-")
-    assert report.verifier.status in ("pass", "fail")
+    assert report.verifier.status in ("pass", "fail", "skipped")
 
 
 def test_legal_codec_profile_raises_not_implemented() -> None:
@@ -140,3 +144,28 @@ def test_legal_codec_profile_none_does_not_raise_at_construction() -> None:
     typing was wrong (False is not None is True, raising every call)."""
     opts = CompressOptions()
     assert opts.legal_codec_profile is None
+
+
+def test_compress_skip_verify_reports_status_skipped() -> None:
+    """With skip_verify=True (the default), the returned CompressReport
+    must surface status='skipped' rather than a fake 'pass', and append
+    a 'verifier-skipped' warning."""
+    pdf_in = _make_fake_scan(["HELLO"])
+    _, report = compress(pdf_in, options=CompressOptions(skip_verify=True))
+    assert report.verifier.status == "skipped", (
+        f"expected skipped, got {report.verifier.status}"
+    )
+    assert any(w == "verifier-skipped" for w in report.warnings), (
+        f"expected 'verifier-skipped' in warnings; got {report.warnings}"
+    )
+
+
+def test_compress_verify_true_reports_real_status() -> None:
+    """With skip_verify=False, the verifier runs and status is 'pass' or
+    'fail' (not 'skipped'). No 'verifier-skipped' warning."""
+    pdf_in = _make_fake_scan(["HELLO"])
+    _, report = compress(pdf_in, options=CompressOptions(skip_verify=False))
+    assert report.verifier.status in ("pass", "fail"), (
+        f"expected pass|fail, got {report.verifier.status}"
+    )
+    assert not any(w == "verifier-skipped" for w in report.warnings)

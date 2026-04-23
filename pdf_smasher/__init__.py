@@ -403,12 +403,12 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
 
         verdict = _PageVerdict(
             page_index=-1,
-            passed=True,
-            lev=0.0,
-            ssim_global=1.0,
-            ssim_tile_min=1.0,
-            digits_match=True,
-            color_preserved=True,
+            passed=True,           # don't add to failing_pages
+            lev=1.0,               # sentinel: max drift
+            ssim_global=0.0,
+            ssim_tile_min=0.0,
+            digits_match=False,
+            color_preserved=False,
         )
     else:
         output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
@@ -696,6 +696,8 @@ def compress(
     ssim_floor = 0.92
 
     warnings_list: list[str] = []
+    if options.skip_verify:
+        warnings_list.append("verifier-skipped")
     if shutil.which("jbig2") is None:
         warnings_list.append("jbig2enc-unavailable-using-flate-fallback")
 
@@ -935,7 +937,9 @@ def compress(
         ratio=len(input_data) / max(1, len(output_bytes)),
     )
 
-    verifier_result = verifier_agg.result()
+    verifier_result = (
+        verifier_agg.skipped_result() if options.skip_verify else verifier_agg.result()
+    )
     if verifier_result.status == "fail":
         if options.mode != "fast" and not options.accept_drift:
             summary = verifier_agg.failure_summary()
