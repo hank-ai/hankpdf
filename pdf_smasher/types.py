@@ -146,7 +146,11 @@ class ProgressEvent:
     ratio: float | None = None  # for page_done: true per-page file ratio
     input_bytes: int | None = None  # for page_done: this page's size in the input PDF
     output_bytes: int | None = None  # for page_done: this page's size in the output PDF
-    verifier_passed: bool | None = None  # for page_done
+    # page_done only. Tri-state: True (pass), False (fail), None
+    # (verifier did not run — skip_verify was set OR this phase doesn't
+    # emit a verifier outcome). Callers keying on "pass unless False"
+    # must also handle None as "no verification happened here".
+    verifier_passed: bool | None = None
 
 
 @dataclass(frozen=True)

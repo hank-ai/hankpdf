@@ -747,19 +747,29 @@ def compress(
         verifier_agg.merge(result.page_index, result.verdict)
         strategy_counts[result.strategy_name] += 1
         _worker_wall_ms_total.append(result.worker_wall_ms)
+        # Under skip_verify the worker synthesizes a trivially-passing
+        # verdict so it can still be aggregated; don't let that leak
+        # into the progress event as "verifier=pass". Emit None (tri-
+        # state) and surface "skipped" in the human-readable message.
+        if options.skip_verify:
+            v_passed: bool | None = None
+            v_label = "skipped"
+        else:
+            v_passed = result.verdict.passed
+            v_label = "pass" if result.verdict.passed else "fail"
         _emit(
             "page_done",
             f"page {result.page_index + 1}/{tri.pages} done: strategy={result.strategy_name}, "
             f"{result.input_bytes:,}→{result.output_bytes:,} bytes "
             f"({result.ratio:.2f}x), worker={result.worker_wall_ms}ms, "
-            f"verifier={'pass' if result.verdict.passed else 'fail'}",
+            f"verifier={v_label}",
             current=pos,
             total=len(_selected_indices),
             strategy=result.strategy_name,
             ratio=result.ratio,
             input_bytes=result.input_bytes,
             output_bytes=result.output_bytes,
-            verifier_passed=result.verdict.passed,
+            verifier_passed=v_passed,
         )
 
     # Build worker inputs once.

@@ -771,7 +771,15 @@ def main(argv: list[str] | None = None) -> int:
         elif event.phase == "page_start" and _bar is not None:
             _bar.set_postfix_str(f"rasterizing p{event.current}")
         elif event.phase == "page_done" and _bar is not None:
-            tag = "pass" if event.verifier_passed else "FAIL"
+            # Tri-state: True=pass, False=fail, None=verifier didn't run
+            # (skip_verify). Surface each distinctly — don't collapse
+            # None into "FAIL" since nothing was actually verified.
+            if event.verifier_passed is True:
+                tag = "pass"
+            elif event.verifier_passed is False:
+                tag = "FAIL"
+            else:
+                tag = "skip"
             ratio_str = f"{event.ratio:.2f}x" if event.ratio else "?x"
             byte_str = (
                 f"{event.input_bytes // 1024}→{event.output_bytes // 1024}KB"

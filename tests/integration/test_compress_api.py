@@ -169,3 +169,25 @@ def test_compress_verify_true_reports_real_status() -> None:
         f"expected pass|fail, got {report.verifier.status}"
     )
     assert not any(w == "verifier-skipped" for w in report.warnings)
+
+
+def test_progress_event_verifier_passed_is_none_when_skipped() -> None:
+    """Regression: when skip_verify=True the worker synthesizes a
+    trivially-passing verdict, which used to bubble up to the progress
+    event as verifier_passed=True — misleading since nothing was
+    verified. With skip_verify the event must emit None (or the tri-
+    state 'skipped' conceptually)."""
+    pdf_in = _make_fake_scan(["HELLO"])
+    events = []
+
+    def grab(event):  # type: ignore[no-untyped-def]
+        events.append(event)
+
+    compress(pdf_in, options=CompressOptions(skip_verify=True), progress_callback=grab)
+    page_done = [e for e in events if e.phase == "page_done"]
+    assert page_done, "expected at least one page_done event"
+    for e in page_done:
+        assert e.verifier_passed is None, (
+            f"expected verifier_passed=None under skip_verify, got "
+            f"{e.verifier_passed!r}"
+        )
