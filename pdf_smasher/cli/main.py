@@ -860,6 +860,19 @@ def main(argv: list[str] | None = None) -> int:
             chunks = split_pdf_by_size(output_bytes, max_bytes=max_bytes)
             if len(chunks) == 1:
                 args.output.write_bytes(chunks[0])
+                # Oversize check even on the single-chunk path. This
+                # happens when the splitter can't go below the cap
+                # (e.g., a single page is already larger than max_bytes)
+                # — same condition the multi-chunk branch warns about.
+                if len(chunks[0]) > max_bytes and not args.quiet:
+                    print(
+                        "[hankpdf] warning: output exceeds --max-output-mb "
+                        f"cap ({len(chunks[0]) / (1024 * 1024):.2f} MB > "
+                        f"{args.max_output_mb:.3f} MB). Single-page PDFs "
+                        "cannot be split further; the oversize output was "
+                        "retained.",
+                        file=sys.stderr,
+                    )
             else:
                 base = args.output.stem
                 ext = args.output.suffix

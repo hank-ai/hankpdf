@@ -142,6 +142,33 @@ def test_chunk_pad_width_scales_beyond_999(tmp_path, monkeypatch) -> None:  # ty
 
 
 @pytest.mark.integration
+def test_single_chunk_oversize_warns(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """When --max-output-mb is smaller than the compressed single page,
+    the splitter returns 1 chunk but that chunk still exceeds the cap.
+    The multi-chunk branch already warns about oversize chunks; the
+    single-chunk branch silently honored neither the cap nor the
+    warning. DCR Wave 2 flagged this — add a stderr warning."""
+    in_path = _make_big_pdf(tmp_path, n_pages=1)
+    out_path = tmp_path / "smol.pdf"
+    # 0.001 MB = 1024 bytes. A compressed single page is ~15 KB, so the
+    # single chunk will exceed the cap.
+    rc = main([
+        str(in_path),
+        "-o", str(out_path),
+        "--max-output-mb", "0.001",
+        "--accept-drift",
+    ])
+    assert rc == 0, f"expected EXIT_OK=0, got {rc}"
+    err = capsys.readouterr().err
+    assert "--max-output-mb" in err, (
+        f"expected --max-output-mb in warning; got: {err!r}"
+    )
+    assert "exceed" in err.lower() or "over" in err.lower(), (
+        f"expected 'exceed' or 'over' in warning; got: {err!r}"
+    )
+
+
+@pytest.mark.integration
 def test_empty_pages_spec_on_pdf_returns_usage_exit(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
     """Empty --pages in PDF output mode must return EXIT_USAGE=40,
     matching the image-export path. Previously this reached compress()
