@@ -33,4 +33,18 @@ Takes oversized scanned PDFs (typical input: 200-page, 800 MB image scans) and p
 
 ## License
 
-Apache-2.0 (see `LICENSE` — TBD, tracked in roadmap Phase 0).
+HankPDF is licensed under **Apache-2.0** ([LICENSE](LICENSE)).
+
+### Commercial use
+
+HankPDF is **cleared for commercial use**. The dependency tree was chosen
+specifically to avoid the commercial-licensing blockers common in PDF/OCR
+tooling (Ghostscript AGPL, Poppler GPL, ABBYY/Nuance per-seat licensing).
+
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the full
+dependency audit — every Python package, native binary, and transitive
+system library with its SPDX identifier and commercial-use status. That
+file is the canonical reference for any licensing question; re-audit
+before every release.
+
+Attribution for bundled/runtime third-party code is in [NOTICE](NOTICE).
