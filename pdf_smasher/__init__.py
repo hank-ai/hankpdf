@@ -17,7 +17,12 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+)
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import IO, Any, Literal
 
 import pikepdf
@@ -36,8 +41,11 @@ from pdf_smasher.exceptions import (
     EncryptedPDFError,
     EnvironmentError,  # noqa: A004 — part of our public error hierarchy
     MaliciousPDFError,
+    OcrTimeoutError,
     OversizeError,
+    PerPageTimeoutError,
     SignedPDFError,
+    TotalTimeoutError,
 )
 from pdf_smasher.types import (
     CompressOptions,
@@ -59,9 +67,12 @@ __all__ = [
     "EncryptedPDFError",
     "EnvironmentError",
     "MaliciousPDFError",
+    "OcrTimeoutError",
     "OversizeError",
+    "PerPageTimeoutError",
     "ProgressEvent",
     "SignedPDFError",
+    "TotalTimeoutError",
     "TriageReport",
     "VerifierResult",
     "__version__",
@@ -978,8 +989,19 @@ def compress(
             }
             # `as_completed` iterates in completion order. `_pos` is 1-indexed
             # completion position, which is what tqdm wants for the progress bar.
+            # Per-page timeout: we wait at most per_page_timeout_seconds * n_pages
+            # for ALL futures to complete (a proxy for strict per-page — true
+            # per-page is impossible with as_completed since workers start
+            # together). If the total budget expires, we cancel and raise
+            # PerPageTimeoutError naming the laggards.
+            _per_page_budget = options.per_page_timeout_seconds
+            _parallel_total_budget = _per_page_budget * max(1, len(winputs))
             try:
-                for _pos, fut in enumerate(as_completed(future_to_winput), start=1):
+                _completed_iter = as_completed(
+                    future_to_winput,
+                    timeout=_parallel_total_budget,
+                )
+                for _pos, fut in enumerate(_completed_iter, start=1):
                     w = future_to_winput[fut]
                     try:
                         result = fut.result()
@@ -994,28 +1016,65 @@ def compress(
                         msg = _page_error_context(w.page_index, e)
                         raise CompressError(msg) from e
                     _merge_result(_pos, result)
+            except FuturesTimeoutError as e:
+                ex.shutdown(wait=False, cancel_futures=True)
+                _pending = [
+                    fw.page_index + 1
+                    for fut, fw in future_to_winput.items()
+                    if not fut.done()
+                ]
+                _pending_display = _format_verifier_failing_pages(
+                    tuple(_pending),
+                    limit=10,
+                )
+                msg = (
+                    f"per-page timeout ({_per_page_budget}s x {len(winputs)} pages) "
+                    f"exceeded; {len(_pending)} page(s) still pending: "
+                    f"{_pending_display}"
+                )
+                raise PerPageTimeoutError(msg) from e
             except BaseException:  # pragma: no cover — cancellation path
                 ex.shutdown(wait=False, cancel_futures=True)
                 raise
     else:
-        for _pos, w in enumerate(winputs, start=1):
-            _emit(
-                "page_start",
-                f"page {w.page_index + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
-                current=_pos,
-                total=len(winputs),
-            )
-            try:
-                result = _process_single_page(w)
-            except KeyboardInterrupt:
-                page_pdfs_by_index.clear()
-                raise
-            except AssertionError, CompressError:
-                raise
-            except Exception as e:
-                msg = _page_error_context(w.page_index, e)
-                raise CompressError(msg) from e
-            _merge_result(_pos, result)
+        # Serial path: dispatch each page through a 1-worker ThreadPoolExecutor
+        # so we can enforce per_page_timeout_seconds via future.result(timeout=).
+        # The thread still runs in this process (no IPC overhead). Pytesseract's
+        # own timeout kwarg kills the Tesseract subprocess on overrun, so the
+        # thread unblocks — the future-level timeout is belt-and-suspenders for
+        # non-Tesseract hangs (numpy/opencv loops without GIL release).
+        _per_page_budget = options.per_page_timeout_seconds
+        with ThreadPoolExecutor(max_workers=1) as _serial_ex:
+            for _pos, w in enumerate(winputs, start=1):
+                _emit(
+                    "page_start",
+                    f"page {w.page_index + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
+                    current=_pos,
+                    total=len(winputs),
+                )
+                _fut = _serial_ex.submit(_process_single_page, w)
+                try:
+                    result = _fut.result(timeout=_per_page_budget)
+                except FuturesTimeoutError as e:
+                    # Cancel the executor before raising so the zombie thread
+                    # doesn't keep consuming CPU. The Tesseract subprocess was
+                    # already killed by pytesseract's timeout (which is <=
+                    # this budget), so the thread unblocks soon.
+                    _serial_ex.shutdown(wait=False, cancel_futures=True)
+                    msg = (
+                        f"page {w.page_index + 1}/{tri.pages} exceeded "
+                        f"per_page_timeout_seconds={_per_page_budget}"
+                    )
+                    raise PerPageTimeoutError(msg) from e
+                except KeyboardInterrupt:
+                    page_pdfs_by_index.clear()
+                    raise
+                except AssertionError, CompressError:
+                    raise
+                except Exception as e:
+                    msg = _page_error_context(w.page_index, e)
+                    raise CompressError(msg) from e
+                _merge_result(_pos, result)
 
     # Parallelism diagnostic. Compare the sum of per-worker wall times to
     # the pages-phase wall time. If workers truly parallelize, the sum is

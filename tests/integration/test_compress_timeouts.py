@@ -26,6 +26,51 @@ def _make_pdf(n: int = 1, with_payload: bool = False) -> bytes:
     return buf.getvalue()
 
 
+# ---------- per_page_timeout_seconds (W3-13c) ----------
+
+
+@pytest.mark.integration
+def test_per_page_timeout_raises_typed_error() -> None:
+    """A worker that exceeds ``per_page_timeout_seconds`` must surface
+    as ``PerPageTimeoutError``, not a generic ``CompressError``.
+
+    Exercise via the serial path with max_workers=1 — the parallel path
+    uses the same ``future.result(timeout=)`` guard but the serial path
+    needs equivalent protection too (see implementation).
+    """
+    import time as _time
+    from unittest.mock import patch
+
+    from pdf_smasher import CompressOptions, compress
+    from pdf_smasher.exceptions import PerPageTimeoutError
+
+    pdf = _make_pdf(1)
+
+    # Monkeypatch _process_single_page to sleep longer than the budget.
+    # This exercises the wrapper's timeout path without actually wedging
+    # a Tesseract subprocess.
+    import pdf_smasher as _pkg
+
+    _unreachable_msg = "should never reach here"
+
+    def _slow_worker(_w: object) -> object:
+        _time.sleep(2)
+        raise AssertionError(_unreachable_msg)
+
+    opts = CompressOptions(
+        max_workers=1,
+        per_page_timeout_seconds=1,  # 1 second — the sleep is 2 seconds
+        skip_verify=True,
+        accept_drift=True,
+        min_ratio=0.0,  # disable the ratio gate so we reach the per-page loop
+    )
+    with (
+        patch.object(_pkg, "_process_single_page", _slow_worker),
+        pytest.raises(PerPageTimeoutError),
+    ):
+        compress(pdf, options=opts)
+
+
 # ---------- min_ratio (W3-13b) ----------
 
 
