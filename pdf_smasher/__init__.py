@@ -676,24 +676,75 @@ def compress(
         return f"compression failed on page {page_index + 1}/{tri.pages}: {exc}"
 
     if use_pool:
-        # Pick executor by env knob. Default = threads (zero spawn cost; our
-        # CPU-heavy work is in tesseract+jbig2 subprocesses and native numpy /
-        # OpenCV / Pillow ops that all release the GIL). Set HANKPDF_POOL=process
-        # for a multiprocessing pool if your workload is pure-Python-bound.
-        _pool_kind = os.environ.get("HANKPDF_POOL", "thread").lower()
-        _init_worker()  # pin OMP/BLAS to 1 for the whole process tree
-        executor_cls = ProcessPoolExecutor if _pool_kind == "process" else ThreadPoolExecutor
+        # Executor choice:
+        #   - pdfium is NOT thread-safe (pypdfium2 #303); threads crash
+        #     with heap corruption under concurrent access. So threads
+        #     are off the table as a default.
+        #   - macOS's `spawn` start method makes every worker re-import
+        #     numpy/OpenCV/pikepdf from scratch (~2–3 s each). On small
+        #     jobs the spawn cost dominates actual compute and
+        #     parallelism looks like a regression.
+        #   - `forkserver` starts ONE small server process up front and
+        #     forks workers from it on demand. With `set_forkserver_preload`
+        #     our heavy modules are imported ONCE in the server, so every
+        #     worker fork is ~10–50 ms. Safer than raw `fork` (no
+        #     fork-after-threads hazard) and much faster than pure spawn.
+        #   - Windows has no forkserver — falls back to spawn there.
+        #
+        # Escape hatch: HANKPDF_POOL=thread opts into ThreadPoolExecutor
+        # (faster on toy cases but liable to crash on pdfium access).
+        import multiprocessing as _mp
+
+        _pool_kind = os.environ.get("HANKPDF_POOL", "process").lower()
+        _init_worker()  # also pin parent's OMP/BLAS for consistency
+        _ex_kwargs: dict[str, Any] = {"max_workers": n_workers}
+        if _pool_kind == "thread":
+            executor_cls: type = ThreadPoolExecutor
+            label = "thread (UNSAFE: pdfium not thread-safe, may crash)"
+        else:
+            executor_cls = ProcessPoolExecutor
+            _ex_kwargs["initializer"] = _init_worker
+            available = _mp.get_all_start_methods()
+            chosen_method = "forkserver" if "forkserver" in available else "spawn"
+            ctx = _mp.get_context(chosen_method)
+            if chosen_method == "forkserver":
+                try:
+                    ctx.set_forkserver_preload([
+                        "numpy",
+                        "PIL",
+                        "PIL.Image",
+                        "cv2",
+                        "pikepdf",
+                        "pypdfium2",
+                        "pytesseract",
+                        "skimage",
+                        "skimage.metrics",
+                        "pdf_smasher.engine.rasterize",
+                        "pdf_smasher.engine.ocr",
+                        "pdf_smasher.engine.mask",
+                        "pdf_smasher.engine.strategy",
+                        "pdf_smasher.engine.compose",
+                        "pdf_smasher.engine.foreground",
+                        "pdf_smasher.engine.text_layer",
+                        "pdf_smasher.engine.verifier",
+                        "pdf_smasher.engine.background",
+                    ])
+                except (ValueError, RuntimeError):  # pragma: no cover
+                    # set_forkserver_preload can reject modules that
+                    # instantiate mp objects at import time; if that
+                    # happens we just skip preloading (slower first run,
+                    # still correct).
+                    pass
+            _ex_kwargs["mp_context"] = ctx
+            label = f"process/{chosen_method}"
         _emit(
             "triage",
-            f"parallel dispatch: {n_workers} {_pool_kind} workers x {len(winputs)} pages",
+            f"parallel dispatch: {n_workers} workers ({label}) x {len(winputs)} pages",
             total=len(winputs),
         )
-        # In the parallel path we DO NOT emit per-page page_start events —
+        # In the parallel path we do NOT emit per-page page_start events —
         # workers all start simultaneously so the "rasterizing pN" label
         # doesn't mean anything. Only page_done fires (from completion order).
-        _ex_kwargs: dict[str, Any] = {"max_workers": n_workers}
-        if _pool_kind == "process":
-            _ex_kwargs["initializer"] = _init_worker
         with executor_cls(**_ex_kwargs) as ex:
             future_to_winput: dict[Any, _WorkerInput] = {
                 ex.submit(_process_single_page, w): w for w in winputs
