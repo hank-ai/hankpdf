@@ -7,7 +7,7 @@ the source of truth; any change here is a public-API change.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Mapping
 
 Mode = Literal["fast", "standard", "safe"]
 Engine = Literal["mrc", "downsample-only"]
@@ -53,6 +53,7 @@ class CompressOptions:
     max_input_mb: float = 2000.0
     per_page_timeout_seconds: int = 120
     total_timeout_seconds: int = 1200
+    photo_target_dpi: int = 200  # DPI for PHOTO_ONLY pages
 
     # Output
     emit_sidecar_manifest: bool = True
@@ -114,3 +115,4 @@ class CompressReport:
     strips: tuple[str, ...] = ()
     reason: str | None = None
     schema_version: int = field(default=1)
+    strategy_distribution: Mapping[str, int] = field(default_factory=dict)
