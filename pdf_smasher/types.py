@@ -70,6 +70,7 @@ class VerifierResult:
     digit_multiset_match: bool
     structural_match: bool
     failing_pages: tuple[int, ...] = ()
+    color_preserved: bool = True
 
 
 @dataclass(frozen=True)

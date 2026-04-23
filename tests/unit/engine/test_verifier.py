@@ -174,3 +174,98 @@ def test_tile_ssim_blank_pages_returns_1() -> None:
     blank = Image.new("L", (300, 300), color=255)
     result = tile_ssim_min(blank, blank, tile_size=50)
     assert result == 1.0, f"identical blank pages must score 1.0, got {result!r}"
+
+
+# ---------- threshold constants ----------
+
+
+def test_verifier_default_ssim_floor_matches_arch() -> None:
+    """ARCHITECTURE.md §5 (table): global SSIM >=0.92 in BOTH modes."""
+    from pdf_smasher.engine.verifier import _DEFAULT_SSIM_FLOOR
+
+    assert _DEFAULT_SSIM_FLOOR == 0.92
+
+
+def test_verifier_tile_ssim_floors() -> None:
+    """ARCHITECTURE.md §5 (table): tile-min SSIM >=0.85 standard, >=0.88 safe."""
+    from pdf_smasher.engine.verifier import (
+        _DEFAULT_TILE_SSIM_FLOOR_SAFE,
+        _DEFAULT_TILE_SSIM_FLOOR_STANDARD,
+    )
+
+    assert _DEFAULT_TILE_SSIM_FLOOR_STANDARD == 0.85
+    assert _DEFAULT_TILE_SSIM_FLOOR_SAFE == 0.88
+
+
+def test_verifier_lev_ceilings() -> None:
+    """ARCHITECTURE.md §5 (table): raw Levenshtein <=0.05 standard, <=0.02 safe."""
+    from pdf_smasher.engine.verifier import (
+        _DEFAULT_LEVENSHTEIN_CEILING_SAFE,
+        _DEFAULT_LEVENSHTEIN_CEILING_STANDARD,
+    )
+
+    assert _DEFAULT_LEVENSHTEIN_CEILING_STANDARD == 0.05
+    assert _DEFAULT_LEVENSHTEIN_CEILING_SAFE == 0.02
+
+
+# ---------- _VerifierAggregator ----------
+
+
+def test_verifier_aggregator_propagates_color_loss() -> None:
+    """_VerifierAggregator.result() must propagate color_preserved=False
+    from a single failing page even when all other pages pass."""
+    from pdf_smasher.engine.verifier import PageVerdict, _VerifierAggregator
+
+    agg = _VerifierAggregator()
+    for i in range(2):
+        agg.merge(
+            i,
+            PageVerdict(
+                page_index=i,
+                passed=True,
+                lev=0.0,
+                ssim_global=0.95,
+                ssim_tile_min=0.90,
+                digits_match=True,
+                color_preserved=True,
+            ),
+        )
+    agg.merge(
+        2,
+        PageVerdict(
+            page_index=2,
+            passed=False,
+            lev=0.0,
+            ssim_global=0.93,
+            ssim_tile_min=0.87,
+            digits_match=True,
+            color_preserved=False,
+        ),
+    )
+    result = agg.result()
+    assert result.status == "fail"
+    assert result.color_preserved is False
+    assert 2 in result.failing_pages
+
+
+def test_verifier_aggregator_all_pass_returns_ok() -> None:
+    from pdf_smasher.engine.verifier import PageVerdict, _VerifierAggregator
+
+    agg = _VerifierAggregator()
+    for i in range(3):
+        agg.merge(
+            i,
+            PageVerdict(
+                page_index=i,
+                passed=True,
+                lev=0.01,
+                ssim_global=0.95,
+                ssim_tile_min=0.88,
+                digits_match=True,
+                color_preserved=True,
+            ),
+        )
+    result = agg.result()
+    assert result.status == "pass"
+    assert result.color_preserved is True
+    assert result.failing_pages == ()

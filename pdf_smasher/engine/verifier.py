@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -29,8 +30,18 @@ from pdf_smasher.types import VerifierResult
 
 _DIGIT_RUN_RE = re.compile(r"\d+(?:[.,]\d+)?(?:\s*(?:mg|mcg|mL|IU|ng|g|kg|lb|oz|%))?")
 
-_DEFAULT_LEVENSHTEIN_CEILING = 0.02
-_DEFAULT_SSIM_FLOOR = 0.92
+_DEFAULT_SSIM_FLOOR = 0.92                     # ARCH §5 global, both modes
+_DEFAULT_TILE_SSIM_FLOOR_STANDARD = 0.85       # ARCH §5 tile, standard
+_DEFAULT_TILE_SSIM_FLOOR_SAFE = 0.88           # ARCH §5 tile, safe
+_DEFAULT_LEVENSHTEIN_CEILING_STANDARD = 0.05   # ARCH §5 raw Lev, standard
+_DEFAULT_LEVENSHTEIN_CEILING_SAFE = 0.02       # ARCH §5 raw Lev, safe
+
+# SHARED CHANNEL-SPREAD TOLERANCE.
+# Both the verifier's channel-parity check AND foreground.is_effectively_monochrome
+# import this constant. If they disagree on "what counts as color", a page can route
+# to TEXT_ONLY by the mono detector and then pass the verifier — resulting in silent
+# color loss. Raised to 15 to defeat JPEG ringing halos (spread 5-12) around glyphs.
+CHANNEL_SPREAD_COLOR_TOLERANCE = 15
 
 
 def levenshtein_ratio(a: str, b: str) -> float:
@@ -80,6 +91,112 @@ def ssim_score(a: Image.Image, b: Image.Image) -> float:
     return float(score)
 
 
+def _page_has_color(raster: Image.Image) -> bool:
+    """Return True if >0.5% of pixels have RGB channel spread > tolerance.
+
+    Task 0.2 version — uses 0.5% threshold to defeat JPEG ringing halos.
+    Task 0.3 replaces this body with a 0.1% + connected-component check.
+    """
+    if raster.mode in {"L", "1"}:
+        return False
+    arr = np.asarray(raster.convert("RGB"), dtype=np.int16)
+    spread = arr.max(axis=-1) - arr.min(axis=-1)
+    color_frac = float((spread > CHANNEL_SPREAD_COLOR_TOLERANCE).sum()) / spread.size
+    return color_frac > 0.005
+
+
+@dataclass(frozen=True)
+class PageVerdict:
+    """Per-page verifier outcome. Aggregator in compress() merges these."""
+
+    page_index: int
+    passed: bool
+    lev: float
+    ssim_global: float
+    ssim_tile_min: float
+    digits_match: bool
+    color_preserved: bool
+
+
+def verify_single_page(
+    *,
+    input_raster: Image.Image,
+    output_raster: Image.Image,
+    input_ocr_text: str,
+    output_ocr_text: str,
+    lev_ceiling: float,
+    ssim_floor: float,
+    tile_ssim_floor: float,
+    check_color_preserved: bool = True,
+) -> PageVerdict:
+    """Run all verifier checks on a single page. Pure, no I/O, no accumulation.
+
+    ``check_color_preserved=False`` disables the channel-parity check for
+    callers that have explicitly opted into color loss (e.g., force_monochrome).
+    """
+    lev = levenshtein_ratio(input_ocr_text, output_ocr_text)
+    digits_match = digit_multiset_match(input_ocr_text, output_ocr_text)
+    global_score = ssim_score(input_raster, output_raster)
+    tile_score = tile_ssim_min(input_raster, output_raster, tile_size=50)
+    if check_color_preserved:
+        in_color = _page_has_color(input_raster)
+        out_color = _page_has_color(output_raster)
+        color_preserved = not (in_color and not out_color)
+    else:
+        color_preserved = True
+    passed = (
+        lev <= lev_ceiling
+        and digits_match
+        and global_score >= ssim_floor
+        and tile_score >= tile_ssim_floor
+        and color_preserved
+    )
+    return PageVerdict(
+        page_index=-1,  # filled in by caller
+        passed=passed,
+        lev=lev,
+        ssim_global=global_score,
+        ssim_tile_min=tile_score,
+        digits_match=digits_match,
+        color_preserved=color_preserved,
+    )
+
+
+class _VerifierAggregator:
+    """Streaming per-page verdict accumulator. Holds only O(1) scalars."""
+
+    def __init__(self) -> None:
+        self._worst_lev: float = 0.0
+        self._min_ssim_global: float = 1.0
+        self._min_ssim_tile: float = 1.0
+        self._any_digit_mismatch: bool = False
+        self._color_preserved: bool = True
+        self._failing_pages: list[int] = []
+
+    def merge(self, page_idx: int, verdict: PageVerdict) -> None:
+        self._worst_lev = max(self._worst_lev, verdict.lev)
+        self._min_ssim_global = min(self._min_ssim_global, verdict.ssim_global)
+        self._min_ssim_tile = min(self._min_ssim_tile, verdict.ssim_tile_min)
+        if not verdict.digits_match:
+            self._any_digit_mismatch = True
+        if not verdict.color_preserved:
+            self._color_preserved = False
+        if not verdict.passed:
+            self._failing_pages.append(page_idx)
+
+    def result(self) -> VerifierResult:
+        return VerifierResult(
+            status="pass" if not self._failing_pages else "fail",
+            ocr_levenshtein=self._worst_lev,
+            ssim_global=self._min_ssim_global,
+            ssim_min_tile=self._min_ssim_tile,
+            digit_multiset_match=not self._any_digit_mismatch,
+            structural_match=True,
+            color_preserved=self._color_preserved,
+            failing_pages=tuple(self._failing_pages),
+        )
+
+
 def tile_ssim_min(
     a: Image.Image,
     b: Image.Image,
@@ -123,13 +240,14 @@ def verify_pages(
     output_rasters: Sequence[Image.Image],
     input_ocr_texts: Sequence[str],
     output_ocr_texts: Sequence[str],
-    levenshtein_ceiling: float = _DEFAULT_LEVENSHTEIN_CEILING,
+    levenshtein_ceiling: float = _DEFAULT_LEVENSHTEIN_CEILING_STANDARD,
     ssim_floor: float = _DEFAULT_SSIM_FLOOR,
+    tile_ssim_floor: float = _DEFAULT_TILE_SSIM_FLOOR_STANDARD,
 ) -> VerifierResult:
-    """Run all three checks per page. Return a summary :class:`VerifierResult`.
+    """Run all verifier checks per page. Return a summary :class:`VerifierResult`.
 
-    Gate: a page passes iff Levenshtein ≤ ceiling AND digit multisets match
-    AND SSIM ≥ floor. Overall status is ``"pass"`` iff every page passes.
+    Thin wrapper around ``verify_single_page`` + ``_VerifierAggregator``.
+    Overall status is ``"pass"`` iff every page passes all gates.
     """
     if not (
         len(input_rasters) == len(output_rasters) == len(input_ocr_texts) == len(output_ocr_texts)
@@ -137,37 +255,18 @@ def verify_pages(
         msg = "verifier: all input sequences must have the same length"
         raise ValueError(msg)
 
-    worst_lev = 0.0
-    min_ssim_global = 1.0
-    min_ssim_tile = 1.0
-    all_digit_match = True
-    failing_pages: list[int] = []
-
+    agg = _VerifierAggregator()
     for i, (in_r, out_r, in_t, out_t) in enumerate(
         zip(input_rasters, output_rasters, input_ocr_texts, output_ocr_texts, strict=True),
     ):
-        lev = levenshtein_ratio(in_t, out_t)
-        worst_lev = max(worst_lev, lev)
-        digits_ok = digit_multiset_match(in_t, out_t)
-        if not digits_ok:
-            all_digit_match = False
-        score = ssim_score(in_r, out_r)
-        if score < min_ssim_global:
-            min_ssim_global = score
-        tile_score = tile_ssim_min(in_r, out_r, tile_size=50)
-        if tile_score < min_ssim_tile:
-            min_ssim_tile = tile_score
-
-        if lev > levenshtein_ceiling or not digits_ok or score < ssim_floor:
-            failing_pages.append(i)
-
-    status: Literal["pass", "fail"] = "pass" if not failing_pages else "fail"
-    return VerifierResult(
-        status=status,
-        ocr_levenshtein=worst_lev,
-        ssim_global=min_ssim_global,
-        ssim_min_tile=min_ssim_tile,
-        digit_multiset_match=all_digit_match,
-        structural_match=True,  # populated by structural audit separately
-        failing_pages=tuple(failing_pages),
-    )
+        verdict = verify_single_page(
+            input_raster=in_r,
+            output_raster=out_r,
+            input_ocr_text=in_t,
+            output_ocr_text=out_t,
+            lev_ceiling=levenshtein_ceiling,
+            ssim_floor=ssim_floor,
+            tile_ssim_floor=tile_ssim_floor,
+        )
+        agg.merge(i, verdict)
+    return agg.result()
