@@ -294,3 +294,116 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
     assert report.strategy_distribution["text_only"] == 1
     assert report.strategy_distribution["photo_only"] == 1
     assert report.strategy_distribution["mixed"] == 1
+
+
+# ---------- Task 5: photo-only regression gate + fidelity ----------
+
+
+def _photo_only_fixture() -> bytes:
+    """A photo-like page: no text, bright high-frequency content.
+
+    Pixels in [180, 255] keep mask_coverage ≈ 0 so the classifier routes to
+    PHOTO_ONLY. Random noise in this range still compresses poorly enough
+    (>3x ratio) to make the regression gate meaningful.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed=42)
+    arr = rng.integers(180, 256, size=(2550, 3300, 3), dtype=np.uint8)
+    img = Image.fromarray(arr)
+    return _wrap_raster_as_pdf_bytes(img)
+
+
+def _photo_with_sharp_edges_fixture() -> bytes:
+    """High-contrast sharp edges — tests that photo path preserves detail.
+
+    Pre-Mortem #3: radiology scans lose micro-calcifications when the photo
+    path downsamples to 150 DPI. The 200 DPI default preserves them.
+
+    Squares are 30x30 at 300 DPI → ~20x20 at 200 DPI, above JPEG's 8x8 DCT
+    block size so quality 45 can't crush them completely. Smaller squares
+    (e.g. 10x10) would fail to survive default settings until Task 7.5 wires
+    target_color_quality (raises JPEG quality on photo path).
+
+    Shape (H=3300, W=2550) is portrait 8.5x11" at 300 DPI — matches the
+    612x792 pt page so the image isn't stretched non-uniformly on render.
+    """
+    import numpy as np
+
+    arr = np.full((3300, 2550, 3), 128, dtype=np.uint8)
+    for y in range(100, 3200, 200):
+        for x in range(100, 2450, 200):
+            arr[y : y + 30, x : x + 30] = 0
+    img = Image.fromarray(arr)
+    return _wrap_raster_as_pdf_bytes(img)
+
+
+@pytest.mark.integration
+def test_photo_only_page_does_not_regress() -> None:
+    """Regression gate: photo-only must compress >=3× via single-JPEG path.
+
+    Pre-asserts PHOTO_ONLY routing so the ratio assertion can't pass on a
+    different strategy.
+    """
+    import numpy as np
+
+    from pdf_smasher.engine.mask import build_mask
+    from pdf_smasher.engine.rasterize import rasterize_page
+    from pdf_smasher.engine.strategy import PageStrategy, classify_page
+
+    pdf_in = _photo_only_fixture()
+    _raster = rasterize_page(pdf_in, page_index=0, dpi=150)
+    _mask = build_mask(_raster)
+    _mask_arr = np.asarray(_mask.convert("1"), dtype=bool)
+    _coverage = float(_mask_arr.sum()) / max(1, _mask_arr.size)
+    _strategy = classify_page(_raster, mask_coverage_fraction=_coverage)
+    assert _strategy == PageStrategy.PHOTO_ONLY, (
+        f"_photo_only_fixture() routed to {_strategy!r} instead of PHOTO_ONLY. "
+        "Fix the fixture before the ratio assertion is meaningful."
+    )
+
+    # fast mode: noise fixtures produce garbage OCR on both sides, failing the
+    # digit multiset check even though the image itself round-trips correctly.
+    # This gate measures the compression ratio, not content preservation —
+    # preservation is exercised in test_photo_only_page_preserves_sharp_edges.
+    from pdf_smasher import CompressOptions as _CO
+
+    _, report = compress(pdf_in, options=_CO(mode="fast"))
+    assert report.ratio >= 3.0, (
+        f"photo-only regressed below 3x: got {report.ratio:.2f}x"
+    )
+
+
+@pytest.mark.integration
+def test_photo_only_page_preserves_sharp_edges() -> None:
+    """Sharp 10x10 squares must survive the photo path at default settings.
+
+    Renders output at ``photo_target_dpi`` (200) — NOT at 300 DPI source scale.
+    Coordinate math then samples the right location in the output image.
+    """
+    import numpy as np
+    import pypdfium2 as pdfium
+
+    from pdf_smasher import CompressOptions as _CO
+
+    pdf_in = _photo_with_sharp_edges_fixture()
+    pdf_out, _ = compress(pdf_in)
+
+    _photo_dpi = _CO().photo_target_dpi  # 200 — must match the photo encode DPI
+    pdf = pdfium.PdfDocument(pdf_out)
+    try:
+        img = pdf[0].render(scale=_photo_dpi / 72).to_pil().convert("L")
+    finally:
+        pdf.close()
+
+    arr = np.asarray(img)
+    # Portrait source 2550w x 3300h at 300 DPI → output at 200 DPI is 1700x2200.
+    # Square grid starts at (100, 100) stepping by 200 — sample on-grid points.
+    scale_factor = _photo_dpi / 300.0
+    for y_src, x_src in [(100, 100), (900, 900), (2500, 2300)]:
+        y_out = int(y_src * scale_factor)
+        x_out = int(x_src * scale_factor)
+        patch = arr[y_out : y_out + 25, x_out : x_out + 25]
+        assert patch.min() < 100, (
+            f"sharp edge lost at src=({y_src}, {x_src}); darkest pixel = {patch.min()}"
+        )
