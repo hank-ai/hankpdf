@@ -41,6 +41,8 @@ hankpdf in.pdf -o out.pdf --max-output-mb 25
 
 Chunk filenames are zero-padded, 1-indexed, and preserve page order. A single page that's already larger than the cap is emitted alone (you'll see a stderr warning).
 
+> **Scheme change in schema v2:** chunk filenames are now `{base}_{NNN}{ext}` (1-indexed, min 3-digit zero-pad). The previous scheme was `{base}_{idx}{ext}` (0-indexed, unpadded). Automation pinned to `out_0.pdf` should migrate to `out_001.pdf` or glob `out_*.pdf` with a lexical sort.
+
 **Per-page image export (JPEG, PNG, or WebP):**
 
 ```bash

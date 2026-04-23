@@ -199,11 +199,24 @@ Output:
                             exceeds this value, split into multiple files
                             named {base}_001{ext}, {base}_002{ext}, ...
                             (zero-padded, 1-indexed) preserving page order.
-                            Useful for email attachment limits. A single
-                            page that's already larger than the cap is
-                            emitted alone (see stderr warning). PDF-only;
+                            Pad width scales to max(3, len(str(total))) so
+                            1200-chunk jobs produce {base}_0001{ext} rather
+                            than a mix of 3- and 4-digit names that sort-lex
+                            wrong. Useful for email attachment limits. A
+                            single page that's already larger than the cap
+                            is emitted alone (see stderr warning). PDF-only;
                             ignored in image-export mode. Ignored with
                             -o - (stdout).
+
+                            **Scheme change (schema v2):** the chunk
+                            filename scheme changed from
+                            `{base}_{idx}{ext}` (0-indexed, unpadded) in v1
+                            to `{base}_{NNN}{ext}` (1-indexed, zero-padded
+                            to max(3, len(str(total))) digits) in v2. Sort
+                            order is now lexically stable. Automation that
+                            hardcoded `{base}_0.pdf` must update to
+                            `{base}_001.pdf` (or glob `{base}_*.pdf` and
+                            sort lexically).
 
 Engine:
   --mode {fast,standard,safe}      Default: standard.
