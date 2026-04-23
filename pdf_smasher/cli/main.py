@@ -582,16 +582,58 @@ def _run_image_export(
                 )
         else:
             total_bytes = 0
-            for page_idx, blob in zip(page_indices, pages_iter, strict=True):
-                target = parent / f"{base}_{page_idx + 1:03d}{final_ext}"
-                target.write_bytes(blob)
-                total_bytes += len(blob)
-                if not args.quiet:
+            written_paths: list[Path] = []
+            try:
+                for page_idx, blob in zip(page_indices, pages_iter, strict=True):
+                    target = parent / f"{base}_{page_idx + 1:03d}{final_ext}"
+                    target.write_bytes(blob)
+                    written_paths.append(target)
+                    total_bytes += len(blob)
+                    if not args.quiet:
+                        print(
+                            f"wrote {target.name} ({len(blob):,} bytes, "
+                            f"page {page_idx + 1})",
+                            file=sys.stderr,
+                        )
+            except MaliciousPDFError as exc:
+                print(
+                    f"[hankpdf] error: image export failed after writing "
+                    f"{len(written_paths)}/{n} pages: {exc}",
+                    file=sys.stderr,
+                )
+                if written_paths:
                     print(
-                        f"wrote {target.name} ({len(blob):,} bytes, "
-                        f"page {page_idx + 1})",
+                        "[hankpdf] wrote these before failure: "
+                        f"{[p.name for p in written_paths]}",
                         file=sys.stderr,
                     )
+                return EXIT_MALICIOUS
+            except DecompressionBombError as exc:
+                print(
+                    f"[hankpdf] error: image export failed after writing "
+                    f"{len(written_paths)}/{n} pages: {exc}",
+                    file=sys.stderr,
+                )
+                if written_paths:
+                    print(
+                        "[hankpdf] wrote these before failure: "
+                        f"{[p.name for p in written_paths]}",
+                        file=sys.stderr,
+                    )
+                return EXIT_DECOMPRESSION_BOMB
+            except (RuntimeError, CompressError) as exc:
+                print(
+                    f"[hankpdf] error: image export failed after writing "
+                    f"{len(written_paths)}/{n} pages: {exc}",
+                    file=sys.stderr,
+                )
+                if written_paths:
+                    print(
+                        "[hankpdf] wrote these before failure: "
+                        f"{[p.name for p in written_paths]}",
+                        file=sys.stderr,
+                    )
+                return EXIT_ENGINE_ERROR
             if not args.quiet:
                 print(
                     f"[hankpdf] exported {n} {image_format} pages "
@@ -807,10 +849,28 @@ def main(argv: list[str] | None = None) -> int:
                             stale.append(existing)
 
                 written_paths: list[Path] = []
-                for idx, chunk in enumerate(chunks, start=1):
-                    p = parent / f"{base}_{idx:03d}{ext}"
-                    p.write_bytes(chunk)
-                    written_paths.append(p)
+                try:
+                    for idx, chunk in enumerate(chunks, start=1):
+                        p = parent / f"{base}_{idx:03d}{ext}"
+                        p.write_bytes(chunk)
+                        written_paths.append(p)
+                except OSError as exc:
+                    # Disk full / permission / path errors mid-write.
+                    # Orphan whatever shards hit disk before the failure;
+                    # tell the operator explicitly rather than leaving a
+                    # raw OSError traceback.
+                    print(
+                        f"[hankpdf] error: chunk write failed after "
+                        f"{len(written_paths)}/{len(chunks)} chunks: {exc}",
+                        file=sys.stderr,
+                    )
+                    if written_paths:
+                        print(
+                            "[hankpdf] wrote these before failure: "
+                            f"{[p.name for p in written_paths]}",
+                            file=sys.stderr,
+                        )
+                    return EXIT_ENGINE_ERROR
                 oversize = [p for p in written_paths if p.stat().st_size > max_bytes]
                 if not args.quiet:
                     print(

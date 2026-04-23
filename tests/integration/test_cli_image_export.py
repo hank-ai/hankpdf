@@ -177,6 +177,39 @@ def test_output_format_override_corrects_extension(tmp_path) -> None:  # type: i
 
 
 @pytest.mark.integration
+def test_image_export_partial_failure_emits_summary(tmp_path, capsys, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """When page N fails mid-stream, CLI must: exit a specific code
+    (not 1, not raw traceback), emit a 'wrote K of N' stderr summary,
+    and list orphaned files so the operator can clean them up."""
+    from pdf_smasher.engine import image_export as ie
+
+    in_path = _make_pdf(tmp_path, n_pages=5)
+    out_path = tmp_path / "out.jpg"
+
+    # Monkeypatch rasterize_page to fail on page index 2 (1-indexed page 3).
+    original = ie.rasterize_page
+    def flaky(pdf_bytes, *, page_index, dpi):  # type: ignore[no-untyped-def]
+        if page_index == 2:
+            msg = "synthetic pdfium failure on page 3"
+            raise RuntimeError(msg)
+        return original(pdf_bytes, page_index=page_index, dpi=dpi)
+
+    monkeypatch.setattr(ie, "rasterize_page", flaky)
+
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc not in {0, 1}, f"expected structured non-0/1 exit code, got {rc}"
+    err = capsys.readouterr().err
+    assert "page 3" in err, f"no page context in stderr: {err!r}"
+    # pages 1 and 2 should be on disk; pages 3-5 should not be
+    p1 = tmp_path / "out_001.jpg"
+    p2 = tmp_path / "out_002.jpg"
+    p3 = tmp_path / "out_003.jpg"
+    assert p1.exists()
+    assert p2.exists()
+    assert not p3.exists()
+
+
+@pytest.mark.integration
 def test_output_format_override_corrects_extension_multipage(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Multi-page variant of the override test: 3 pages, -o out.jpg,
     --output-format webp must produce out_001.webp, out_002.webp,
