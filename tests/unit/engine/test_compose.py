@@ -238,3 +238,80 @@ def test_mrc_default_bg_color_mode_is_rgb() -> None:
     with pikepdf.open(io.BytesIO(out)) as pdf:
         bg_xobj = pdf.pages[0].Resources.XObject["/BG"]
         assert str(bg_xobj.stream_dict.get("/ColorSpace")) == "/DeviceRGB"
+
+
+# ---------- bg_codec (Task 7) ----------
+
+
+def _openjpeg_available() -> bool:
+    """Probe Pillow's JPEG2000 encoder using the SAME parameters compose uses.
+
+    Old Pillow-SIMD builds have OpenJPEG but not quality_mode='rates' — a
+    probe that only checks `format="JPEG2000"` passes, but the real encode
+    raises TypeError. Use the exact params here.
+    """
+    import io as _io
+
+    try:
+        buf = _io.BytesIO()
+        Image.new("RGB", (4, 4)).save(
+            buf, format="JPEG2000", quality_mode="rates", quality_layers=[25],
+        )
+        return True
+    except (OSError, KeyError, TypeError):
+        return False
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.skipif(
+    not _openjpeg_available(),
+    reason="Pillow build lacks OpenJPEG — bg_codec='jpeg2000' falls back to JPEG",
+)
+def test_compose_mrc_jpeg2000_bg_option() -> None:
+    """bg_codec='jpeg2000' produces a /JPXDecode-filtered background."""
+    fg = _black_blob_foreground()
+    mask = _blank_mask()
+    bg = _blank_background()
+    out = compose_mrc_page(
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_codec="jpeg2000",
+    )
+    with pikepdf.open(io.BytesIO(out)) as pdf:
+        bg_xobj = pdf.pages[0].Resources.XObject["/BG"]
+        assert str(bg_xobj.stream_dict.get("/Filter")) == "/JPXDecode"
+
+
+def test_jpeg2000_produces_smaller_bg_than_jpeg_on_paper_texture() -> None:
+    """JPEG2000 must produce a strictly smaller output than JPEG on paper
+    texture when available — otherwise the option is not worth wiring.
+    Skip (via equality fallthrough) if OpenJPEG is unavailable: compose
+    falls back to JPEG and both outputs equal by construction.
+    """
+    arr = np.full((600, 600, 3), 240, dtype=np.uint8)
+    rng = np.random.default_rng(seed=1)
+    noise = rng.integers(-15, 16, size=arr.shape, dtype=np.int16)
+    arr = np.clip(arr.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+    bg = Image.fromarray(arr)
+    fg = _black_blob_foreground()
+    mask = _blank_mask()
+
+    out_jpeg = compose_mrc_page(
+        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
+        page_width_pt=612.0, page_height_pt=792.0, bg_codec="jpeg",
+    )
+    out_jpx = compose_mrc_page(
+        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
+        page_width_pt=612.0, page_height_pt=792.0, bg_codec="jpeg2000",
+    )
+    if out_jpeg != out_jpx:
+        assert len(out_jpx) < len(out_jpeg) * 0.95, (
+            f"JPEG2000 must be >=5% smaller when available: "
+            f"jpeg={len(out_jpeg):,}, jpx={len(out_jpx):,}"
+        )

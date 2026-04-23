@@ -24,6 +24,7 @@ import zlib
 from typing import Any, Literal
 
 BgColorMode = Literal["rgb", "grayscale"]
+BgCodec = Literal["jpeg", "jpeg2000"]
 
 import pikepdf
 from PIL import Image
@@ -32,6 +33,12 @@ from pdf_smasher.engine.codecs.jbig2 import encode_1bit_jbig2
 
 _JPEG_QUALITY_BG = 45
 _JPEG_SUBSAMPLING_444 = 0  # 4:4:4 — no chroma subsampling
+
+# Calibrated against JPEG q=45 on synthetic paper texture (600x600 240-bg + ±15
+# noise): JPEG q=45 → ~16.8 KB; quality_layers=[80] (Pillow rate mode = X:1
+# compression ratio) → ~13.5 KB, ~20% smaller at visually-equivalent quality.
+# Re-calibrate via scripts/measure_ratios.py when the bg encode pipeline changes.
+_JPEG2000_QUALITY_LAYERS_DEFAULT = [80]
 
 
 def _jpeg_bytes(
@@ -49,6 +56,46 @@ def _jpeg_bytes(
         optimize=True,
     )
     return buf.getvalue()
+
+
+def _jpeg2000_bytes(
+    image: Image.Image,
+    *,
+    quality_layers: list[int] | None = None,
+) -> bytes | None:
+    """Encode as JPEG2000 via Pillow's bundled OpenJPEG. Returns None if the
+    encoder is unavailable (Pillow-SIMD / minimal Alpine wheels); callers
+    must fall back to JPEG in that case.
+    """
+    buf = io.BytesIO()
+    try:
+        image.save(
+            buf,
+            format="JPEG2000",
+            quality_mode="rates",
+            quality_layers=quality_layers or _JPEG2000_QUALITY_LAYERS_DEFAULT,
+        )
+    except (OSError, KeyError, TypeError):
+        return None
+    return buf.getvalue()
+
+
+def _encode_bg(
+    image: Image.Image,
+    *,
+    bg_codec: BgCodec,
+    jpeg_quality: int,
+    subsampling: int = _JPEG_SUBSAMPLING_444,
+) -> tuple[bytes, Any]:
+    """Return (data, pikepdf /Filter name) for the background layer.
+    Honors bg_codec='jpeg2000' but falls back to JPEG when OpenJPEG is
+    unavailable in the current Pillow build.
+    """
+    if bg_codec == "jpeg2000":
+        data = _jpeg2000_bytes(image)
+        if data is not None:
+            return data, pikepdf.Name.JPXDecode
+    return _jpeg_bytes(image, jpeg_quality, subsampling=subsampling), pikepdf.Name.DCTDecode
 
 
 def _pack_1bit_msb(mask: Image.Image) -> bytes:
@@ -125,18 +172,19 @@ def compose_mrc_page(
     page_height_pt: float,
     bg_jpeg_quality: int = _JPEG_QUALITY_BG,
     bg_color_mode: BgColorMode = "rgb",
+    bg_codec: BgCodec = "jpeg",
 ) -> bytes:
     """Build a mixed-content (MRC) PDF page: background + masked foreground."""
     pdf, page = _new_page_pdf(page_width_pt, page_height_pt)
 
-    # --- Background image XObject (JPEG) ---
+    # --- Background image XObject (JPEG or JPEG2000) ---
     if bg_color_mode == "grayscale":
         bg_prepared = background.convert("L")
         bg_color_space = pikepdf.Name.DeviceGray
     else:
         bg_prepared = background.convert("RGB")
         bg_color_space = pikepdf.Name.DeviceRGB
-    bg_data = _jpeg_bytes(bg_prepared, bg_jpeg_quality)
+    bg_data, bg_filter = _encode_bg(bg_prepared, bg_codec=bg_codec, jpeg_quality=bg_jpeg_quality)
     bg_xobj = _make_stream(
         pdf,
         data=bg_data,
@@ -146,7 +194,7 @@ def compose_mrc_page(
         Height=bg_prepared.size[1],
         ColorSpace=bg_color_space,
         BitsPerComponent=8,
-        Filter=pikepdf.Name.DCTDecode,
+        Filter=bg_filter,
     )
 
     # --- Mask XObject painted as /ImageMask — no separate foreground image ---
@@ -204,8 +252,9 @@ def compose_photo_only_page(
     jpeg_quality: int = _JPEG_QUALITY_BG,
     subsampling: int = _JPEG_SUBSAMPLING_444,
     bg_color_mode: BgColorMode = "rgb",
+    bg_codec: BgCodec = "jpeg",
 ) -> bytes:
-    """Photo-only page: single full-page JPEG. No mask, no MRC overhead."""
+    """Photo-only page: single full-page JPEG or JPEG2000. No mask."""
     pdf, page = _new_page_pdf(page_width_pt, page_height_pt)
 
     target_w = max(1, round(page_width_pt * target_dpi / 72))
@@ -216,7 +265,9 @@ def compose_photo_only_page(
     else:
         resized = raster.convert("RGB").resize((target_w, target_h), Image.Resampling.LANCZOS)
         color_space = pikepdf.Name.DeviceRGB
-    data = _jpeg_bytes(resized, jpeg_quality, subsampling=subsampling)
+    data, filter_name = _encode_bg(
+        resized, bg_codec=bg_codec, jpeg_quality=jpeg_quality, subsampling=subsampling,
+    )
     xobj = _make_stream(
         pdf,
         data=data,
@@ -226,7 +277,7 @@ def compose_photo_only_page(
         Height=resized.size[1],
         ColorSpace=color_space,
         BitsPerComponent=8,
-        Filter=pikepdf.Name.DCTDecode,
+        Filter=filter_name,
     )
     page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(IM=xobj))
     page.Contents = pdf.make_stream(

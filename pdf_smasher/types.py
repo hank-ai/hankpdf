@@ -11,6 +11,7 @@ from typing import Literal, Mapping
 
 Mode = Literal["fast", "standard", "safe"]
 Engine = Literal["mrc", "downsample-only"]
+BgCodec = Literal["jpeg", "jpeg2000"]
 ChromaSubsampling = Literal["4:4:4", "4:2:2", "4:2:0"]
 Status = Literal["ok", "passed_through", "refused", "drift_aborted"]
 VerifierStatus = Literal["pass", "fail", "skipped"]
@@ -22,6 +23,7 @@ class CompressOptions:
 
     # Engine selection
     engine: Engine = "mrc"
+    bg_codec: BgCodec = "jpeg"  # jpeg2000 is ~20% smaller on paper textures
 
     # Quality / ratio knobs
     target_bg_dpi: int = 150

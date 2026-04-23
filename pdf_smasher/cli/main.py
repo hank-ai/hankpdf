@@ -73,6 +73,15 @@ def _parser() -> argparse.ArgumentParser:
             "content is flattened. See SPEC.md §2.1."
         ),
     )
+    p.add_argument(
+        "--bg-codec",
+        choices=["jpeg", "jpeg2000"],
+        default="jpeg",
+        help=(
+            "Background codec. Default: jpeg. jpeg2000 is ~10-20%% smaller on "
+            "paper textures but adds ~1-2 s/page (demoted to jpeg in fast mode)."
+        ),
+    )
 
     # OCR
     p.add_argument("--ocr", dest="ocr", action="store_true", default=True)
@@ -104,6 +113,7 @@ def _read_password(args: argparse.Namespace) -> str | None:
 def _build_options(args: argparse.Namespace) -> CompressOptions:
     return CompressOptions(
         mode=args.mode,
+        bg_codec=args.bg_codec,
         target_bg_dpi=args.target_bg_dpi,
         target_color_quality=args.target_color_quality,
         force_monochrome=args.force_monochrome,

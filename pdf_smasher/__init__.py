@@ -71,6 +71,8 @@ def _mrc_compose(
     height_pt: float,
     bg_target_dpi: int,
     source_dpi: int,
+    *,
+    bg_codec: str = "jpeg",
 ) -> bytes:
     """MRC composition helper (Task 4a). Caller decides bg_color_mode via raster check."""
     from pdf_smasher.engine.background import extract_background
@@ -93,6 +95,7 @@ def _mrc_compose(
         page_width_pt=width_pt,
         page_height_pt=height_pt,
         bg_color_mode=bg_color_mode,
+        bg_codec=bg_codec,
     )
 
 
@@ -215,6 +218,15 @@ def compress(
     warnings_list: list[str] = []
     if shutil.which("jbig2") is None:
         warnings_list.append("jbig2enc-unavailable-using-flate-fallback")
+
+    # Fast mode forces JPEG on the bg path: JPEG2000 via Pillow/OpenJPEG is
+    # ~1-2 s/page at 300 DPI (+3-6 min on a 200-page doc). Users who asked
+    # for fast explicitly traded ratio for speed — don't silently undo that.
+    # Emit a warning so a user who set bg_codec=jpeg2000 isn't surprised.
+    effective_bg_codec = options.bg_codec
+    if options.mode == "fast" and options.bg_codec == "jpeg2000":
+        warnings_list.append("bg-codec-jpeg2000-demoted-fast-mode")
+        effective_bg_codec = "jpeg"
     verifier_agg = _VerifierAggregator()
     strategy_counts: dict[str, int] = {
         "text_only": 0, "photo_only": 0, "mixed": 0, "already_optimized": 0,
@@ -269,7 +281,10 @@ def compress(
                         )
                         strategy = PageStrategy.MIXED
                         _JBIG2_CASCADE_STATE.tripped = False
-                        composed = _mrc_compose(raster, mask, width_pt, height_pt, bg_target_dpi, source_dpi)
+                        composed = _mrc_compose(
+                            raster, mask, width_pt, height_pt, bg_target_dpi, source_dpi,
+                            bg_codec=effective_bg_codec,
+                        )
                     else:
                         fg = extract_foreground(raster, mask=mask)
                         paper = detect_paper_color(raster)
@@ -292,10 +307,14 @@ def compress(
                         page_height_pt=height_pt,
                         target_dpi=options.photo_target_dpi,
                         bg_color_mode=_photo_bg_color_mode,
+                        bg_codec=effective_bg_codec,
                     )
                 else:  # MIXED
                     _JBIG2_CASCADE_STATE.tripped = False
-                    composed = _mrc_compose(raster, mask, width_pt, height_pt, bg_target_dpi, source_dpi)
+                    composed = _mrc_compose(
+                        raster, mask, width_pt, height_pt, bg_target_dpi, source_dpi,
+                        bg_codec=effective_bg_codec,
+                    )
                     if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
                         warnings_list.append(f"page-{i + 1}-jbig2-fallback-to-flate")
 
