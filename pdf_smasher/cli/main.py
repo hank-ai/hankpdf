@@ -107,6 +107,19 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--max-pages", type=int)
     p.add_argument("--max-input-mb", type=float, default=2000.0)
     p.add_argument(
+        "--max-output-mb",
+        type=float,
+        default=None,
+        help=(
+            "Cap the output PDF size. If the compressed output exceeds this "
+            "value, split into multiple files named {base}_0{ext}, "
+            "{base}_1{ext}, ... preserving page order. Useful for email "
+            "attachment limits, archival chunk sizes, etc. A single page "
+            "that's already larger than the cap is emitted alone (you'll "
+            "see a warning)."
+        ),
+    )
+    p.add_argument(
         "--pages",
         type=str,
         default=None,
@@ -417,12 +430,51 @@ def main(argv: list[str] | None = None) -> int:
         if _bar is not None:
             _bar.close()
 
-    # Write output
+    # Write output — possibly as multiple chunked files if --max-output-mb set.
     if str(args.output) == "-":
+        # Stdout: can't split; always write the merged bytes.
+        if args.max_output_mb is not None and len(output_bytes) > args.max_output_mb * 1024 * 1024:
+            print(
+                "warning: --max-output-mb is ignored when -o - (stdout); "
+                "wrote merged output",
+                file=sys.stderr,
+            )
         sys.stdout.buffer.write(output_bytes)
     else:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_bytes(output_bytes)
+        if args.max_output_mb is None:
+            args.output.write_bytes(output_bytes)
+        else:
+            from pdf_smasher.chunking import split_pdf_by_size
+
+            max_bytes = int(args.max_output_mb * 1024 * 1024)
+            chunks = split_pdf_by_size(output_bytes, max_bytes=max_bytes)
+            if len(chunks) == 1:
+                args.output.write_bytes(chunks[0])
+            else:
+                base = args.output.stem
+                ext = args.output.suffix
+                parent = args.output.parent
+                written_paths: list[Path] = []
+                for idx, chunk in enumerate(chunks):
+                    p = parent / f"{base}_{idx}{ext}"
+                    p.write_bytes(chunk)
+                    written_paths.append(p)
+                oversize = [p for p in written_paths if p.stat().st_size > max_bytes]
+                if not args.quiet:
+                    print(
+                        f"[hankpdf] wrote {len(chunks)} chunks "
+                        f"({args.max_output_mb:.1f} MB cap); "
+                        f"sizes: {[f'{p.stat().st_size / (1024 * 1024):.2f} MB' for p in written_paths]}",
+                        file=sys.stderr,
+                    )
+                    if oversize:
+                        print(
+                            f"[hankpdf] warning: {len(oversize)} chunk(s) exceed "
+                            "the cap because they contain a single oversize page: "
+                            f"{[p.name for p in oversize]}",
+                            file=sys.stderr,
+                        )
 
     if not args.quiet and args.report != "none":
         line = _format_report(report, args.report)
