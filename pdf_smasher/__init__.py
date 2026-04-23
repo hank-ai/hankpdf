@@ -22,6 +22,10 @@ from typing import IO, Any, Literal
 
 import pikepdf
 
+# Import for side effect: installs PIL.Image.MAX_IMAGE_PIXELS per SECURITY.md
+# and docs/THREAT_MODEL.md. Must run before any other module that opens images
+# via Pillow, so keep this import early in __init__.
+from pdf_smasher import _pillow_hardening as _pillow_hardening
 from pdf_smasher._version import __engine_version__, __version__
 from pdf_smasher.exceptions import (
     CertifiedSignatureError,
