@@ -250,6 +250,8 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     Imports are function-local so worker processes don't pay the engine
     import cost until they actually run (pool startup is cheap).
     """
+    import contextlib
+
     import numpy as np
 
     from pdf_smasher.engine.compose import (
@@ -296,69 +298,114 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     _input_ocr_future: Any = None
     word_boxes: list[Any] = []
     ocr_text: str = ""
-    if need_input_ocr:
-        _ocr_pool = ThreadPoolExecutor(max_workers=2)  # 1 for input, 1 for output
-        _input_ocr_future = _ocr_pool.submit(
-            tesseract_word_boxes,
-            raster,
-            language=options.ocr_language,
-        )
-    else:
-        _ocr_pool = None
+    # ExitStack guarantees the OCR ThreadPoolExecutor's __exit__ fires on
+    # any path out of this block (happy return OR exception), which drains
+    # in-flight tesseract subprocess threads instead of leaking them.
+    _ocr_pool: ThreadPoolExecutor | None = None
+    with contextlib.ExitStack() as _ocr_stack:
+        if need_input_ocr:
+            _ocr_pool = _ocr_stack.enter_context(
+                ThreadPoolExecutor(max_workers=2),  # 1 for input, 1 for output
+            )
+            _input_ocr_future = _ocr_pool.submit(
+                tesseract_word_boxes,
+                raster,
+                language=options.ocr_language,
+            )
 
-    # Source-truth: prefer native PDF text layer when present.
-    # (Still cheap even with skip_verify; just a textpage read.)
-    from pypdfium2 import PdfDocument as _Pdfium
+        # Source-truth: prefer native PDF text layer when present.
+        # (Still cheap even with skip_verify; just a textpage read.)
+        from pypdfium2 import PdfDocument as _Pdfium
 
-    _doc = _Pdfium(winput.input_page_pdf)
-    try:
-        _tp = _doc[0].get_textpage()
+        _doc = _Pdfium(winput.input_page_pdf)
         try:
-            _native_text = _tp.get_text_range()
+            _tp = _doc[0].get_textpage()
+            try:
+                _native_text = _tp.get_text_range()
+            finally:
+                _tp.close()
         finally:
-            _tp.close()
-    finally:
-        _doc.close()
+            _doc.close()
 
-    def _await_input_ocr() -> None:
-        """Populate word_boxes + ocr_text from the background OCR future.
-        No-op if already resolved or not needed."""
-        nonlocal word_boxes, ocr_text
-        if _input_ocr_future is None or word_boxes:
-            return
-        word_boxes = _input_ocr_future.result()
-        ocr_text = " ".join(b.text for b in word_boxes)
+        def _await_input_ocr() -> None:
+            """Populate word_boxes + ocr_text from the background OCR future.
+            No-op if already resolved or not needed."""
+            nonlocal word_boxes, ocr_text
+            if _input_ocr_future is None or word_boxes:
+                return
+            word_boxes = _input_ocr_future.result()
+            ocr_text = " ".join(b.text for b in word_boxes)
 
-    # If native text is present we can skip waiting on OCR for the verifier
-    # ground-truth (native wins anyway). But we still need word_boxes later
-    # if options.ocr is set (for text-layer positioning).
-    if _native_text and _native_text.strip():
-        input_ocr_text = _native_text.strip()
-    else:
-        _await_input_ocr()
-        input_ocr_text = ocr_text
+        # If native text is present we can skip waiting on OCR for the verifier
+        # ground-truth (native wins anyway). But we still need word_boxes later
+        # if options.ocr is set (for text-layer positioning).
+        if _native_text and _native_text.strip():
+            input_ocr_text = _native_text.strip()
+        else:
+            _await_input_ocr()
+            input_ocr_text = ocr_text
 
-    # --- Mask + classify ---
-    mask = build_mask(raster)
-    mask_arr = np.asarray(mask.convert("1"), dtype=bool)
-    mask_coverage = float(mask_arr.sum()) / max(1, mask_arr.size)
-    strategy = classify_page(raster, mask_coverage_fraction=mask_coverage)
+        # --- Mask + classify ---
+        mask = build_mask(raster)
+        mask_arr = np.asarray(mask.convert("1"), dtype=bool)
+        mask_coverage = float(mask_arr.sum()) / max(1, mask_arr.size)
+        strategy = classify_page(raster, mask_coverage_fraction=mask_coverage)
 
-    if options.force_monochrome and _page_has_color(raster):
-        warnings.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
+        if options.force_monochrome and _page_has_color(raster):
+            warnings.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
 
-    if strategy == PageStrategy.ALREADY_OPTIMIZED:
-        msg = (
-            f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
-            "compress() has no handler for this value."
-        )
-        raise AssertionError(msg)
+        if strategy == PageStrategy.ALREADY_OPTIMIZED:
+            msg = (
+                f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
+                "compress() has no handler for this value."
+            )
+            raise AssertionError(msg)
 
-    # --- Strategy dispatch ---
-    if strategy == PageStrategy.TEXT_ONLY:
-        if not options.force_monochrome and not is_effectively_monochrome(raster):
-            warnings.append(f"page-{i + 1}-text-only-demoted-to-mixed-color-detected")
-            strategy = PageStrategy.MIXED
+        # --- Strategy dispatch ---
+        if strategy == PageStrategy.TEXT_ONLY:
+            if not options.force_monochrome and not is_effectively_monochrome(raster):
+                warnings.append(f"page-{i + 1}-text-only-demoted-to-mixed-color-detected")
+                strategy = PageStrategy.MIXED
+                _JBIG2_CASCADE_STATE.tripped = False
+                composed = _mrc_compose(
+                    raster,
+                    mask,
+                    width_pt,
+                    height_pt,
+                    winput.bg_target_dpi,
+                    winput.source_dpi,
+                    bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
+                    bg_jpeg_quality=options.target_color_quality,
+                    bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+                    force_grayscale=options.force_monochrome,
+                )
+            else:
+                fg = extract_foreground(raster, mask=mask)
+                paper = detect_paper_color(raster)
+                composed = compose_text_only_page(
+                    mask=mask,
+                    foreground_color=fg.ink_color,
+                    paper_color=paper,
+                    page_width_pt=width_pt,
+                    page_height_pt=height_pt,
+                )
+        elif strategy == PageStrategy.PHOTO_ONLY:
+            _photo_bg_color_mode: Literal["rgb", "grayscale"] = (
+                "grayscale"
+                if (options.force_monochrome or is_effectively_monochrome(raster))
+                else "rgb"
+            )
+            composed = compose_photo_only_page(
+                raster=raster,
+                page_width_pt=width_pt,
+                page_height_pt=height_pt,
+                target_dpi=options.photo_target_dpi,
+                bg_color_mode=_photo_bg_color_mode,
+                bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
+                jpeg_quality=options.target_color_quality,
+                subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+            )
+        else:  # MIXED
             _JBIG2_CASCADE_STATE.tripped = False
             composed = _mrc_compose(
                 raster,
@@ -372,143 +419,99 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
                 bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
                 force_grayscale=options.force_monochrome,
             )
-        else:
-            fg = extract_foreground(raster, mask=mask)
-            paper = detect_paper_color(raster)
-            composed = compose_text_only_page(
-                mask=mask,
-                foreground_color=fg.ink_color,
-                paper_color=paper,
+            if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
+                warnings.append(f"page-{i + 1}-jbig2-fallback-to-flate")
+
+        if options.ocr:
+            _await_input_ocr()
+            composed = add_text_layer(
+                composed,
+                page_index=0,
+                word_boxes=word_boxes,
+                raster_width_px=raster.size[0],
+                raster_height_px=raster.size[1],
                 page_width_pt=width_pt,
                 page_height_pt=height_pt,
             )
-    elif strategy == PageStrategy.PHOTO_ONLY:
-        _photo_bg_color_mode: Literal["rgb", "grayscale"] = (
-            "grayscale"
-            if (options.force_monochrome or is_effectively_monochrome(raster))
-            else "rgb"
-        )
-        composed = compose_photo_only_page(
-            raster=raster,
-            page_width_pt=width_pt,
-            page_height_pt=height_pt,
-            target_dpi=options.photo_target_dpi,
-            bg_color_mode=_photo_bg_color_mode,
-            bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
-            jpeg_quality=options.target_color_quality,
-            subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
-        )
-    else:  # MIXED
-        _JBIG2_CASCADE_STATE.tripped = False
-        composed = _mrc_compose(
-            raster,
-            mask,
-            width_pt,
-            height_pt,
-            winput.bg_target_dpi,
-            winput.source_dpi,
-            bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
-            bg_jpeg_quality=options.target_color_quality,
-            bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
-            force_grayscale=options.force_monochrome,
-        )
-        if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
-            warnings.append(f"page-{i + 1}-jbig2-fallback-to-flate")
 
-    if options.ocr:
-        _await_input_ocr()
-        composed = add_text_layer(
-            composed,
-            page_index=0,
-            word_boxes=word_boxes,
-            raster_width_px=raster.size[0],
-            raster_height_px=raster.size[1],
-            page_width_pt=width_pt,
-            page_height_pt=height_pt,
-        )
+        # --- Streaming verify ---
+        # When skip_verify is set, synthesize a trivially-passing verdict and
+        # don't re-rasterize / re-OCR the output. Saves 2-5 s/page (Tesseract
+        # runs twice per page inside the verifier otherwise).
+        if options.skip_verify:
+            from pdf_smasher.engine.verifier import PageVerdict as _PageVerdict
 
-    # --- Streaming verify ---
-    # When skip_verify is set, synthesize a trivially-passing verdict and
-    # don't re-rasterize / re-OCR the output. Saves 2-5 s/page (Tesseract
-    # runs twice per page inside the verifier otherwise).
-    if options.skip_verify:
-        from pdf_smasher.engine.verifier import PageVerdict as _PageVerdict
-
-        verdict = _PageVerdict(
-            page_index=-1,
-            passed=True,           # don't add to failing_pages
-            lev=1.0,               # sentinel: max drift
-            ssim_global=0.0,
-            ssim_tile_min=0.0,
-            digits_match=False,
-            color_preserved=False,
-        )
-    else:
-        output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
-        # Kick off output OCR in parallel with awaiting the input OCR (if
-        # we haven't already needed it). Two tesseract subprocesses run
-        # concurrently inside this worker — each uses 1 thread (OMP pinned)
-        # so the pair still fits in 1 CPU core's worth of work, but they
-        # overlap for ~40% wall-time reduction on the OCR phase.
-        if _ocr_pool is not None:
-            _output_ocr_future = _ocr_pool.submit(
-                tesseract_word_boxes,
-                output_raster,
-                language=options.ocr_language,
+            verdict = _PageVerdict(
+                page_index=-1,
+                passed=True,           # don't add to failing_pages
+                lev=1.0,               # sentinel: max drift
+                ssim_global=0.0,
+                ssim_tile_min=0.0,
+                digits_match=False,
+                color_preserved=False,
             )
         else:
-            _output_ocr_future = None
-        # Resolve input OCR (may already be done if native text wasn't present).
-        _await_input_ocr()
-        # Reassign in case native text was used — verifier needs input_ocr_text
-        # from our source-truth path above; here we need the RAW tesseract
-        # output for comparison against RAW tesseract on the output.
-        # Note: we use `input_ocr_text` (source-truth preferred) as the ground
-        # truth, but compare against `output_ocr_text` which is always raw OCR.
-        if _output_ocr_future is not None:
-            _out_wb = _output_ocr_future.result()
-        else:
-            _out_wb = tesseract_word_boxes(output_raster, language=options.ocr_language)
-        output_ocr_text = " ".join(b.text for b in _out_wb)
-        per_page_input_estimate = raster.width * raster.height * 3
-        per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
-        anomalous = (
-            per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD and strategy != PageStrategy.TEXT_ONLY
-        )
-        if strategy == PageStrategy.MIXED:
-            page_tile_ssim_floor = (
-                _DEFAULT_TILE_SSIM_FLOOR_SAFE
-                if (anomalous or is_safe)
-                else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
+            output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
+            # Kick off output OCR in parallel with awaiting the input OCR (if
+            # we haven't already needed it). Two tesseract subprocesses run
+            # concurrently inside this worker — each uses 1 thread (OMP pinned)
+            # so the pair still fits in 1 CPU core's worth of work, but they
+            # overlap for ~40% wall-time reduction on the OCR phase.
+            if _ocr_pool is not None:
+                _output_ocr_future = _ocr_pool.submit(
+                    tesseract_word_boxes,
+                    output_raster,
+                    language=options.ocr_language,
+                )
+            else:
+                _output_ocr_future = None
+            # Resolve input OCR (may already be done if native text wasn't present).
+            _await_input_ocr()
+            # Reassign in case native text was used — verifier needs input_ocr_text
+            # from our source-truth path above; here we need the RAW tesseract
+            # output for comparison against RAW tesseract on the output.
+            # Note: we use `input_ocr_text` (source-truth preferred) as the ground
+            # truth, but compare against `output_ocr_text` which is always raw OCR.
+            if _output_ocr_future is not None:
+                _out_wb = _output_ocr_future.result()
+            else:
+                _out_wb = tesseract_word_boxes(output_raster, language=options.ocr_language)
+            output_ocr_text = " ".join(b.text for b in _out_wb)
+            per_page_input_estimate = raster.width * raster.height * 3
+            per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
+            anomalous = (
+                per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD and strategy != PageStrategy.TEXT_ONLY
             )
-            page_ssim_floor = ssim_floor
-            page_lev_ceiling = lev_ceiling
-        elif strategy == PageStrategy.PHOTO_ONLY:
-            page_tile_ssim_floor = -1.0
-            page_ssim_floor = 0.5
-            page_lev_ceiling = 1.0
-        else:
-            page_tile_ssim_floor = -1.0
-            page_ssim_floor = ssim_floor
-            page_lev_ceiling = lev_ceiling
-        if anomalous:
-            warnings.append(
-                f"page-{i + 1}-anomalous-ratio-{per_page_pixel_ratio:.0f}x-safe-verify",
+            if strategy == PageStrategy.MIXED:
+                page_tile_ssim_floor = (
+                    _DEFAULT_TILE_SSIM_FLOOR_SAFE
+                    if (anomalous or is_safe)
+                    else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
+                )
+                page_ssim_floor = ssim_floor
+                page_lev_ceiling = lev_ceiling
+            elif strategy == PageStrategy.PHOTO_ONLY:
+                page_tile_ssim_floor = -1.0
+                page_ssim_floor = 0.5
+                page_lev_ceiling = 1.0
+            else:
+                page_tile_ssim_floor = -1.0
+                page_ssim_floor = ssim_floor
+                page_lev_ceiling = lev_ceiling
+            if anomalous:
+                warnings.append(
+                    f"page-{i + 1}-anomalous-ratio-{per_page_pixel_ratio:.0f}x-safe-verify",
+                )
+            verdict = verify_single_page(
+                input_raster=raster,
+                output_raster=output_raster,
+                input_ocr_text=input_ocr_text,
+                output_ocr_text=output_ocr_text,
+                lev_ceiling=page_lev_ceiling,
+                ssim_floor=page_ssim_floor,
+                tile_ssim_floor=page_tile_ssim_floor,
+                check_color_preserved=not options.force_monochrome,
             )
-        verdict = verify_single_page(
-            input_raster=raster,
-            output_raster=output_raster,
-            input_ocr_text=input_ocr_text,
-            output_ocr_text=output_ocr_text,
-            lev_ceiling=page_lev_ceiling,
-            ssim_floor=page_ssim_floor,
-            tile_ssim_floor=page_tile_ssim_floor,
-            check_color_preserved=not options.force_monochrome,
-        )
-
-    # Clean up the per-worker OCR thread pool before returning.
-    if _ocr_pool is not None:
-        _ocr_pool.shutdown(wait=False)
 
     in_bytes = len(winput.input_page_pdf)
     out_bytes = len(composed)
