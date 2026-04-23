@@ -347,9 +347,10 @@ Stable across versions. Scripts MUST branch on these, not on parsed stdout.
     "ocr_levenshtein": 0.004,
     "ssim_global": 0.975,
     "ssim_min_tile": 0.94,
-    "numeric_confidence_delta": 0.0,
+    "digit_multiset_match": true,
     "structural_match": true,
-    "failing_pages": []
+    "failing_pages": [],
+    "color_preserved": true
   },
   "warnings": ["page-47-skipped-small-print"],
   "strips": ["/JavaScript", "/OpenAction"],
