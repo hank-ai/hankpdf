@@ -64,6 +64,15 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--target-color-quality", type=int, default=55)
     p.add_argument("--legal-mode", action="store_true", help="Force CCITT G4 (BSI/NARA profile)")
     p.add_argument("--target-pdfa", action="store_true", help="Target PDF/A-2u output")
+    p.add_argument(
+        "--force-monochrome",
+        action="store_true",
+        help=(
+            "Collapse mixed/photo pages to the text-only route. Emits "
+            "page-N-color-detected-in-monochrome-mode warnings when color "
+            "content is flattened. See SPEC.md §2.1."
+        ),
+    )
 
     # OCR
     p.add_argument("--ocr", dest="ocr", action="store_true", default=True)
@@ -97,6 +106,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         mode=args.mode,
         target_bg_dpi=args.target_bg_dpi,
         target_color_quality=args.target_color_quality,
+        force_monochrome=args.force_monochrome,
         legal_codec_profile=args.legal_mode,
         target_pdf_a=args.target_pdfa,
         ocr=args.ocr,
@@ -138,6 +148,32 @@ def _doctor_report() -> str:
             lines.append(f"  {tool:12s} {ver}")
         else:
             lines.append(f"  {tool:12s} NOT FOUND")
+
+    # JPEG2000 via Pillow's bundled OpenJPEG — probe by attempting encode.
+    # A Pillow wheel built without OpenJPEG silently falls back to JPEG on
+    # the bg_codec=jpeg2000 path; surface that here so users can diagnose.
+    try:
+        import io as _io_probe
+
+        from PIL import Image as _pil_probe
+
+        _buf = _io_probe.BytesIO()
+        _pil_probe.new("RGB", (8, 8)).save(_buf, format="JPEG2000")
+        lines.append(f"  {'JPEG2000':12s} available (Pillow/OpenJPEG)")
+    except (OSError, ImportError) as e:
+        lines.append(
+            f"  {'JPEG2000':12s} UNAVAILABLE ({type(e).__name__}) — "
+            "bg_codec=jpeg2000 will fall back to JPEG"
+        )
+
+    # jbig2enc presence: absence drops text-only ratio from ~50x to ~6x.
+    if shutil.which("jbig2") is None:
+        lines.append(
+            f"  {'jbig2enc':12s} NOT FOUND — text-only compression will fall "
+            "back to flate (~6x reduction vs ~50x with jbig2)"
+        )
+    else:
+        lines.append(f"  {'jbig2enc':12s} available")
     return "\n".join(lines)
 
 

@@ -99,3 +99,72 @@ def test_cli_signed_input_exits_11(tmp_path) -> None:  # type: ignore[no-untyped
     out_path = tmp_path / "out.pdf"
     rc = main([str(in_path), "-o", str(out_path)])
     assert rc == 11
+
+
+def _make_mixed_pdf(tmp_path) -> object:  # type: ignore[no-untyped-def]
+    """Build a PDF with a MIXED-route page: noisy gray bg + dark content.
+    Needed because a plain white-bg text fixture routes TEXT_ONLY already,
+    making --force-monochrome a no-op on size.
+    """
+    import numpy as np
+
+    arr = np.full((2200, 1700, 3), 140, dtype=np.uint8)
+    arr[300:1900, 200:1500] = 80  # dark band → MIXED routing
+    img = Image.fromarray(arr)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("Arial.ttf", 60)
+    except OSError:
+        font = ImageFont.load_default(size=60)
+    draw.text((300, 500), "MIXED MONO TEST", fill="black", font=font)
+
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    page = pdf.pages[0]
+    jbuf = io.BytesIO()
+    img.save(jbuf, format="JPEG", quality=92, subsampling=0)
+    xobj = pdf.make_stream(
+        jbuf.getvalue(),
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Image,
+        Width=img.width,
+        Height=img.height,
+        ColorSpace=pikepdf.Name.DeviceRGB,
+        BitsPerComponent=8,
+        Filter=pikepdf.Name.DCTDecode,
+    )
+    page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Scan=xobj))
+    page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Scan Do Q\n")
+    path = tmp_path / "in-mixed.pdf"
+    pdf.save(path)
+    return path
+
+
+@pytest.mark.integration
+def test_cli_force_monochrome_flag_routes_through_options(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """--force-monochrome on the CLI must reach CompressOptions and produce
+    a strictly smaller output than the default run (the mono path collapses
+    the MRC JPEG background entirely on TEXT_ONLY).
+    """
+    in_path = _make_mixed_pdf(tmp_path)
+    out_default = tmp_path / "default.pdf"
+    out_mono = tmp_path / "mono.pdf"
+
+    rc1 = main([str(in_path), "-o", str(out_default), "--mode", "fast"])
+    rc2 = main([str(in_path), "-o", str(out_mono), "--mode", "fast", "--force-monochrome"])
+    assert rc1 == 0 and rc2 == 0
+    assert out_mono.stat().st_size < out_default.stat().st_size, (
+        "--force-monochrome must reduce output size vs default run; "
+        f"default={out_default.stat().st_size}, mono={out_mono.stat().st_size}"
+    )
+
+
+def test_cli_doctor_reports_jpeg2000_and_jbig2(capsys) -> None:  # type: ignore[no-untyped-def]
+    """--doctor surfaces JPEG2000 (Pillow/OpenJPEG) + jbig2enc availability so
+    users can diagnose why text-only compression fell back to flate.
+    """
+    rc = main(["--doctor"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "JPEG2000" in out
+    assert "jbig2enc" in out
