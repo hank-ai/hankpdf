@@ -289,7 +289,7 @@ class _VerifierAggregator:
             ssim_global=0.0,
             ssim_min_tile=0.0,
             digit_multiset_match=False,
-            structural_match=True,
+            structural_match=False,
             color_preserved=False,
             failing_pages=(),
         )

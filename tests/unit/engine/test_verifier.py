@@ -368,3 +368,6 @@ def test_verifier_aggregator_skipped_result() -> None:
     assert result.ocr_levenshtein == 1.0  # max possible = "total drift"
     assert result.digit_multiset_match is False
     assert result.color_preserved is False
+    # structural_match must also fail-closed: skipped must never be
+    # indistinguishable from "structurally verified clean".
+    assert result.structural_match is False
