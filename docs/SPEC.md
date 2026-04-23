@@ -15,7 +15,7 @@ class CompressOptions:
     engine: Literal["mrc", "downsample-only"] = "mrc"
     bg_codec: Literal["jpeg", "jpeg2000"] = "jpeg"  # jpeg2000 is ~10-20% smaller on paper textures; +~1-2s/page at 300 DPI (demoted to jpeg in fast mode)
 
-    # Quality/ratio knobs
+    # Quality / ratio knobs
     target_bg_dpi: int = 150            # background layer DPI after downsample
     target_color_quality: int = 55      # JPEG / JPEG2000 quality 0-100 for bg (calibrated 0-100, NOT PSNR dB)
     bg_chroma_subsampling: Literal["4:4:4", "4:2:2", "4:2:0"] = "4:4:4"  # 4:4:4 avoids smearing colored text in bg
@@ -26,14 +26,19 @@ class CompressOptions:
     legal_codec_profile: str | None = None  # reserved: "ccitt-g4" raises NotImplementedError until a later phase
     target_pdf_a: bool = False          # target PDF/A-2u output (stricter codec/color-space constraints)
 
-    # OCR behavior
-    ocr: bool = True                    # embed OCR text layer in output
+    # OCR behavior — off by default; --ocr opts in (adds ~5 s/page to embed a searchable text layer)
+    ocr: bool = False                   # write an embedded OCR text layer to the output PDF
     ocr_language: str = "eng"           # Tesseract language code(s), e.g. "eng+spa"
 
     # Safety / behavior gates
-    allow_signed_invalidation: bool = False
-    allow_embedded_files: bool = False
-    password: str | None = None         # for encrypted inputs
+    allow_signed_invalidation: bool = False     # opt-in for signed PDFs (invalidates signature)
+    allow_certified_invalidation: bool = False  # stricter opt-in for /Perms/DocMDP certifying signatures
+    allow_embedded_files: bool = False          # keep /EmbeddedFiles instead of stripping
+    accept_drift: bool = False                  # if True, verifier-flagged drift → warning instead of abort
+    skip_verify: bool = True                    # skip content-drift verifier (default True; --verify turns it on)
+    password: str | None = None                 # for encrypted inputs
+
+    # Thresholds
     min_input_mb: float = 0.0           # below this, skip compression and pass through
     min_ratio: float = 1.5              # if achieved ratio < this, return original
 
@@ -43,6 +48,9 @@ class CompressOptions:
     per_page_timeout_seconds: int = 120
     total_timeout_seconds: int = 1200
     photo_target_dpi: int = 200         # DPI for PHOTO_ONLY pages (higher than bg to preserve micro-detail)
+
+    # Concurrency — each worker gets its own single-page slice (memory scales with workers × 1 page, not workers × whole source)
+    max_workers: int = 0                # 0 = auto (cpu_count-2, ≥1); 1 = serial; N>1 = exactly N workers
 
     # Output
     emit_sidecar_manifest: bool = True
@@ -60,11 +68,17 @@ class CompressReport:
     engine: str
     engine_version: str
     verifier: VerifierResult
-    warnings: list[str]                 # structured warning codes; see §7.2
-    strips: list[str]                   # what was stripped; see §4.4
     input_sha256: str
     output_sha256: str
-    reason: str | None                  # human-readable reason if refused/drift
+    canonical_input_sha256: str | None  # see §5; None if canonicalization failed
+    warnings: tuple[str, ...] = ()      # structured warning codes; see §8.5
+    strips: tuple[str, ...] = ()        # what was stripped; see §4.4
+    reason: str | None = None           # human-readable reason if refused/drift
+    schema_version: int = 1             # sidecar / JSON report schema version (see §11)
+    strategy_distribution: Mapping[str, int] = field(default_factory=dict)
+    # strategy_distribution: per-page strategy counts — keys are
+    # "text_only", "photo_only", "mixed", "already_optimized"; values are
+    # page counts. Emitted by compress() for ratio post-mortems. See §8.5.
 
 @dataclass(frozen=True)
 class VerifierResult:
@@ -72,9 +86,10 @@ class VerifierResult:
     ocr_levenshtein: float              # worst per-page Levenshtein ratio
     ssim_global: float                  # min over pages
     ssim_min_tile: float                # min over all tiles, all pages
-    numeric_confidence_delta: float     # min delta across pages
+    digit_multiset_match: bool          # exact-match on the multiset of digits extracted from input vs output OCR
     structural_match: bool              # exact match on structural audit
-    failing_pages: list[int]            # 1-indexed, empty on pass
+    failing_pages: tuple[int, ...] = () # 1-indexed, empty on pass
+    color_preserved: bool = True        # false if monochrome-mode flattened a color page (see force_monochrome)
 
 class CompressError(Exception): ...
 class EncryptedPDFError(CompressError): ...        # needs password
@@ -88,12 +103,41 @@ class CorruptPDFError(CompressError): ...          # unrecoverable by pikepdf/qp
 class EnvironmentError(CompressError): ...         # qpdf/pdfium version floor violated; see --doctor
 ```
 
+`ProgressEvent` is emitted via the optional `progress_callback` parameter on `compress()` (see §1.2). Carries no PHI — only pipeline phase, page indices, strategy names, byte counts, and ratios. The CLI drives its tqdm bar from these events; programmatic callers can log them, collect metrics, or drive their own UI.
+
+```python
+ProgressPhase = Literal[
+    "triage",
+    "triage_complete",
+    "page_start",
+    "page_done",
+    "merge_start",
+    "merge_complete",
+    "verify_complete",
+]
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    phase: ProgressPhase
+    message: str
+    current: int = 0                    # 1-indexed page number during per-page phases; 0 otherwise
+    total: int = 0                      # total page count; 0 outside the per-page phase
+    strategy: str | None = None         # set for page_start / page_done (e.g. "text_only", "mixed")
+    ratio: float | None = None          # set for page_done: true per-page file ratio
+    input_bytes: int | None = None      # set for page_done: this page's size in the input PDF
+    output_bytes: int | None = None     # set for page_done: this page's size in the output PDF
+    verifier_passed: bool | None = None # set for page_done: False if the per-page verifier failed
+```
+
 ### 1.2 Functions
 
 ```python
 def compress(
     input_data: bytes,
-    options: CompressOptions = CompressOptions(),
+    options: CompressOptions | None = None,
+    *,
+    progress_callback: Callable[[ProgressEvent], None] | None = None,
+    only_pages: set[int] | None = None,
 ) -> tuple[bytes, CompressReport]:
     """
     Compress a PDF. Returns (output_bytes, report).
@@ -101,6 +145,15 @@ def compress(
     On success: output_bytes is the compressed PDF.
     On passthrough: output_bytes is the input unchanged.
     On refuse or drift: raises the appropriate exception.
+
+    progress_callback: optional fn(event: ProgressEvent) -> None invoked at
+    pipeline milestones (triage, per-page start/done, merge, verify). No PHI
+    is emitted — see §1.1 ProgressEvent. The CLI drives tqdm from these.
+
+    only_pages: 1-indexed page numbers to restrict processing to. Output PDF
+    contains only the selected pages, in original order. Pages outside the
+    set are skipped entirely (no rasterize / OCR / verify). Useful for smoke
+    tests and partial re-processing.
     """
 
 def compress_stream(
@@ -134,53 +187,119 @@ Positional:
 
 Output:
   -o, --output PATH         Path to output PDF, or "-" for stdout.
-                            Required unless --in-dir is used.
-  --in-dir PATH             Batch mode: directory of PDFs to process.
-  --out-dir PATH            Batch output directory (mirrors structure).
+  --output-format {pdf,jpeg,png,webp}
+                            Default: inferred from -o extension (.pdf, .jpg/
+                            .jpeg, .png, .webp) or 'pdf' if unknown.
+                            Selecting jpeg/png/webp switches to image-export
+                            mode: each selected page is rendered and encoded
+                            as a standalone image file (no MRC compression,
+                            no verifier, no OCR). Use --pages to select a
+                            subset.
+  --max-output-mb FLOAT     Cap the output PDF size. If the compressed output
+                            exceeds this value, split into multiple files
+                            named {base}_001{ext}, {base}_002{ext}, ...
+                            (zero-padded, 1-indexed) preserving page order.
+                            Useful for email attachment limits. A single
+                            page that's already larger than the cap is
+                            emitted alone (see stderr warning). PDF-only;
+                            ignored in image-export mode. Ignored with
+                            -o - (stdout).
 
 Engine:
-  --engine {mrc,downsample-only}   Default: mrc.
   --mode {fast,standard,safe}      Default: standard.
-  --bg-codec {jpeg,jpeg2000}       Default: jpeg. jpeg2000 is ~10-20% smaller on paper textures; demoted to jpeg in fast mode.
+  --bg-codec {jpeg,jpeg2000}       Default: jpeg. jpeg2000 is ~10-20% smaller
+                                   on paper textures but adds ~1-2 s/page
+                                   (demoted to jpeg in fast mode).
   --target-bg-dpi INT              Default: 150.
   --target-color-quality INT       Default: 55 (0-100 scale).
-  --bg-chroma {4:4:4,4:2:2,4:2:0}  Default: 4:4:4 (avoids smearing colored text; 4:2:0 only for photo-only pages).
-  --photo-target-dpi INT           Default: 200. DPI for PHOTO_ONLY pages; higher than target-bg-dpi to preserve micro-detail.
-  --force-monochrome               Skip color detection; collapse mixed/photo pages to the text-only route.
-  --legal-mode                     RESERVED: raises NotImplementedError until a later phase (CCITT G4 not yet built).
+  --bg-chroma {4:4:4,4:2:2,4:2:0}  Default: 4:4:4 (preserves colored text;
+                                   4:2:0 is smaller but smears color on thin
+                                   strokes).
+  --force-monochrome               Collapse mixed/photo pages to the text-only
+                                   route. Emits
+                                   page-N-color-detected-in-monochrome-mode
+                                   warnings when color content is flattened.
+  --legal-mode                     RESERVED: raises NotImplementedError until
+                                   a later phase (CCITT G4 not yet built).
   --target-pdfa                    Target PDF/A-2u output.
 
+Image-export (requires --output-format {jpeg,png,webp} or a matching -o extension):
+  --image-dpi INT            DPI for image-export formats. Default: 150.
+                             300 for archival. Max: 1200 (above this =
+                             memory-exhaustion risk; argparse rejects with
+                             exit 2).
+  --jpeg-quality INT         JPEG quality 0-100. Default: 75.
+  --png-compress-level INT   PNG zlib compression level 0-9. 0=no compression,
+                             9=max. Default: 6 (Pillow standard).
+  --webp-quality INT         WebP quality 0-100. With --webp-lossless this
+                             controls encoder effort rather than fidelity.
+                             Default: 80.
+  --webp-lossless            Encode WebP losslessly (bigger file, pixel-exact
+                             decode). Default: lossy WebP at --webp-quality.
+
 OCR:
-  --ocr / --no-ocr          Default: --ocr (v1 server default is --no-ocr).
-  --ocr-language STR        Default: eng.
+  --ocr / --no-ocr           Default: --no-ocr. --ocr embeds a searchable
+                             text layer (adds ~5 s/page).
+  --ocr-language STR         Default: eng.
 
 Safety:
-  --allow-signed-invalidation  Explicit opt-in for signed PDFs.
-  --allow-certified-invalidation Explicit opt-in for certifying signatures (/Perms/DocMDP).
-  --allow-embedded-files       Keep /EmbeddedFiles instead of stripping.
-  --password-file PATH      Read password from file (never use --password on CLI; env var HANKPDF_PASSWORD also works).
-  --min-input-mb FLOAT      Passthrough if input below this.
-  --min-ratio FLOAT         Return input if achieved ratio below this.
+  --allow-signed-invalidation    Explicit opt-in for signed PDFs.
+  --allow-certified-invalidation Stricter opt-in for certifying signatures
+                                 (/Perms/DocMDP).
+  --allow-embedded-files         Keep /EmbeddedFiles instead of stripping.
+  --password-file PATH           Read password from file. Never use
+                                 --password on CLI; env var
+                                 HANKPDF_PASSWORD also works.
+
+Verifier (content-drift gate):
+  --verify                       Enable the content-drift verifier (off by
+                                 default since v0.0.x). Re-rasterizes the
+                                 output, re-runs OCR, compares against
+                                 input. Adds ~2-5 s/page. Use for clinical /
+                                 legal / archival runs where post-hoc
+                                 content-preservation proof matters. Drift
+                                 behavior is controlled by --accept-drift
+                                 (default: abort).
+  --skip-verify                  Hidden alias for the default behavior
+                                 (verifier skipped). Retained as a no-op for
+                                 backward compatibility.
+  --accept-drift                 Write the output PDF even if the
+                                 content-preservation verifier flags drift.
+                                 Keeps the full-quality (300 DPI source)
+                                 pipeline, unlike --mode fast which also
+                                 lowers DPI. Drift is recorded in
+                                 report.warnings. Use only after visually
+                                 verifying the output.
+
+Selection:
+  --pages SPEC               Restrict processing to a subset of pages.
+                             1-indexed. Accepts comma-separated single
+                             pages and ranges, e.g. '1,3-5,10' or '1-3' or
+                             '5'. Output PDF contains only the selected
+                             pages in their original order. Useful for
+                             smoke tests. A single range is capped at
+                             1,000,000 pages to prevent DoS via
+                             set(range(1, 10**11)).
 
 Limits:
   --max-pages INT
-  --max-input-mb FLOAT
-  --per-page-timeout SECONDS
-  --total-timeout SECONDS
-
-Batch:
-  -j, --jobs INT            Parallel jobs (default: CPU/2).
+  --max-input-mb FLOAT       Default: 2000.
+  --max-workers INT          Per-page parallelism. 0 (default) = auto
+                             (cpu_count-2, min 1). 1 = serial. N>1 =
+                             exactly N workers. Each worker gets its own
+                             single-page PDF slice, never the whole
+                             source.
 
 Reporting:
   --report {text,json,jsonl,none}  Default: text.
-  --quiet                   Suppress non-error output.
-  --verbose                 Debug logging (no PHI).
+  --quiet                          Suppress non-error output (also
+                                   suppresses tqdm progress bars and
+                                   per-chunk write lines).
 
 Meta:
   -h, --help
-  --version
-  --verify-only             Run triage + verifier only. Do not produce output.
-  --doctor                  Print environment sanity report.
+  -V, --version
+  --doctor                   Print environment sanity report and exit.
 ```
 
 ### 2.2 Exit codes
@@ -189,21 +308,21 @@ Stable across versions. Scripts MUST branch on these, not on parsed stdout.
 
 | Code | Meaning | Script action |
 |---|---|---|
-| 0 | Compressed, verifier passed | Upload output |
-| 2 | No-op: input already small enough (below `--min-input-mb` or ratio below `--min-ratio`) | Upload input unchanged |
+| 0 | Compressed, verifier passed (or verifier skipped) | Upload output |
+| 2 | No-op: input already small enough (below `--min-input-mb` or ratio below `--min-ratio`) — OR argparse-level validation failure (see note below) | Upload input unchanged (success case); fix invocation (argparse case) |
 | 10 | Refused: encrypted, no password | Prompt user or pass-through |
 | 11 | Refused: digitally signed, no invalidate flag | Pass-through original |
-| 15 | Refused: certifying signature (/Perms/DocMDP), requires stricter opt-in | Pass-through; never silently override |
 | 12 | Refused: oversize (`--max-pages` or `--max-input-mb`) | Pass-through, alert ops |
 | 13 | Refused: malformed / unrecoverable | Pass-through, log |
 | 14 | Refused: malicious (resource-cap exceeded in sandbox) | Quarantine, alert security |
+| 15 | Refused: certifying signature (/Perms/DocMDP), requires stricter opt-in | Pass-through; never silently override |
 | 16 | Refused: decompression bomb (pixel-count cap exceeded) | Quarantine, alert security |
 | 20 | Verifier failed — content drift detected | Do NOT upload output; keep original |
-| 21 | Verifier inconclusive — safe mode manual review required | Route to human reviewer |
 | 30 | Engine internal error | Retry; then fall back to original |
-| 40 | Invalid CLI usage | Fix invocation |
-| 41 | Environment / dependency missing or version floor violated (`--doctor` will diagnose) | Install/repair — e.g. qpdf ≥11.6.3 |
-| 2xx | Transient (network to S3, license server, etc.) | Retry with exponential backoff |
+| 40 | Invalid CLI usage (caught after parse: missing INPUT/-o, unreadable password file, out-of-range `--pages`, empty `--pages` set, stdout chosen with multi-page image export) | Fix invocation |
+| 2xx | Reserved for transient failures (network, license server, etc.); not used by the local CLI today | Retry with exponential backoff |
+
+**Note on argparse-level exit 2.** Flag values that fail argparse's own type validation — most notably `--image-dpi` outside the `[1, 1200]` range — exit with code `2` via argparse's built-in error handling, NOT via our `EXIT_USAGE = 40`. This is an intentional departure from the numeric contract: wrapping argparse to convert its `ArgumentTypeError` into exit 40 would require us to intercept `parse_args()` error handling, which would also suppress argparse's auto-generated help/usage output on malformed flags. Script authors who branch on exit codes should treat `2` as either "passthrough success" or "argparse rejected a flag value" and disambiguate via stderr (argparse writes `hankpdf: error: …` on the failure path).
 
 ### 2.3 JSON report schema
 
@@ -473,6 +592,19 @@ Phase 2b adds the following per-page and per-job counters / warnings:
 - `page-N-text-only-demoted-to-mixed-color-detected` — emitted when classify_page routed a page to TEXT_ONLY but the channel-parity check detected color, forcing fallback to the MRC route.
 - `page-N-anomalous-ratio-{N}x-safe-verify` — emitted when per-page ratio exceeds 200× on a non-TEXT_ONLY page; the page's tile-SSIM floor is tightened to the `safe` threshold.
 - `bg-codec-jpeg2000-demoted-fast-mode` — emitted once per job when the user requested `bg_codec=jpeg2000` but `mode=fast` demoted it to JPEG for latency reasons.
+- `verifier-skipped` — emitted once per job when `options.skip_verify` is True (the default; also the `--skip-verify` / absence-of-`--verify` CLI path).
+- `verifier-fail-{accept-drift|fast-mode}-pages-[…]` — emitted when the verifier flagged drift but the job was configured to warn instead of abort (`options.accept_drift=True` or `options.mode="fast"`). Lists 1-indexed failing pages.
+- `forkserver-preload-failed-<ExceptionType>` — emitted when `set_forkserver_preload(["pdf_smasher.engine", …])` raises `ValueError` or `RuntimeError` (typically because a preloaded module instantiates multiprocessing objects at import time). Workers still function, but each re-imports the heavy module chain (numpy/cv2/pikepdf ~ 2-3 s each per worker). Exception-type suffix lets ops grep for the specific cause.
+
+#### 8.5.1 Stderr-only CLI warnings (not part of CompressReport.warnings)
+
+The CLI chunk writer prints the following to **stderr** when `--max-output-mb` is set and `--quiet` is not. These are human-readable diagnostics only; they are not appended to `CompressReport.warnings` (the chunk split happens in the CLI after `compress()` has already returned):
+
+- `warning: N chunk(s) exceed the cap because they contain a single oversize page: [names]` — emitted when one or more emitted `{base}_NNN{ext}` chunks exceed `--max-output-mb` because an individual page is larger than the cap. Cannot be split further; emitted alone.
+- `warning: N stale chunk file(s) from a previous run remain in {dir}: [names]` — emitted when pre-existing `{base}_NNN{ext}` files with a zero-padded 3-digit index greater than the new chunk count remain in the output directory. The new run does not overwrite them (different indices). User must remove manually.
+- `warning: --max-output-mb applies only to PDF output; ignored in image-export mode` — emitted when `--max-output-mb` is combined with an image-export format.
+- `warning: --max-output-mb is ignored when -o - (stdout); wrote merged output` — emitted when `--max-output-mb` is combined with `-o -`.
+- `warning: --output-format X overrides the .Y extension; …` — emitted when the user's `--output-format` contradicts the `-o` file extension.
 
 ## 10. Build matrix
 
