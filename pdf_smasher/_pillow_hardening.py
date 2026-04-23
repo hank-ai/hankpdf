@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import PIL.Image
 
-# ~715 Mpx. Keep exact — the test in tests/unit/test_pillow_hardening.py
-# asserts the precise value, and the reviewer flagged "set deliberately,
-# not Pillow's default" as the security invariant. Matches
-# pdf_smasher.engine.image_export._MAX_BOMB_PIXELS.
-MAX_IMAGE_PIXELS: int = 2 * 1024 * 1024 * 1024 // 3
+from pdf_smasher._limits import MAX_BOMB_PIXELS
+
+# ~715 Mpx. Imported from pdf_smasher._limits — SINGLE source of truth
+# shared with pdf_smasher.engine.image_export._MAX_BOMB_PIXELS. The
+# test in tests/unit/test_pillow_hardening.py asserts both point to
+# the same value so a drift can't silently bypass one of the two
+# layers of defense.
+MAX_IMAGE_PIXELS: int = MAX_BOMB_PIXELS
 
 PIL.Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS

@@ -5,6 +5,28 @@ from __future__ import annotations
 import PIL.Image
 
 
+def test_pil_max_matches_image_export_bomb_cap() -> None:
+    """Regression: the Pillow cap and the pre-allocation bomb cap must match
+    or the two layers of defense protect different things.
+
+    If one drifts (e.g. someone tightens image_export.py to ~500 Mpx and
+    forgets _pillow_hardening.py), the Pillow layer would let a 600 Mpx
+    image through, the pre-allocation check would catch it — but the
+    asymmetric wrong-layer-raises path emits a PIL.Image.DecompressionBomb
+    error class instead of our typed exception, routing past the CLI's
+    exception-to-exit-code mapping.
+    """
+    # Trigger pdf_smasher's side-effect import so MAX_IMAGE_PIXELS is set.
+    import pdf_smasher  # noqa: F401
+    from pdf_smasher.engine.image_export import _MAX_BOMB_PIXELS
+
+    assert PIL.Image.MAX_IMAGE_PIXELS == _MAX_BOMB_PIXELS, (
+        f"Pillow cap ({PIL.Image.MAX_IMAGE_PIXELS:,}) and image_export "
+        f"bomb cap ({_MAX_BOMB_PIXELS:,}) drifted; a single source of "
+        f"truth in pdf_smasher._limits.MAX_BOMB_PIXELS is required."
+    )
+
+
 def test_pil_max_image_pixels_is_set_on_import() -> None:
     """SECURITY.md / THREAT_MODEL.md advertise that the decompression-bomb
     cap is set explicitly. Prove it.
