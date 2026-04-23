@@ -80,6 +80,26 @@ def _positive_float(raw: str) -> float:
     return f
 
 
+def _positive_int(raw: str) -> int:
+    """argparse type for int flags that must be >= 1.
+
+    Used for --per-page-timeout-seconds and --total-timeout-seconds:
+    zero or negative values make future.result(timeout=X) raise
+    TimeoutError immediately on every page, producing a flood of
+    PerPageTimeoutError from deep in the engine. Reject at parse
+    time so the error names the right flag.
+    """
+    try:
+        n = int(raw)
+    except ValueError as e:
+        msg = f"invalid int: {raw!r}"
+        raise argparse.ArgumentTypeError(msg) from e
+    if n < 1:
+        msg = f"must be >= 1 (got {n})"
+        raise argparse.ArgumentTypeError(msg)
+    return n
+
+
 # Upper bound on --max-workers. 256 matches the ProcessPoolExecutor default
 # guidance (4 * cpu_count capped at 61 on Windows; anything beyond 256 is
 # DoS-adjacent: each worker re-imports cv2/pikepdf/numpy for ~2-3s and holds
@@ -303,6 +323,26 @@ def _parser() -> argparse.ArgumentParser:
             "worker gets its own single-page PDF slice, never the whole source."
         ),
     )
+    p.add_argument(
+        "--per-page-timeout-seconds",
+        type=_positive_int,
+        default=120,
+        help=(
+            "Per-page wall-clock budget for rasterize+OCR+compose+verify. "
+            "On overrun, the page's Tesseract subprocess is killed and "
+            "PerPageTimeoutError is raised. Default: 120."
+        ),
+    )
+    p.add_argument(
+        "--total-timeout-seconds",
+        type=_positive_int,
+        default=1200,
+        help=(
+            "Total wall-clock budget for the whole compress() call. On "
+            "overrun, TotalTimeoutError is raised between pipeline phases. "
+            "Default: 1200 (20 min)."
+        ),
+    )
 
     # Reporting
     p.add_argument("--report", choices=["text", "json", "jsonl", "none"], default="text")
@@ -463,6 +503,8 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         max_input_mb=args.max_input_mb,
         min_input_mb=args.min_input_mb,
         min_ratio=args.min_ratio,
+        per_page_timeout_seconds=args.per_page_timeout_seconds,
+        total_timeout_seconds=args.total_timeout_seconds,
     )
 
 
