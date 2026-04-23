@@ -20,7 +20,10 @@ import io
 from collections.abc import Callable, Iterator
 from typing import Literal
 
+import pypdfium2 as pdfium
+
 from pdf_smasher.engine.rasterize import rasterize_page
+from pdf_smasher.exceptions import DecompressionBombError
 
 ImageFormat = Literal["jpeg", "png", "webp"]
 
@@ -35,6 +38,10 @@ _PNG_OPTIMIZE_LEVEL = 9
 # libwebp method: 0=fastest/largest, 6=slowest/smallest. 4 is Pillow's default
 # and a reasonable speed/size balance.
 _WEBP_METHOD_DEFAULT = 4
+
+# Decompression-bomb cap: refuse rasters larger than ~2 GB RGB. At 3 bytes
+# per pixel this is the maximum unsigned 32-bit allocation we allow.
+_MAX_BOMB_PIXELS = 2 * 1024 * 1024 * 1024 // 3
 
 
 def iter_pages_as_images(
@@ -51,6 +58,7 @@ def iter_pages_as_images(
     webp_method: int = _WEBP_METHOD_DEFAULT,
     progress_callback: Callable[[str, int, int], None] | None = None,
     _force_rasterize_error_for_test: bool = False,
+    _simulate_huge_page_for_test: bool = False,
 ) -> Iterator[bytes]:
     """Streaming counterpart to :func:`render_pages_as_images`.
 
@@ -67,6 +75,9 @@ def iter_pages_as_images(
         time (before the generator object is returned), so callers that
         pass a bad format see the error immediately, not only once they
         try to iterate.
+    DecompressionBombError
+        If a page's pixel budget would exceed the bomb cap. Raised
+        BEFORE pdfium allocates, so huge pages never touch RAM.
     RuntimeError
         Wraps any rasterize/encode failure with
         ``"page {N+1}/{total}"`` context. The underlying exception is
@@ -89,7 +100,24 @@ def iter_pages_as_images(
         webp_method=webp_method,
         progress_callback=progress_callback,
         _force_rasterize_error_for_test=_force_rasterize_error_for_test,
+        _simulate_huge_page_for_test=_simulate_huge_page_for_test,
     )
+
+
+def _page_size_points(pdf_bytes: bytes, page_index: int) -> tuple[float, float]:
+    """Open the PDF briefly and return (width_pt, height_pt) for the given
+    page WITHOUT rasterizing. Used for the pre-allocation pixel-budget check.
+    """
+    doc = pdfium.PdfDocument(pdf_bytes)
+    try:
+        page = doc[page_index]
+        try:
+            size = page.get_size()  # (width_pt, height_pt)
+            return float(size[0]), float(size[1])
+        finally:
+            page.close()
+    finally:
+        doc.close()
 
 
 def _iter_pages_impl(
@@ -106,6 +134,7 @@ def _iter_pages_impl(
     webp_method: int,
     progress_callback: Callable[[str, int, int], None] | None,
     _force_rasterize_error_for_test: bool,
+    _simulate_huge_page_for_test: bool,
 ) -> Iterator[bytes]:
     """Real generator body for :func:`iter_pages_as_images`.
 
@@ -118,22 +147,29 @@ def _iter_pages_impl(
         if progress_callback is not None:
             progress_callback("page_start", pos, total)
         try:
+            # Pre-allocation pixel-budget check. Do this BEFORE
+            # rasterize_page is called so pdfium never allocates a
+            # bomb-sized bitmap. We extract just the page size (cheap)
+            # and compute the target raster dimensions from DPI.
+            if _simulate_huge_page_for_test:
+                width_pt, height_pt = 100_000.0, 100_000.0
+            else:
+                width_pt, height_pt = _page_size_points(pdf_bytes, page_index)
+            target_w = width_pt * dpi / 72.0
+            target_h = height_pt * dpi / 72.0
+            if target_w * target_h > _MAX_BOMB_PIXELS:
+                msg = (
+                    f"page {page_index + 1} would rasterize to "
+                    f"{int(target_w)}x{int(target_h)} px — exceeds the "
+                    f"decompression-bomb cap "
+                    f"({_MAX_BOMB_PIXELS / (1024 * 1024):.0f} MB of raw "
+                    "pixels). Lower --image-dpi or --pages to proceed."
+                )
+                raise DecompressionBombError(msg)
             if _force_rasterize_error_for_test:
                 _forced = "forced test error"
                 raise RuntimeError(_forced)
             raster = rasterize_page(pdf_bytes, page_index=page_index, dpi=dpi)
-            # Defense-in-depth: even with the CLI's --image-dpi cap, a PDF
-            # with extreme MediaBox dimensions (UserUnit multipliers etc.)
-            # could still produce a huge raster. Refuse > ~2 GB RGB buffers.
-            _max_px = 2 * 1024 * 1024 * 1024 // 3  # 2 GiB / 3 bytes per pixel
-            if raster.width * raster.height > _max_px:
-                msg = (
-                    f"page {page_index + 1} rasterized to "
-                    f"{raster.width}x{raster.height} px — exceeds the "
-                    f"decompression-bomb cap ({_max_px / (1024 * 1024):.0f} MB "
-                    "of raw pixels). Lower --image-dpi or --pages to proceed."
-                )
-                raise ValueError(msg)
             buf = io.BytesIO()
             rgb = raster.convert("RGB")
             if image_format == "jpeg":
@@ -163,6 +199,10 @@ def _iter_pages_impl(
                     method=webp_method,
                 )
             encoded = buf.getvalue()
+        except DecompressionBombError:
+            # Typed error — propagate unchanged so the CLI can route it
+            # to EXIT_DECOMPRESSION_BOMB. Do not wrap in RuntimeError.
+            raise
         except Exception as exc:
             wrapped = f"image export failed on page {page_index + 1}/{total}: {exc}"
             raise RuntimeError(wrapped) from exc
@@ -185,6 +225,7 @@ def render_pages_as_images(
     webp_method: int = _WEBP_METHOD_DEFAULT,
     progress_callback: Callable[[str, int, int], None] | None = None,
     _force_rasterize_error_for_test: bool = False,
+    _simulate_huge_page_for_test: bool = False,
 ) -> list[bytes]:
     """Rasterize the requested pages and return one encoded image per page.
 
@@ -257,5 +298,6 @@ def render_pages_as_images(
             webp_method=webp_method,
             progress_callback=progress_callback,
             _force_rasterize_error_for_test=_force_rasterize_error_for_test,
+            _simulate_huge_page_for_test=_simulate_huge_page_for_test,
         )
     )

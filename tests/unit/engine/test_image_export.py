@@ -304,3 +304,21 @@ def test_iter_pages_yields_bytes_lazily() -> None:
     assert first[:2] == b"\xff\xd8"
     rest = list(it)
     assert len(rest) == 2
+
+
+def test_pre_allocation_pixel_budget_check() -> None:
+    """Decompression bomb guard must refuse BEFORE pdfium allocates
+    the raster. The synthetic hook bypasses the rasterize call entirely
+    so the only way the error can be raised is the pre-allocation check.
+    """
+    pdf_bytes = _make_pdf(1)
+    with pytest.raises(Exception, match=r"bomb|cap|exceed"):
+        list(
+            iter_pages_as_images(
+                pdf_bytes,
+                page_indices=[0],
+                image_format="jpeg",
+                dpi=1200,  # within CLI cap
+                _simulate_huge_page_for_test=True,
+            )
+        )
