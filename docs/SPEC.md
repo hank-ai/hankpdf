@@ -13,6 +13,7 @@ All other surfaces (CLI, Docker entrypoint) call this API internally.
 class CompressOptions:
     # Engine selection
     engine: Literal["mrc", "downsample-only"] = "mrc"
+    bg_codec: Literal["jpeg", "jpeg2000"] = "jpeg"  # jpeg2000 is ~10-20% smaller on paper textures; +~1-2s/page at 300 DPI (demoted to jpeg in fast mode)
 
     # Quality/ratio knobs
     target_bg_dpi: int = 150            # background layer DPI after downsample
@@ -22,7 +23,7 @@ class CompressOptions:
     mode: Literal["fast", "standard", "safe"] = "standard"
 
     # Archival / legal profile
-    legal_codec_profile: bool = False   # force CCITT G4 instead of JBIG2 (BSI TR-03138 / NARA compliant)
+    legal_codec_profile: str | None = None  # reserved: "ccitt-g4" raises NotImplementedError until a later phase
     target_pdf_a: bool = False          # target PDF/A-2u output (stricter codec/color-space constraints)
 
     # OCR behavior
@@ -41,6 +42,7 @@ class CompressOptions:
     max_input_mb: float = 2000.0        # refuse inputs over this size
     per_page_timeout_seconds: int = 120
     total_timeout_seconds: int = 1200
+    photo_target_dpi: int = 200         # DPI for PHOTO_ONLY pages (higher than bg to preserve micro-detail)
 
     # Output
     emit_sidecar_manifest: bool = True
@@ -139,11 +141,13 @@ Output:
 Engine:
   --engine {mrc,downsample-only}   Default: mrc.
   --mode {fast,standard,safe}      Default: standard.
+  --bg-codec {jpeg,jpeg2000}       Default: jpeg. jpeg2000 is ~10-20% smaller on paper textures; demoted to jpeg in fast mode.
   --target-bg-dpi INT              Default: 150.
   --target-color-quality INT       Default: 55 (0-100 scale).
   --bg-chroma {4:4:4,4:2:2,4:2:0}  Default: 4:4:4 (avoids smearing colored text; 4:2:0 only for photo-only pages).
-  --force-monochrome               Skip color detection.
-  --legal-mode                     Force CCITT G4 instead of JBIG2 (BSI / NARA compliance).
+  --photo-target-dpi INT           Default: 200. DPI for PHOTO_ONLY pages; higher than target-bg-dpi to preserve micro-detail.
+  --force-monochrome               Skip color detection; collapse mixed/photo pages to the text-only route.
+  --legal-mode                     RESERVED: raises NotImplementedError until a later phase (CCITT G4 not yet built).
   --target-pdfa                    Target PDF/A-2u output.
 
 OCR:
@@ -458,6 +462,17 @@ Prints environment sanity report and exits — never runs compression. Output in
 ### 8.4 Self-counters (local, opt-in)
 
 By default, nothing persists between runs. Users who want to see cumulative stats across many runs can pass `--stats-file PATH`; HankPDF appends a JSONL entry per job to that file. This is **the user's file**, written only when they opt in. No rotation, no upload, no analytics.
+
+### 8.5 Structured warning codes (emitted in CompressReport.warnings)
+
+Phase 2b adds the following per-page and per-job counters / warnings:
+
+- `strategy_distribution{class="text_only"|"photo_only"|"mixed"}` — emitted by `compress()` once per page (see `CompressReport.strategy_distribution`). `ALREADY_OPTIMIZED` is not emitted by `classify_page`; triage pass-through pages bypass this loop entirely.
+- `page-N-jbig2-fallback-to-flate` — emitted when jbig2enc errored on page N and compose fell back to flate. Distinct from `jbig2enc-unavailable-using-flate-fallback` (job-wide, emitted once up front when the jbig2 binary is missing).
+- `page-N-color-detected-in-monochrome-mode` — emitted when `force_monochrome=True` flattened a page that contained color content. `force-monochrome-discarded-color-on-N-pages` is the job-wide aggregate.
+- `page-N-text-only-demoted-to-mixed-color-detected` — emitted when classify_page routed a page to TEXT_ONLY but the channel-parity check detected color, forcing fallback to the MRC route.
+- `page-N-anomalous-ratio-{N}x-safe-verify` — emitted when per-page ratio exceeds 200× on a non-TEXT_ONLY page; the page's tile-SSIM floor is tightened to the `safe` threshold.
+- `bg-codec-jpeg2000-demoted-fast-mode` — emitted once per job when the user requested `bg_codec=jpeg2000` but `mode=fast` demoted it to JPEG for latency reasons.
 
 ## 10. Build matrix
 
