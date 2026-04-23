@@ -35,6 +35,7 @@ from pdf_smasher.cli.warning_codes import emit_error as _warn_error
 from pdf_smasher.cli.warning_codes import line_prefix as _line_prefix
 from pdf_smasher.engine.chunking import split_pdf_by_size
 from pdf_smasher.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
+from pdf_smasher.utils.atomic import _atomic_write_bytes
 from pdf_smasher.utils.text import format_page_list_short
 
 
@@ -680,7 +681,7 @@ def _run_image_export(
                 if ext_matches_format
                 else parent / f"{base}{final_ext}"
             )
-            target.write_bytes(blob)
+            _atomic_write_bytes(target, blob)
             if not args.quiet:
                 print(
                     f"{_prefix} wrote {target} ({len(blob):,} bytes, "
@@ -699,7 +700,7 @@ def _run_image_export(
             try:
                 for page_idx, blob in zip(page_indices, pages_iter, strict=True):
                     target = parent / f"{base}_{page_idx + 1:0{pad_w}d}{final_ext}"
-                    target.write_bytes(blob)
+                    _atomic_write_bytes(target, blob)
                     written_paths.append(target)
                     total_bytes += len(blob)
                     if not args.quiet:
@@ -981,12 +982,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         if args.max_output_mb is None:
-            args.output.write_bytes(output_bytes)
+            _atomic_write_bytes(args.output, output_bytes)
         else:
             max_bytes = int(args.max_output_mb * 1024 * 1024)
             chunks = split_pdf_by_size(output_bytes, max_bytes=max_bytes)
             if len(chunks) == 1:
-                args.output.write_bytes(chunks[0])
+                _atomic_write_bytes(args.output, chunks[0])
                 # Oversize check even on the single-chunk path. This
                 # happens when the splitter can't go below the cap
                 # (e.g., a single page is already larger than max_bytes)
@@ -1034,7 +1035,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     for idx, chunk in enumerate(chunks, start=1):
                         p = parent / f"{base}_{idx:0{chunk_pad_w}d}{ext}"
-                        p.write_bytes(chunk)
+                        _atomic_write_bytes(p, chunk)
                         written_paths.append(p)
                 except OSError as exc:
                     # Disk full / permission / path errors mid-write.
