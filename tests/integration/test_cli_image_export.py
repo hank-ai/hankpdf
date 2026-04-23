@@ -154,3 +154,46 @@ def test_output_format_suffix_mismatch_warns(tmp_path, capsys) -> None:  # type:
     assert "extension" in err.lower() or "overrides" in err.lower(), (
         f"expected mismatch warning in stderr; got: {err!r}"
     )
+
+
+@pytest.mark.integration
+def test_output_format_override_corrects_extension(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """--output-format png with -o out.jpeg must write PNG to .png, not
+    .jpeg. Previously the warning fired but the file was still named
+    out.jpeg with PNG bytes inside — self-contradicting on disk."""
+    in_path = _make_pdf(tmp_path, n_pages=1)
+    out_path = tmp_path / "out.jpeg"
+    rc = main([str(in_path), "-o", str(out_path), "--output-format", "png"])
+    assert rc == 0
+    # The warning is fine, but the file on disk must match the actual format
+    assert not out_path.exists(), (
+        f"should not have written .jpeg when format is png; found: {out_path}"
+    )
+    actual = tmp_path / "out.png"
+    assert actual.exists(), (
+        f"expected out.png to exist; got: {list(tmp_path.iterdir())}"
+    )
+    assert actual.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", "must be PNG bytes"
+
+
+@pytest.mark.integration
+def test_output_format_override_corrects_extension_multipage(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Multi-page variant of the override test: 3 pages, -o out.jpg,
+    --output-format webp must produce out_001.webp, out_002.webp,
+    out_003.webp — not .jpg."""
+    in_path = _make_pdf(tmp_path, n_pages=3)
+    out_path = tmp_path / "out.jpg"
+    rc = main([
+        str(in_path),
+        "-o", str(out_path),
+        "--output-format", "webp",
+    ])
+    assert rc == 0
+    jpgs = sorted(tmp_path.glob("out_*.jpg"))
+    assert not jpgs, f"no .jpg files should exist; got {jpgs}"
+    webps = sorted(tmp_path.glob("out_*.webp"))
+    assert len(webps) == 3, f"expected 3 .webp files; got {webps}"
+    # WebP magic: "RIFF" .... "WEBP"
+    head = webps[0].read_bytes()[:12]
+    assert head[:4] == b"RIFF", f"expected RIFF prefix; got {head!r}"
+    assert head[8:12] == b"WEBP", f"expected WEBP marker; got {head!r}"

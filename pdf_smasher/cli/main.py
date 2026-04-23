@@ -506,12 +506,24 @@ def _run_image_export(
         args.output.parent.mkdir(parents=True, exist_ok=True)
 
     out_ext = {"jpeg": ".jpg", "png": ".png", "webp": ".webp"}[image_format]
-    valid_image_exts = {"jpg", "jpeg", "png", "webp"}
+    # Map each valid image ext to its canonical image_format to detect
+    # mismatches (e.g. -o out.jpeg --output-format png must NOT write
+    # PNG bytes to a .jpeg file).
+    ext_to_format = {
+        "jpg": "jpeg",
+        "jpeg": "jpeg",
+        "png": "png",
+        "webp": "webp",
+    }
     base = args.output.stem
     parent = args.output.parent
-    # Keep the user's image extension if present; else append the canonical one.
+    # Keep the user's image extension only if it matches the resolved
+    # format; else replace it with the canonical one for image_format.
     requested_ext = args.output.suffix.lower()
-    final_ext = requested_ext if requested_ext.lstrip(".") in valid_image_exts else out_ext
+    ext_matches_format = (
+        ext_to_format.get(requested_ext.lstrip(".")) == image_format
+    )
+    final_ext = requested_ext if ext_matches_format else out_ext
 
     # Progress: tqdm bar ticks on each encoded page, so a 400-page PNG
     # export shows real progress (was silent while ~8 GB buffered in
@@ -555,7 +567,7 @@ def _run_image_export(
                 return EXIT_OK
             target = (
                 args.output
-                if requested_ext.lstrip(".") in valid_image_exts
+                if ext_matches_format
                 else parent / f"{base}{final_ext}"
             )
             target.write_bytes(blob)
