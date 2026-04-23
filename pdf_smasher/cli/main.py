@@ -79,6 +79,44 @@ def _positive_float(raw: str) -> float:
     return f
 
 
+# Upper bound on --max-workers. 256 matches the ProcessPoolExecutor default
+# guidance (4 * cpu_count capped at 61 on Windows; anything beyond 256 is
+# DoS-adjacent: each worker re-imports cv2/pikepdf/numpy for ~2-3s and holds
+# a one-page raster worth of memory).
+_MAX_WORKER_COUNT = 256
+
+
+def _max_workers_value(raw: str) -> int:
+    """argparse type for --max-workers. Reject negative or absurd values.
+
+    0 = auto (cpu_count - 1, clamped ≥ 1) per CompressOptions.max_workers.
+    1 = serial. 2..256 = explicit worker count.
+
+    Reviewer B: negatives used to pass argparse and get silently coerced
+    inside ``_resolve_worker_count``. Fail fast at parse time so the error
+    names the right flag.
+    """
+    try:
+        n = int(raw)
+    except ValueError as e:
+        msg = f"--max-workers: invalid int: {raw!r}"
+        raise argparse.ArgumentTypeError(msg) from e
+    if n < 0:
+        msg = (
+            f"--max-workers must be >= 0 (got {n}); 0=auto, 1=serial, "
+            f"2..{_MAX_WORKER_COUNT}=explicit"
+        )
+        raise argparse.ArgumentTypeError(msg)
+    if n > _MAX_WORKER_COUNT:
+        msg = (
+            f"--max-workers capped at {_MAX_WORKER_COUNT} (got {n}); each "
+            "worker imports numpy/cv2/pikepdf and holds a one-page raster "
+            "worth of memory"
+        )
+        raise argparse.ArgumentTypeError(msg)
+    return n
+
+
 def _positive_dpi(raw: str) -> int:
     """argparse type for --image-dpi. Reject unreasonably large or
     non-positive values that would trigger a memory-exhaustion DoS in
@@ -235,12 +273,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--max-workers",
-        type=int,
+        type=_max_workers_value,
         default=0,
         help=(
-            "Per-page parallelism. 0 (default) = auto (cpu_count-2, min 1). "
-            "1 = serial. N>1 = exactly N workers. Each worker gets its own "
-            "single-page PDF slice, never the whole source."
+            f"Per-page parallelism. 0 (default) = auto (cpu_count-1, min 1). "
+            f"1 = serial. 2..{_MAX_WORKER_COUNT} = exactly N workers. Each "
+            "worker gets its own single-page PDF slice, never the whole source."
         ),
     )
 
