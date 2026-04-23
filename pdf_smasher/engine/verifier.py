@@ -92,17 +92,31 @@ def ssim_score(a: Image.Image, b: Image.Image) -> float:
 
 
 def _page_has_color(raster: Image.Image) -> bool:
-    """Return True if >0.5% of pixels have RGB channel spread > tolerance.
+    """Return True if >0.1% of pixels have channel spread > tolerance OR
+    any connected color region spans >=200 contiguous pixels.
 
-    Task 0.2 version — uses 0.5% threshold to defeat JPEG ringing halos.
-    Task 0.3 replaces this body with a 0.1% + connected-component check.
+    0.1% fraction catches pervasive tints. The connected-component check
+    catches small but meaningful color regions (stamps, logos) that fall
+    below the fraction threshold. JPEG ringing (spread < 15, no contiguous
+    >=200px region) does not trigger either check.
     """
     if raster.mode in {"L", "1"}:
         return False
     arr = np.asarray(raster.convert("RGB"), dtype=np.int16)
     spread = arr.max(axis=-1) - arr.min(axis=-1)
-    color_frac = float((spread > CHANNEL_SPREAD_COLOR_TOLERANCE).sum()) / spread.size
-    return color_frac > 0.005
+    color_mask = spread > CHANNEL_SPREAD_COLOR_TOLERANCE
+    color_frac = float(color_mask.sum()) / color_mask.size
+    if color_frac > 0.001:
+        return True
+    import cv2 as _cv2  # noqa: PLC0415
+
+    _, _, stats, _ = _cv2.connectedComponentsWithStats(
+        color_mask.astype(np.uint8), connectivity=8,
+    )
+    # stats[0] is background label — skip it. Column 4 = CC_STAT_AREA.
+    if len(stats) <= 1:
+        return False
+    return bool(stats[1:, _cv2.CC_STAT_AREA].max() >= 200)
 
 
 @dataclass(frozen=True)

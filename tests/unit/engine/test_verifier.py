@@ -269,3 +269,59 @@ def test_verifier_aggregator_all_pass_returns_ok() -> None:
     assert result.status == "pass"
     assert result.color_preserved is True
     assert result.failing_pages == ()
+
+
+# ---------- channel-parity check ----------
+
+
+def test_verifier_fails_when_input_had_color_but_output_is_grayscale() -> None:
+    """Silent color loss: input had colored ink; output is grayscale. Verifier must catch."""
+    in_arr = np.full((200, 200, 3), 255, dtype=np.uint8)
+    in_arr[40:80, 40:160] = [200, 40, 40]  # red stamp
+    in_raster = Image.fromarray(in_arr)
+
+    out_arr = np.full((200, 200, 3), 255, dtype=np.uint8)
+    out_arr[40:80, 40:160] = 80  # gray stamp — color lost
+    out_raster = Image.fromarray(out_arr)
+
+    result = verify_pages(
+        input_rasters=[in_raster],
+        output_rasters=[out_raster],
+        input_ocr_texts=["STAMP"],
+        output_ocr_texts=["STAMP"],
+    )
+    assert result.status == "fail", (
+        "verifier must detect color-layer loss even when OCR/SSIM-on-L look fine"
+    )
+
+
+# ---------- _page_has_color pinning ----------
+
+from pdf_smasher.engine.verifier import _page_has_color  # noqa: E402
+
+
+def test_page_has_color_fraction_boundary_0_1_pct() -> None:
+    """_page_has_color uses 0.1% fraction threshold (not 0.5%).
+
+    Pin the threshold so changing it causes a failure.
+    A colored region at 0.3% coverage (above 0.001, below 0.005) must be
+    detected as 'has color' — this would fail if threshold were 0.005.
+    """
+    arr = np.full((2550, 3300, 3), 240, dtype=np.uint8)
+    arr[1000:1159, 1000:1159] = [200, 40, 40]  # ~0.3% of pixels
+    img = Image.fromarray(arr)
+    assert _page_has_color(img), "0.3% colored region must be detected (threshold is 0.1%, not 0.5%)"
+
+
+def test_page_has_color_jpeg_ringing_not_detected_as_color() -> None:
+    """JPEG ringing halos around black glyphs (channel spread 5-12) must NOT
+    trigger the color detector (tolerance=15, fraction gate=0.1%)."""
+    arr = np.full((300, 300, 3), 240, dtype=np.uint8)
+    rng = np.random.default_rng(seed=1)
+    halo_mask = rng.random((300, 300)) < 0.05  # 5% halo pixels
+    arr[halo_mask, 0] = 230  # spread=10 < tolerance=15
+    arr[halo_mask, 2] = 240
+    img = Image.fromarray(arr)
+    assert not _page_has_color(img), (
+        "JPEG ringing halos (spread=10, fraction=5%) must NOT be detected as color"
+    )
