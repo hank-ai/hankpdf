@@ -67,3 +67,17 @@ def test_multi_range_total_cardinality_capped() -> None:
     spec = ",".join(f"{1 + i * 2_000_000}-{1_000_000 + i * 2_000_000}" for i in range(10))
     with pytest.raises(ValueError, match=r"too large|cap|total"):
         _parse_pages_spec(spec)
+
+
+@pytest.mark.parametrize("spec", ["-5", "abc", "1-2-3", "1,abc", "1-", "-", "1-abc"])
+def test_helpful_error_message_mentions_pages_context(spec: str) -> None:
+    """Malformed --pages input must raise ValueError whose message
+    mentions '--pages' / 'pages' context, not raw int() noise.
+
+    Reviewer B: ``_parse_pages_spec("-5")`` used to raise
+    ``invalid literal for int() with base 10: ''`` with no --pages
+    reference. Wrap every int() conversion with context so scripts
+    parsing stderr can map failures back to the flag.
+    """
+    with pytest.raises(ValueError, match=r"(?i)--pages|pages"):
+        _parse_pages_spec(spec)

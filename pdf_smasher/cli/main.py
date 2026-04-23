@@ -303,10 +303,34 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+def _int_from_pages_token(raw: str, part: str) -> int:
+    """Parse a token inside a --pages spec, re-raising ValueError with
+    --pages context on failure.
+
+    Without this wrapper, Python's built-in ``int("abc")`` surfaces as
+    ``invalid literal for int() with base 10: 'abc'`` — no reference to
+    --pages, so batch scripts grepping for flag errors miss it
+    (Reviewer B).
+    """
+    try:
+        return int(raw)
+    except ValueError as exc:
+        # Preserve the original text in the message so operators can see
+        # WHICH token failed; chain the original via `from exc` for
+        # programmatic inspection.
+        msg = (
+            f"--pages token {part!r} is malformed: expected 1-indexed "
+            f"integers separated by ',' and ranges 'lo-hi'; got non-integer "
+            f"part {raw!r}"
+        )
+        raise ValueError(msg) from exc
+
+
 def _parse_pages_spec(spec: str) -> set[int]:
     """Parse a 1-indexed page spec like '1,3-5,10' into a set of ints.
 
-    Raises ValueError on malformed input.
+    Raises ValueError on malformed input. Error messages always reference
+    --pages so batch logs are greppable — see :func:`_int_from_pages_token`.
     """
     out: set[int] = set()
     for raw in spec.split(","):
@@ -315,21 +339,26 @@ def _parse_pages_spec(spec: str) -> set[int]:
             continue
         if "-" in part:
             lo_s, hi_s = part.split("-", 1)
-            lo, hi = int(lo_s), int(hi_s)
+            # Empty halves ('-5' -> lo_s='', hi_s='5'; '5-' -> hi_s='') also
+            # trip the int() wrap; route through the helper so the error
+            # names --pages rather than raising 'invalid literal … :'.
+            lo = _int_from_pages_token(lo_s, part)
+            hi = _int_from_pages_token(hi_s, part)
             if lo < 1 or hi < lo:
-                msg = f"invalid range {part!r}: must be 1-indexed, lo <= hi"
+                msg = f"--pages range {part!r} invalid: must be 1-indexed, lo <= hi"
                 raise ValueError(msg)
             if hi - lo + 1 > _MAX_PAGES_RANGE:
                 msg = (
-                    f"range {part!r} too large: cap is {_MAX_PAGES_RANGE:,} "
-                    "pages per range to prevent memory exhaustion"
+                    f"--pages range {part!r} too large: cap is "
+                    f"{_MAX_PAGES_RANGE:,} pages per range to prevent "
+                    "memory exhaustion"
                 )
                 raise ValueError(msg)
             out.update(range(lo, hi + 1))
         else:
-            n = int(part)
+            n = _int_from_pages_token(part, part)
             if n < 1:
-                msg = f"invalid page {part!r}: must be 1-indexed"
+                msg = f"--pages value {part!r} invalid: must be 1-indexed"
                 raise ValueError(msg)
             out.add(n)
     # Total cardinality cap — a per-range check alone allows
