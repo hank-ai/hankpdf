@@ -171,6 +171,89 @@ def test_compress_verify_true_reports_real_status() -> None:
     assert not any(w == "verifier-skipped" for w in report.warnings)
 
 
+def _make_color_scan(*, source_dpi: int = 200) -> bytes:
+    """Build a single-page PDF with clearly colored content so
+    force_monochrome triggers the color-detected warning."""
+    w_pt, h_pt = 612.0, 792.0
+    w_px = round(w_pt * source_dpi / 72)
+    h_px = round(h_pt * source_dpi / 72)
+    img = Image.new("RGB", (w_px, h_px), color="white")
+    draw = ImageDraw.Draw(img)
+    # Big saturated red rectangle so _page_has_color() definitely fires.
+    draw.rectangle((100, 100, w_px - 100, h_px - 100), fill=(255, 0, 0))
+
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(w_pt, h_pt))
+    page = pdf.pages[0]
+    jbuf = io.BytesIO()
+    img.save(jbuf, format="JPEG", quality=92, subsampling=0)
+    xobj = pdf.make_stream(
+        jbuf.getvalue(),
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Image,
+        Width=w_px,
+        Height=h_px,
+        ColorSpace=pikepdf.Name.DeviceRGB,
+        BitsPerComponent=8,
+        Filter=pikepdf.Name.DCTDecode,
+    )
+    page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Scan=xobj))
+    page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Scan Do Q\n")
+    buf = io.BytesIO()
+    pdf.save(buf)
+    return buf.getvalue()
+
+
+def test_worker_warnings_propagate_to_report_serial() -> None:
+    """Regression: worker-emitted warnings (e.g.
+    page-N-color-detected-in-monochrome-mode) must survive the
+    worker→parent boundary and land in report.warnings. Serial mode.
+    """
+    pdf_in = _make_color_scan()
+    _, report = compress(
+        pdf_in,
+        options=CompressOptions(
+            force_monochrome=True, skip_verify=True, max_workers=1,
+        ),
+    )
+    combined = " ".join(report.warnings)
+    assert (
+        "force-monochrome-discarded-color" in combined
+        or "color-detected-in-monochrome-mode" in combined
+    ), (
+        f"expected a force-monochrome color warning; got {report.warnings!r}"
+    )
+
+
+def test_worker_warnings_propagate_to_report_parallel() -> None:
+    """Same invariant when pages run in worker processes: warnings
+    appended inside the worker's local list must survive pickling via
+    _PageResult.per_page_warnings and land in report.warnings."""
+    # Two pages so the pool actually has work to parallelize.
+    pdf_in_a = _make_color_scan()
+    # Merge two color pages into one doc.
+    with pikepdf.open(io.BytesIO(pdf_in_a)) as a, pikepdf.open(io.BytesIO(pdf_in_a)) as b:
+        a.pages.extend(b.pages)
+        buf = io.BytesIO()
+        a.save(buf)
+        two_page = buf.getvalue()
+
+    _, report = compress(
+        two_page,
+        options=CompressOptions(
+            force_monochrome=True, skip_verify=True, max_workers=2,
+        ),
+    )
+    combined = " ".join(report.warnings)
+    assert (
+        "force-monochrome-discarded-color" in combined
+        or "color-detected-in-monochrome-mode" in combined
+    ), (
+        f"expected a force-monochrome color warning from workers; "
+        f"got {report.warnings!r}"
+    )
+
+
 def test_progress_event_verifier_passed_is_none_when_skipped() -> None:
     """Regression: when skip_verify=True the worker synthesizes a
     trivially-passing verdict, which used to bubble up to the progress
