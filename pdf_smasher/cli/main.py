@@ -163,7 +163,7 @@ def _doctor_report() -> str:
                 )
                 first_line = (out.stdout or out.stderr).splitlines()[:1]
                 ver = first_line[0] if first_line else "unknown"
-            except (subprocess.TimeoutExpired, OSError):
+            except subprocess.TimeoutExpired, OSError:
                 ver = "unreachable"
             lines.append(f"  {tool:12s} {ver}")
         else:
@@ -175,10 +175,10 @@ def _doctor_report() -> str:
     try:
         import io as _io_probe
 
-        from PIL import Image as _pil_probe
+        from PIL import Image as _PILImage
 
         _buf = _io_probe.BytesIO()
-        _pil_probe.new("RGB", (8, 8)).save(_buf, format="JPEG2000")
+        _PILImage.new("RGB", (8, 8)).save(_buf, format="JPEG2000")
         lines.append(f"  {'JPEG2000':12s} available (Pillow/OpenJPEG)")
     except (OSError, ImportError) as e:
         lines.append(

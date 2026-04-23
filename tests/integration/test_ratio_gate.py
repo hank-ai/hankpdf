@@ -1,7 +1,7 @@
 """Phase-2b ratio gate: assert compression ratios on canonical fixtures.
 
 All tests are marked @pytest.mark.integration and may be skipped if jbig2enc
-is unavailable (text-only JBIG2 path requires it for the 20× gate).
+is unavailable (text-only JBIG2 path requires it for the 20x gate).
 """
 
 from __future__ import annotations
@@ -53,11 +53,11 @@ def _text_only_fixture() -> bytes:
     """
     img = Image.new("RGB", (2550, 3300), color="white")
     draw = ImageDraw.Draw(img)
-    _FIXTURE_FONT = "tests/integration/_fixtures/LiberationMono-Regular.ttf"
+    fixture_font = "tests/integration/_fixtures/LiberationMono-Regular.ttf"
     try:
         import pathlib as _pl
 
-        _font_path = _pl.Path(_FIXTURE_FONT)
+        _font_path = _pl.Path(fixture_font)
         if _font_path.exists():
             font = ImageFont.truetype(str(_font_path), 72)
         else:
@@ -82,7 +82,7 @@ def _text_only_fixture() -> bytes:
 @pytest.mark.integration
 @pytest.mark.skipif(
     __import__("shutil").which("jbig2") is None,
-    reason="jbig2enc not installed — text-only ratio falls to ~8× on flate fallback, test requires ≥20×",
+    reason="jbig2enc not installed — text-only ratio falls to ~8x on flate fallback, test requires ≥20x",
 )
 def test_text_only_page_hits_target_ratio() -> None:
     """Text-only routing: black text on white should hit >=20x compression.
@@ -108,7 +108,7 @@ def test_text_only_page_hits_target_ratio() -> None:
         "monochrome threshold) before the ratio assertion is meaningful."
     )
 
-    pdf_out, report = compress(pdf_in)
+    _, report = compress(pdf_in)
     assert report.ratio >= 20.0, (
         f"text-only fixture should compress >=20x; got {report.ratio:.2f}x "
         f"(in={report.input_bytes:,} out={report.output_bytes:,})"
@@ -173,7 +173,7 @@ def test_colored_stamp_is_preserved_after_compression() -> None:
     import pypdfium2 as pdfium
 
     arr = np.full((2550, 3300, 3), 255, dtype=np.uint8)
-    arr[500:600, 500:2000] = 0           # black text band (~1% area)
+    arr[500:600, 500:2000] = 0  # black text band (~1% area)
     arr[1500:1700, 1500:2500] = [200, 40, 40]  # red stamp (~2% area)
     img = Image.fromarray(arr)
     pdf_in = _wrap_raster_as_pdf_bytes(img)
@@ -221,7 +221,12 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
             font = ImageFont.load_default(size=72)
         y, r = 80, 0
         while y < 3200:
-            draw.text((100, y), f"TEXT ONLY LINE {r}: ICD-10 A00.{r % 100:02d} dose 1.25mg", fill="black", font=font)
+            draw.text(
+                (100, y),
+                f"TEXT ONLY LINE {r}: ICD-10 A00.{r % 100:02d} dose 1.25mg",
+                fill="black",
+                font=font,
+            )
             y += 90
             r += 1
         return img
@@ -243,8 +248,13 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
         draw.rectangle((0, 1500, 2550, 2000), fill=(20, 20, 20))
         try:
             import pathlib as _pl
+
             _fp = _pl.Path("tests/integration/_fixtures/LiberationMono-Regular.ttf")
-            font = ImageFont.truetype(str(_fp), 96) if _fp.exists() else ImageFont.truetype("LiberationMono-Regular.ttf", 96)
+            font = (
+                ImageFont.truetype(str(_fp), 96)
+                if _fp.exists()
+                else ImageFont.truetype("LiberationMono-Regular.ttf", 96)
+            )
         except OSError:
             font = ImageFont.load_default(size=96)
         for r in range(8):
@@ -260,9 +270,12 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
         img.save(jpeg, format="JPEG", quality=95, subsampling=0)
         xobj = pdf.make_stream(
             jpeg.getvalue(),
-            Type=pikepdf.Name.XObject, Subtype=pikepdf.Name.Image,
-            Width=img.size[0], Height=img.size[1],
-            ColorSpace=pikepdf.Name.DeviceRGB, BitsPerComponent=8,
+            Type=pikepdf.Name.XObject,
+            Subtype=pikepdf.Name.Image,
+            Width=img.size[0],
+            Height=img.size[1],
+            ColorSpace=pikepdf.Name.DeviceRGB,
+            BitsPerComponent=8,
             Filter=pikepdf.Name.DCTDecode,
         )
         page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Scan=xobj))
@@ -340,7 +353,7 @@ def _photo_with_sharp_edges_fixture() -> bytes:
 
 @pytest.mark.integration
 def test_photo_only_page_does_not_regress() -> None:
-    """Regression gate: photo-only must compress >=3× via single-JPEG path.
+    """Regression gate: photo-only must compress >=3x via single-JPEG path.
 
     Pre-asserts PHOTO_ONLY routing so the ratio assertion can't pass on a
     different strategy.
@@ -366,12 +379,10 @@ def test_photo_only_page_does_not_regress() -> None:
     # digit multiset check even though the image itself round-trips correctly.
     # This gate measures the compression ratio, not content preservation —
     # preservation is exercised in test_photo_only_page_preserves_sharp_edges.
-    from pdf_smasher import CompressOptions as _CO
+    from pdf_smasher import CompressOptions as _CO  # noqa: N814 — local alias for brevity
 
     _, report = compress(pdf_in, options=_CO(mode="fast"))
-    assert report.ratio >= 3.0, (
-        f"photo-only regressed below 3x: got {report.ratio:.2f}x"
-    )
+    assert report.ratio >= 3.0, f"photo-only regressed below 3x: got {report.ratio:.2f}x"
 
 
 @pytest.mark.integration
@@ -384,7 +395,7 @@ def test_photo_only_page_preserves_sharp_edges() -> None:
     import numpy as np
     import pypdfium2 as pdfium
 
-    from pdf_smasher import CompressOptions as _CO
+    from pdf_smasher import CompressOptions as _CO  # noqa: N814 — local alias for brevity
 
     pdf_in = _photo_with_sharp_edges_fixture()
     pdf_out, _ = compress(pdf_in)

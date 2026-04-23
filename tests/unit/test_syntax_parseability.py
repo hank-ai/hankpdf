@@ -5,6 +5,7 @@ Wave 2 CRIT-2 caught both triage.py and cli/main.py in this state with
 unit suite. This test walks the whole package via ast.parse so a
 SyntaxError anywhere blocks the merge.
 """
+
 from __future__ import annotations
 
 import ast

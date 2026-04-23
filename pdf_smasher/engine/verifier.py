@@ -19,7 +19,6 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 from PIL import Image
@@ -30,11 +29,11 @@ from pdf_smasher.types import VerifierResult
 
 _DIGIT_RUN_RE = re.compile(r"\d+(?:[.,]\d+)?(?:\s*(?:mg|mcg|mL|IU|ng|g|kg|lb|oz|%))?")
 
-_DEFAULT_SSIM_FLOOR = 0.92                     # ARCH §5 global, both modes
-_DEFAULT_TILE_SSIM_FLOOR_STANDARD = 0.85       # ARCH §5 tile, standard
-_DEFAULT_TILE_SSIM_FLOOR_SAFE = 0.88           # ARCH §5 tile, safe
-_DEFAULT_LEVENSHTEIN_CEILING_STANDARD = 0.05   # ARCH §5 raw Lev, standard
-_DEFAULT_LEVENSHTEIN_CEILING_SAFE = 0.02       # ARCH §5 raw Lev, safe
+_DEFAULT_SSIM_FLOOR = 0.92  # ARCH §5 global, both modes
+_DEFAULT_TILE_SSIM_FLOOR_STANDARD = 0.85  # ARCH §5 tile, standard
+_DEFAULT_TILE_SSIM_FLOOR_SAFE = 0.88  # ARCH §5 tile, safe
+_DEFAULT_LEVENSHTEIN_CEILING_STANDARD = 0.05  # ARCH §5 raw Lev, standard
+_DEFAULT_LEVENSHTEIN_CEILING_SAFE = 0.02  # ARCH §5 raw Lev, safe
 
 # SHARED CHANNEL-SPREAD TOLERANCE.
 # Both the verifier's channel-parity check AND foreground.is_effectively_monochrome
@@ -42,6 +41,12 @@ _DEFAULT_LEVENSHTEIN_CEILING_SAFE = 0.02       # ARCH §5 raw Lev, safe
 # to TEXT_ONLY by the mono detector and then pass the verifier — resulting in silent
 # color loss. Raised to 15 to defeat JPEG ringing halos (spread 5-12) around glyphs.
 CHANNEL_SPREAD_COLOR_TOLERANCE = 15
+
+# Fraction of color pixels above which the page is unambiguously colored.
+_COLOR_PIXEL_FRACTION_THRESHOLD = 0.001
+# Minimum connected-component area (px) that still triggers color detection
+# when the fraction threshold doesn't — catches small stamps / logos.
+_COLOR_COMPONENT_MIN_AREA = 200
 
 
 def levenshtein_ratio(a: str, b: str) -> float:
@@ -106,17 +111,18 @@ def _page_has_color(raster: Image.Image) -> bool:
     spread = arr.max(axis=-1) - arr.min(axis=-1)
     color_mask = spread > CHANNEL_SPREAD_COLOR_TOLERANCE
     color_frac = float(color_mask.sum()) / color_mask.size
-    if color_frac > 0.001:
+    if color_frac > _COLOR_PIXEL_FRACTION_THRESHOLD:
         return True
     import cv2 as _cv2  # noqa: PLC0415
 
     _, _, stats, _ = _cv2.connectedComponentsWithStats(
-        color_mask.astype(np.uint8), connectivity=8,
+        color_mask.astype(np.uint8),
+        connectivity=8,
     )
     # stats[0] is background label — skip it. Column 4 = CC_STAT_AREA.
     if len(stats) <= 1:
         return False
-    return bool(stats[1:, _cv2.CC_STAT_AREA].max() >= 200)
+    return bool(stats[1:, _cv2.CC_STAT_AREA].max() >= _COLOR_COMPONENT_MIN_AREA)
 
 
 @dataclass(frozen=True)
@@ -217,7 +223,7 @@ def tile_ssim_min(
     *,
     tile_size: int = 50,
 ) -> float:
-    """Return the minimum SSIM over tile_size×tile_size tiles of (a, b).
+    """Return the minimum SSIM over tile_sizextile_size tiles of (a, b).
 
     Vectorized: computes the full SSIM map once via structural_similarity(
     full=True), then does a single block_reduce(..., np.nanmin) to get the
@@ -236,14 +242,20 @@ def tile_ssim_min(
         b = b.resize(a.size, Image.Resampling.NEAREST)  # ±1px rounding only
     a_arr = np.asarray(a.convert("L"), dtype=np.float64)
     b_arr = np.asarray(b.convert("L"), dtype=np.float64)
-    _, ssim_map = structural_similarity(  # type: ignore[no-untyped-call,misc]
-        a_arr, b_arr, data_range=255.0, full=True,
+    _, ssim_map = structural_similarity(  # type: ignore[no-untyped-call]
+        a_arr,
+        b_arr,
+        data_range=255.0,
+        full=True,
     )
     # NaN for constant-variance windows (e.g., all-white pages) → clamp to 1.0
     # so blank pages score as perfect rather than crashing the verifier.
     ssim_map = np.nan_to_num(ssim_map, nan=1.0)
-    tile_mins = block_reduce(
-        ssim_map, block_size=(tile_size, tile_size), func=np.nanmin, cval=np.nan,
+    tile_mins = block_reduce(  # type: ignore[no-untyped-call]
+        ssim_map,
+        block_size=(tile_size, tile_size),
+        func=np.nanmin,
+        cval=np.nan,
     )
     return float(np.nanmin(tile_mins))
 

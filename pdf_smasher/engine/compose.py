@@ -11,7 +11,7 @@ Three composition modes matching :class:`pdf_smasher.engine.strategy.PageStrateg
 - :func:`compose_text_only_page` — **text-only** pages. Single full-page
   JBIG2 image with ``/ImageMask true``, painted in the ink color over the
   detected paper color as the solid page background. No bg image XObject,
-  no inpainting, no JPEG. Typical ratios 20-100× on printed text.
+  no inpainting, no JPEG. Typical ratios 20-100x on printed text.
 - :func:`compose_photo_only_page` — **photo-only** pages. Single JPEG image
   covering the full page. No mask, no foreground layer.
 """
@@ -23,13 +23,13 @@ import subprocess
 import zlib
 from typing import Any, Literal
 
-BgColorMode = Literal["rgb", "grayscale"]
-BgCodec = Literal["jpeg", "jpeg2000"]
-
 import pikepdf
 from PIL import Image
 
 from pdf_smasher.engine.codecs.jbig2 import encode_1bit_jbig2
+
+BgColorMode = Literal["rgb", "grayscale"]
+BgCodec = Literal["jpeg", "jpeg2000"]
 
 _JPEG_QUALITY_BG = 45
 _JPEG_SUBSAMPLING_444 = 0  # 4:4:4 — no chroma subsampling
@@ -75,7 +75,7 @@ def _jpeg2000_bytes(
             quality_mode="rates",
             quality_layers=quality_layers or _JPEG2000_QUALITY_LAYERS_DEFAULT,
         )
-    except (OSError, KeyError, TypeError):
+    except OSError, KeyError, TypeError:
         return None
     return buf.getvalue()
 
@@ -131,7 +131,7 @@ def _encode_mask_xobject(
             "BitsPerComponent": 1,
             "Filter": pikepdf.Name.JBIG2Decode,
         }
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired:
         data = zlib.compress(_pack_1bit_msb(mask), level=9)
         kwargs = {
             "Type": pikepdf.Name.XObject,
@@ -272,7 +272,10 @@ def compose_photo_only_page(
         resized = raster.convert("RGB").resize((target_w, target_h), Image.Resampling.LANCZOS)
         color_space = pikepdf.Name.DeviceRGB
     data, filter_name = _encode_bg(
-        resized, bg_codec=bg_codec, jpeg_quality=jpeg_quality, subsampling=subsampling,
+        resized,
+        bg_codec=bg_codec,
+        jpeg_quality=jpeg_quality,
+        subsampling=subsampling,
     )
     xobj = _make_stream(
         pdf,

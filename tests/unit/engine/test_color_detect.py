@@ -7,16 +7,14 @@ meaningful color regions like colored stamps and logo ink.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from PIL import Image
 
 from pdf_smasher.engine.foreground import is_effectively_monochrome
 
-
 # ---------- grayscale inputs ----------
 
 
-def test_mode_L_is_monochrome() -> None:
+def test_mode_l_is_monochrome() -> None:
     img = Image.new("L", (100, 100), 128)
     assert is_effectively_monochrome(img) is True
 
@@ -62,13 +60,13 @@ def test_jpeg_ringing_halos_are_tolerated() -> None:
 
 
 def test_large_grayscale_rgb_image_downsamples_correctly() -> None:
-    """4000×5000 uniform-gray image must still classify as monochrome."""
+    """4000x5000 uniform-gray image must still classify as monochrome."""
     arr = np.full((5000, 4000, 3), 180, dtype=np.uint8)
     assert is_effectively_monochrome(Image.fromarray(arr)) is True
 
 
 def test_large_color_image_still_detected() -> None:
-    """4000×5000 image with a colored region is caught even after downsampling."""
+    """4000x5000 image with a colored region is caught even after downsampling."""
     arr = np.full((5000, 4000, 3), 240, dtype=np.uint8)
     arr[2000:2500, 1500:2000] = [200, 40, 40]
     assert is_effectively_monochrome(Image.fromarray(arr)) is False

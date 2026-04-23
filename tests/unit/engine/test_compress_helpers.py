@@ -1,4 +1,5 @@
 """Unit tests for compress() module-level helpers."""
+
 from __future__ import annotations
 
 import io

@@ -25,12 +25,14 @@ import pikepdf
 
 from pdf_smasher import CompressError, CompressOptions, compress
 
+_NAME_TAIL_LEN = 8
+
 
 def _redact(name: str) -> str:
     normed = unicodedata.normalize("NFC", name)
     digest = hashlib.sha1(normed.encode("utf-8")).hexdigest()
-    tail = normed[-8:] if len(normed) > 8 else normed
-    return f"{digest[:8]}…{tail}"
+    tail = normed[-_NAME_TAIL_LEN:] if len(normed) > _NAME_TAIL_LEN else normed
+    return f"{digest[:_NAME_TAIL_LEN]}…{tail}"
 
 
 def run(input_dir: Path, *, force_monochrome: bool) -> int:
@@ -41,8 +43,7 @@ def run(input_dir: Path, *, force_monochrome: bool) -> int:
 
     opts = CompressOptions(force_monochrome=force_monochrome)
     print(
-        "| File | Input (bytes) | Output (bytes) | Ratio | "
-        "Pages | Wall (ms) | Verifier |",
+        "| File | Input (bytes) | Output (bytes) | Ratio | Pages | Wall (ms) | Verifier |",
     )
     print("|---|---:|---:|---:|---:|---:|---|")
 
@@ -65,7 +66,7 @@ def run(input_dir: Path, *, force_monochrome: bool) -> int:
             n_refused += 1
             print(f"| {label} | {len(data):,} | — | — | — | — | CORRUPT: {e} |")
             continue
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             n_crashed += 1
             print(
                 f"| {label} | {len(data):,} | — | — | — | — | "

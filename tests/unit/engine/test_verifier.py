@@ -310,7 +310,9 @@ def test_page_has_color_fraction_boundary_0_1_pct() -> None:
     arr = np.full((2550, 3300, 3), 240, dtype=np.uint8)
     arr[1000:1159, 1000:1159] = [200, 40, 40]  # ~0.3% of pixels
     img = Image.fromarray(arr)
-    assert _page_has_color(img), "0.3% colored region must be detected (threshold is 0.1%, not 0.5%)"
+    assert _page_has_color(img), (
+        "0.3% colored region must be detected (threshold is 0.1%, not 0.5%)"
+    )
 
 
 def test_page_has_color_jpeg_ringing_not_detected_as_color() -> None:
@@ -333,7 +335,7 @@ def test_page_has_color_jpeg_ringing_not_detected_as_color() -> None:
 def test_anomaly_ratio_gate_triggers_safe_threshold() -> None:
     """Safe tile floor must be strictly tighter than standard.
 
-    Pre-Mortem Wave 3: a mostly-blank page can hit 100× ratio and pass the
+    Pre-Mortem Wave 3: a mostly-blank page can hit 100x ratio and pass the
     standard tile floor even with a faint watermark stripped. The anomaly
     gate adds a second pass at safe thresholds for outlier-ratio pages.
     """

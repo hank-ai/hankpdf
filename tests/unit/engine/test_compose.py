@@ -166,7 +166,7 @@ def test_compose_output_has_no_fg_xobject_when_using_imagemask() -> None:
         page = pdf_obj.pages[0]
         xobjects = page.Resources.get("/XObject")
         assert xobjects is not None
-        names = {str(k) for k in xobjects.keys()}
+        names = {str(k) for k in xobjects}
         # Background must be present.
         assert "/BG" in names
         # /FG as a separate foreground image XObject must NOT exist — the
@@ -255,11 +255,14 @@ def _openjpeg_available() -> bool:
     try:
         buf = _io.BytesIO()
         Image.new("RGB", (4, 4)).save(
-            buf, format="JPEG2000", quality_mode="rates", quality_layers=[25],
+            buf,
+            format="JPEG2000",
+            quality_mode="rates",
+            quality_layers=[25],
         )
-        return True
-    except (OSError, KeyError, TypeError):
+    except OSError, KeyError, TypeError:
         return False
+    return True
 
 
 import pytest  # noqa: E402
@@ -294,12 +297,22 @@ def test_bg_jpeg_quality_affects_output_size() -> None:
     fg = _black_blob_foreground()
     mask = _blank_mask()
     out_hi = compose_mrc_page(
-        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
-        page_width_pt=612.0, page_height_pt=792.0, bg_jpeg_quality=80,
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_jpeg_quality=80,
     )
     out_lo = compose_mrc_page(
-        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
-        page_width_pt=612.0, page_height_pt=792.0, bg_jpeg_quality=20,
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_jpeg_quality=20,
     )
     assert len(out_lo) < len(out_hi)
 
@@ -311,12 +324,22 @@ def test_bg_chroma_subsampling_affects_output_size() -> None:
     fg = _black_blob_foreground()
     mask = _blank_mask()
     out_444 = compose_mrc_page(
-        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
-        page_width_pt=612.0, page_height_pt=792.0, bg_subsampling=0,
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_subsampling=0,
     )
     out_420 = compose_mrc_page(
-        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
-        page_width_pt=612.0, page_height_pt=792.0, bg_subsampling=2,
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_subsampling=2,
     )
     assert len(out_420) < len(out_444)
 
@@ -336,12 +359,22 @@ def test_jpeg2000_produces_smaller_bg_than_jpeg_on_paper_texture() -> None:
     mask = _blank_mask()
 
     out_jpeg = compose_mrc_page(
-        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
-        page_width_pt=612.0, page_height_pt=792.0, bg_codec="jpeg",
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_codec="jpeg",
     )
     out_jpx = compose_mrc_page(
-        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
-        page_width_pt=612.0, page_height_pt=792.0, bg_codec="jpeg2000",
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_codec="jpeg2000",
     )
     if out_jpeg != out_jpx:
         assert len(out_jpx) < len(out_jpeg) * 0.95, (

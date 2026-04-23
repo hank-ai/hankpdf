@@ -108,7 +108,7 @@ def _detect_signature(pdf: pikepdf.Pdf) -> tuple[bool, bool]:
     if sig_flags is not None:
         try:
             is_signed = bool(int(sig_flags) & 1)  # bit 1: signatures exist
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             is_signed = False
     # Certifying-signature marker: /Perms /DocMDP
     perms = pdf.Root.get("/Perms")

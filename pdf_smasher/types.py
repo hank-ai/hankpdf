@@ -6,8 +6,9 @@ the source of truth; any change here is a public-API change.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Mapping
+from typing import Literal
 
 Mode = Literal["fast", "standard", "safe"]
 Engine = Literal["mrc", "downsample-only"]

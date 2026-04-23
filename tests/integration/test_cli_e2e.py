@@ -151,8 +151,9 @@ def test_cli_force_monochrome_flag_routes_through_options(tmp_path) -> None:  # 
     out_mono = tmp_path / "mono.pdf"
 
     rc1 = main([str(in_path), "-o", str(out_default), "--mode", "fast"])
+    assert rc1 == 0
     rc2 = main([str(in_path), "-o", str(out_mono), "--mode", "fast", "--force-monochrome"])
-    assert rc1 == 0 and rc2 == 0
+    assert rc2 == 0
     assert out_mono.stat().st_size < out_default.stat().st_size, (
         "--force-monochrome must reduce output size vs default run; "
         f"default={out_default.stat().st_size}, mono={out_mono.stat().st_size}"

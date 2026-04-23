@@ -42,7 +42,7 @@ def detect_paper_color(raster: Image.Image) -> tuple[int, int, int]:
     ``_PAPER_LIGHT_THRESHOLD`` and returns their per-channel mean.
     Mean is O(N) single-pass; median is O(N log N) + sort buffer — paper
     color is dominated by ~90%+ uniform pixels so results are equivalent
-    but mean is ~5-10× faster and ~70 MB lighter on a 300 DPI page.
+    but mean is ~5-10x faster and ~70 MB lighter on a 300 DPI page.
 
     Falls back to (255, 255, 255) when no pixels qualify.
     """
@@ -84,7 +84,7 @@ def is_effectively_monochrome(
     if percentile_value > tolerance:
         return False
     colored_pixel_fraction = float((channel_spread > tolerance).sum()) / channel_spread.size
-    return colored_pixel_fraction <= _MONOCHROME_COLORED_PIXEL_FRACTION
+    return bool(colored_pixel_fraction <= _MONOCHROME_COLORED_PIXEL_FRACTION)
 
 
 @dataclass(frozen=True)
