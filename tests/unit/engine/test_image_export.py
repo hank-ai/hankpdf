@@ -179,3 +179,71 @@ def test_rejects_unknown_format() -> None:
             image_format="tiff",  # type: ignore[arg-type]
             dpi=72,
         )
+
+
+# ---------- WebP ----------
+
+
+def test_webp_produces_valid_webp_bytes() -> None:
+    pdf_bytes = _make_pdf(2)
+    blobs = render_pages_as_images(
+        pdf_bytes, page_indices=[0, 1], image_format="webp", dpi=72,
+    )
+    assert len(blobs) == 2
+    for blob in blobs:
+        # WebP files start with "RIFF" + size + "WEBP"
+        assert blob[:4] == b"RIFF"
+        assert blob[8:12] == b"WEBP"
+        Image.open(io.BytesIO(blob)).verify()
+
+
+def test_webp_quality_controls_file_size() -> None:
+    """Lossy WebP: lower quality → smaller file."""
+    pdf_bytes = _make_rich_pdf()
+    hi_q = render_pages_as_images(
+        pdf_bytes, page_indices=[0], image_format="webp", dpi=150, webp_quality=90,
+    )[0]
+    lo_q = render_pages_as_images(
+        pdf_bytes, page_indices=[0], image_format="webp", dpi=150, webp_quality=30,
+    )[0]
+    assert len(lo_q) < len(hi_q), (
+        f"webp quality=30 ({len(lo_q):,}) should be smaller than quality=90 "
+        f"({len(hi_q):,})"
+    )
+
+
+def test_webp_lossless_preserves_pixels() -> None:
+    """Lossless WebP: decoded pixels must exactly equal the source raster."""
+    pdf_bytes = _make_pdf(1)
+    blob = render_pages_as_images(
+        pdf_bytes,
+        page_indices=[0],
+        image_format="webp",
+        dpi=100,
+        webp_lossless=True,
+    )[0]
+    # Source: render directly at same DPI.
+    from pdf_smasher.engine.rasterize import rasterize_page
+
+    src = rasterize_page(pdf_bytes, page_index=0, dpi=100).convert("RGB")
+    decoded = Image.open(io.BytesIO(blob)).convert("RGB")
+    assert src.size == decoded.size
+    assert src.tobytes() == decoded.tobytes()
+
+
+def test_webp_is_smaller_than_jpeg_at_matching_settings() -> None:
+    """WebP typically beats JPEG by 25-35% at matching perceptual quality.
+    Assert only the weaker claim that WebP <= JPEG at quality=75 on a
+    natural-looking image (gradient + noise). Skip if codec misbehaves on
+    a given platform (this is not a license test, just a sanity check).
+    """
+    pdf_bytes = _make_rich_pdf()
+    jpeg = render_pages_as_images(
+        pdf_bytes, page_indices=[0], image_format="jpeg", dpi=150, jpeg_quality=75,
+    )[0]
+    webp = render_pages_as_images(
+        pdf_bytes, page_indices=[0], image_format="webp", dpi=150, webp_quality=75,
+    )[0]
+    assert len(webp) <= len(jpeg), (
+        f"webp ({len(webp):,}) should be <= jpeg ({len(jpeg):,}) at q=75"
+    )

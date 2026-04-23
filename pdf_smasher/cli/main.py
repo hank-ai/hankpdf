@@ -180,13 +180,13 @@ def _parser() -> argparse.ArgumentParser:
     # Image export mode (JPEG / PNG per page — skips the MRC pipeline).
     p.add_argument(
         "--output-format",
-        choices=["pdf", "jpeg", "png"],
+        choices=["pdf", "jpeg", "png", "webp"],
         default=None,
         help=(
             "Output format. Default: inferred from -o extension (.pdf, .jpg/"
-            ".jpeg, .png) or 'pdf' if unknown. Selecting jpeg/png switches "
-            "to image-export mode — each selected page is rendered and "
-            "encoded as a standalone image file (no MRC compression, no "
+            ".jpeg, .png, .webp) or 'pdf' if unknown. Selecting jpeg/png/webp "
+            "switches to image-export mode — each selected page is rendered "
+            "and encoded as a standalone image file (no MRC compression, no "
             "verifier, no OCR). Use --pages to select a subset."
         ),
     )
@@ -194,13 +194,13 @@ def _parser() -> argparse.ArgumentParser:
         "--image-dpi",
         type=int,
         default=150,
-        help="DPI for --output-format jpeg/png. Default: 150. 300 for archival.",
+        help="DPI for image-export formats. Default: 150. 300 for archival.",
     )
     p.add_argument(
         "--jpeg-quality",
         type=int,
         default=75,
-        help="JPEG quality 0-100 (ignored for --output-format png). Default: 75.",
+        help="JPEG quality 0-100. Default: 75.",
     )
     p.add_argument(
         "--png-compress-level",
@@ -208,8 +208,25 @@ def _parser() -> argparse.ArgumentParser:
         default=6,
         choices=range(10),
         help=(
-            "PNG zlib compression level 0-9 (ignored for --output-format jpeg). "
-            "0=no compression, 9=max. Default: 6 (Pillow standard)."
+            "PNG zlib compression level 0-9. 0=no compression, 9=max. "
+            "Default: 6 (Pillow standard)."
+        ),
+    )
+    p.add_argument(
+        "--webp-quality",
+        type=int,
+        default=80,
+        help=(
+            "WebP quality 0-100. With --webp-lossless this controls encoder "
+            "effort rather than fidelity. Default: 80."
+        ),
+    )
+    p.add_argument(
+        "--webp-lossless",
+        action="store_true",
+        help=(
+            "Encode WebP losslessly (bigger file, pixel-exact decode). "
+            "Default: lossy WebP at --webp-quality."
         ),
     )
     return p
@@ -384,6 +401,8 @@ def _run_image_export(
         dpi=args.image_dpi,
         jpeg_quality=args.jpeg_quality,
         png_compress_level=args.png_compress_level,
+        webp_quality=args.webp_quality,
+        webp_lossless=args.webp_lossless,
     )
 
     if str(args.output) == "-":
@@ -398,16 +417,16 @@ def _run_image_export(
         return EXIT_OK
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    out_ext = {"jpeg": ".jpg", "png": ".png"}[image_format]
+    out_ext = {"jpeg": ".jpg", "png": ".png", "webp": ".webp"}[image_format]
+    valid_image_exts = {"jpg", "jpeg", "png", "webp"}
     base = args.output.stem
     parent = args.output.parent
-    # If output ends in .jpg/.jpeg/.png we keep that extension; else append
-    # the canonical one. Single-image outputs keep the user's exact path.
+    # Keep the user's image extension if present; else append the canonical one.
     requested_ext = args.output.suffix.lower()
-    final_ext = requested_ext if requested_ext.lstrip(".") in {"jpg", "jpeg", "png"} else out_ext
+    final_ext = requested_ext if requested_ext.lstrip(".") in valid_image_exts else out_ext
     if len(images) == 1:
         # Single page → write exactly to -o (with ext normalization).
-        if requested_ext.lstrip(".") not in {"jpg", "jpeg", "png"}:
+        if requested_ext.lstrip(".") not in valid_image_exts:
             target = parent / f"{base}{final_ext}"
         else:
             target = args.output
@@ -473,10 +492,15 @@ def main(argv: list[str] | None = None) -> int:
         resolved_format = args.output_format
     else:
         ext = args.output.suffix.lower().lstrip(".") if args.output else ""
-        resolved_format = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png"}.get(ext, "pdf")
+        resolved_format = {
+            "jpg": "jpeg",
+            "jpeg": "jpeg",
+            "png": "png",
+            "webp": "webp",
+        }.get(ext, "pdf")
 
     # Image-export mode bypasses the MRC pipeline entirely.
-    if resolved_format in {"jpeg", "png"}:
+    if resolved_format in {"jpeg", "png", "webp"}:
         return _run_image_export(args, input_bytes, only_pages, resolved_format)
 
     # Progress: tqdm bar for the per-page phase + plain stderr lines for
