@@ -139,3 +139,38 @@ def test_verify_pages_fails_on_digit_drift() -> None:
     assert result.status == "fail"
     assert result.digit_multiset_match is False
     assert 0 in result.failing_pages
+
+
+# ---------- tile_ssim_min ----------
+
+from pdf_smasher.engine.verifier import tile_ssim_min  # noqa: E402
+
+
+def test_tile_ssim_identical_images_is_1() -> None:
+    a = Image.new("L", (500, 500), color=128)
+    assert tile_ssim_min(a, a, tile_size=50) == 1.0
+
+
+def test_tile_ssim_catches_local_region_drift_that_global_ssim_hides() -> None:
+    """A single 20x20 dark smear in a 1000x1000 bright image barely moves global
+    SSIM but must crater tile_ssim_min."""
+    a_arr = np.full((1000, 1000), 240, dtype=np.uint8)
+    b_arr = a_arr.copy()
+    b_arr[100:120, 100:120] = 20  # localized dark smear
+    a = Image.fromarray(a_arr, mode="L")
+    b = Image.fromarray(b_arr, mode="L")
+    global_s = float(np.abs(np.asarray(a, dtype=np.int16) - np.asarray(b, dtype=np.int16)).mean())
+    assert global_s < 10, "global delta really is small"
+    assert tile_ssim_min(a, b, tile_size=50) < 0.9
+
+
+def test_tile_ssim_blank_pages_returns_1() -> None:
+    """Two identical all-white pages must return 1.0, not NaN.
+
+    skimage.structural_similarity returns NaN for constant-variance windows.
+    Without np.nan_to_num(nan=1.0), block_reduce on an all-NaN tile produces
+    NaN, which propagates and incorrectly fails blank-page round-trips.
+    """
+    blank = Image.new("L", (300, 300), color=255)
+    result = tile_ssim_min(blank, blank, tile_size=50)
+    assert result == 1.0, f"identical blank pages must score 1.0, got {result!r}"

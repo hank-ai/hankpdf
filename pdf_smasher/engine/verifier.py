@@ -22,6 +22,7 @@ from typing import Literal
 
 import numpy as np
 from PIL import Image
+from skimage.measure import block_reduce
 from skimage.metrics import structural_similarity
 
 from pdf_smasher.types import VerifierResult
@@ -79,6 +80,43 @@ def ssim_score(a: Image.Image, b: Image.Image) -> float:
     return float(score)
 
 
+def tile_ssim_min(
+    a: Image.Image,
+    b: Image.Image,
+    *,
+    tile_size: int = 50,
+) -> float:
+    """Return the minimum SSIM over tile_size×tile_size tiles of (a, b).
+
+    Vectorized: computes the full SSIM map once via structural_similarity(
+    full=True), then does a single block_reduce(..., np.nanmin) to get the
+    tile minimum. No Python loop over tiles. Trailing edge tiles are padded
+    with np.nan and excluded from the minimum (not 1.0, which would inflate
+    scores if corruption falls on a border-straddling tile).
+    """
+    if abs(a.width - b.width) > 1 or abs(a.height - b.height) > 1:
+        msg = (
+            f"page size mismatch: input {a.size}, output {b.size}. "
+            "Compose path produced a different geometry than the input page — "
+            "refusing to resample before SSIM (would hide CTM/crop bugs)."
+        )
+        raise ValueError(msg)
+    if a.size != b.size:
+        b = b.resize(a.size, Image.Resampling.NEAREST)  # ±1px rounding only
+    a_arr = np.asarray(a.convert("L"), dtype=np.float64)
+    b_arr = np.asarray(b.convert("L"), dtype=np.float64)
+    _, ssim_map = structural_similarity(  # type: ignore[no-untyped-call,misc]
+        a_arr, b_arr, data_range=255.0, full=True,
+    )
+    # NaN for constant-variance windows (e.g., all-white pages) → clamp to 1.0
+    # so blank pages score as perfect rather than crashing the verifier.
+    ssim_map = np.nan_to_num(ssim_map, nan=1.0)
+    tile_mins = block_reduce(
+        ssim_map, block_size=(tile_size, tile_size), func=np.nanmin, cval=np.nan,
+    )
+    return float(np.nanmin(tile_mins))
+
+
 def verify_pages(
     *,
     input_rasters: Sequence[Image.Image],
@@ -116,7 +154,9 @@ def verify_pages(
         score = ssim_score(in_r, out_r)
         if score < min_ssim_global:
             min_ssim_global = score
-            min_ssim_tile = score  # single-tile approximation for now; Phase 2 adds tile min
+        tile_score = tile_ssim_min(in_r, out_r, tile_size=50)
+        if tile_score < min_ssim_tile:
+            min_ssim_tile = tile_score
 
         if lev > levenshtein_ceiling or not digits_ok or score < ssim_floor:
             failing_pages.append(i)
