@@ -107,3 +107,25 @@ def test_image_export_rejects_excessive_dpi(tmp_path) -> None:  # type: ignore[n
     assert exc_info.value.code == 2, (
         f"expected SystemExit(2) from argparse, got {exc_info.value.code}"
     )
+
+
+@pytest.mark.integration
+def test_image_export_warns_on_max_output_mb(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """--max-output-mb is a PDF-only concept. In image-export mode it
+    used to be silently ignored. DCR Wave 1: emit an explicit stderr
+    warning so the user knows their cap isn't honored."""
+    in_path = _make_pdf(tmp_path, n_pages=1)
+    out_path = tmp_path / "out.jpg"
+    rc = main([
+        str(in_path),
+        "-o", str(out_path),
+        "--max-output-mb", "5",
+    ])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "--max-output-mb" in err, (
+        f"expected '--max-output-mb' in stderr; got: {err!r}"
+    )
+    assert "image" in err.lower(), (
+        f"expected 'image' in stderr warning; got: {err!r}"
+    )

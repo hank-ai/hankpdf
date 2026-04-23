@@ -409,6 +409,17 @@ def _run_image_export(
     requested page as JPEG/PNG. Invoked from main() when the user picks
     jpeg/png via --output-format or an image extension on -o.
     """
+    # --max-output-mb is a PDF-only concept (it splits a merged PDF into
+    # size-bounded sibling files). In image-export mode each page is
+    # already its own file, so the flag has no semantics here. Warn
+    # loudly rather than silently ignore.
+    if args.max_output_mb is not None and not args.quiet:
+        print(
+            "[hankpdf] warning: --max-output-mb applies only to PDF "
+            "output; ignored in image-export mode",
+            file=sys.stderr,
+        )
+
     # Determine total page count via a triage.
     try:
         tri = triage(input_bytes)
