@@ -236,8 +236,16 @@ def main(argv: list[str] | None = None) -> int:
 
     options = _build_options(args)
 
+    # Progress emit to stderr unless --quiet. Non-PHI: indices, strategy names,
+    # byte counts only. Goes to stderr so --report json on stdout stays clean.
+    def _progress(msg: str) -> None:
+        if not args.quiet:
+            print(f"[hankpdf] {msg}", file=sys.stderr, flush=True)
+
     try:
-        output_bytes, report = compress(input_bytes, options=options)
+        output_bytes, report = compress(
+            input_bytes, options=options, progress_callback=_progress,
+        )
     except EncryptedPDFError as e:
         print(f"refused: encrypted without password ({e})", file=sys.stderr)
         return EXIT_ENCRYPTED

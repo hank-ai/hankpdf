@@ -15,6 +15,7 @@ import io
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from typing import IO, Any, Literal
 
 import pikepdf
@@ -155,15 +156,27 @@ def triage(input_data: bytes) -> TriageReport:
 def compress(
     input_data: bytes,
     options: CompressOptions | None = None,
+    *,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> tuple[bytes, CompressReport]:
     """Compress a PDF.
 
     Full pipeline per SPEC.md §1: triage → sanitize → recompress → verify →
     report. Raises one of the :class:`CompressError` subclasses on refusal
     or drift.
+
+    ``progress_callback`` is an optional ``fn(message: str) -> None`` hook
+    invoked at pipeline milestones (triage complete, per-page dispatch and
+    completion, merge, verify, final). The CLI wires this to stderr unless
+    ``--quiet`` is passed. No PHI is included in messages — only page
+    indices, strategy names, and byte counts.
     """
     t0 = time.monotonic()
     options = options or CompressOptions()
+
+    def _emit(msg: str) -> None:
+        if progress_callback is not None:
+            progress_callback(msg)
 
     # GUARD: legal_codec_profile (CCITT G4) is reserved for a later phase.
     # Placed before triage so the error is actionable even on empty input.
@@ -200,7 +213,12 @@ def compress(
     )
 
     # --- Triage ---
+    _emit(f"triage: {len(input_data):,} bytes input")
     tri = _triage(input_data)
+    _emit(
+        f"triage complete: {tri.pages} pages, classification={tri.classification}, "
+        f"encrypted={tri.is_encrypted}, signed={tri.is_signed}",
+    )
 
     if tri.classification == "require-password" and options.password is None:
         msg = "input is encrypted; supply CompressOptions.password"
@@ -270,6 +288,7 @@ def compress(
     try:
         for i in range(tri.pages):
             width_pt, height_pt = page_sizes[i]
+            _emit(f"page {i + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)")
             try:
                 raster = rasterize_page(input_data, page_index=i, dpi=source_dpi)
                 word_boxes = tesseract_word_boxes(raster, language=options.ocr_language)
@@ -430,6 +449,11 @@ def compress(
                 del raster, output_raster, input_ocr_text, output_ocr_text
                 page_pdfs.append(composed)
                 strategy_counts[strategy.name.lower()] += 1
+                _emit(
+                    f"page {i + 1}/{tri.pages} done: strategy={strategy.name.lower()}, "
+                    f"ratio={per_page_ratio:.1f}x, "
+                    f"verifier={'pass' if per_page_verdict.passed else 'fail'}",
+                )
 
             except KeyboardInterrupt:
                 page_pdfs.clear()
@@ -451,6 +475,7 @@ def compress(
         warnings_list.append(f"force-monochrome-discarded-color-on-{n_color_discarded}-pages")
 
     # Merge pages.
+    _emit(f"merging {tri.pages} pages into output PDF")
     merged = pikepdf.new()
     for page_bytes in page_pdfs:
         src = pikepdf.open(io.BytesIO(page_bytes))
@@ -461,6 +486,10 @@ def compress(
     out_buf = io.BytesIO()
     merged.save(out_buf, linearize=False, deterministic_id=True)
     output_bytes = out_buf.getvalue()
+    _emit(
+        f"merge complete: {len(output_bytes):,} bytes "
+        f"(ratio {len(input_data) / max(1, len(output_bytes)):.2f}x)",
+    )
 
     verifier_result = verifier_agg.result()
     if verifier_result.status == "fail":
