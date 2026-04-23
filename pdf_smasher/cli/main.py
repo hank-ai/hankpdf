@@ -394,6 +394,14 @@ def _run_image_export(
     else:
         page_indices = list(range(tri.pages))
 
+    if not page_indices:
+        print(
+            "error: --pages parsed to an empty set (no pages selected); "
+            "provide at least one 1-indexed page number",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
     images = render_pages_as_images(
         input_bytes,
         page_indices=page_indices,
@@ -479,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
     options = _build_options(args)
 
     only_pages: set[int] | None = None
-    if args.pages:
+    if args.pages is not None:
         try:
             only_pages = _parse_pages_spec(args.pages)
         except ValueError as e:
