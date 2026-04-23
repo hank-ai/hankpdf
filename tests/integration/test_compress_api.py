@@ -254,6 +254,30 @@ def test_worker_warnings_propagate_to_report_parallel() -> None:
     )
 
 
+def test_verifier_fail_warning_code_is_normalized() -> None:
+    """Regression: the verifier-fail warning used list repr for the
+    failing pages (`verifier-fail-...-pages-[1, 2, 3]`), which contains
+    spaces and brackets that break grep/log-parsing tooling. Normalize
+    to comma-separated integers with no brackets/spaces and cap at the
+    first 10 plus a +N suffix for longer lists."""
+    import re as _re
+
+    # We exercise the warning-formatting helper directly (keeps the test
+    # fast and deterministic vs running full compress twice).
+    from pdf_smasher import _format_verifier_failing_pages
+
+    failing = tuple(range(1, 21))  # 20 failing pages
+    fragment = _format_verifier_failing_pages(failing)
+    full_code = f"verifier-fail-fast-mode-pages-{fragment}"
+    # No brackets, no spaces; all chars match [a-z0-9,+\-] (ASCII only).
+    assert _re.fullmatch(r"[a-z0-9,\-+]+", full_code), (
+        f"expected normalized code; got {full_code!r}"
+    )
+    # First 10 ids are present, followed by +10.
+    assert "1,2,3,4,5,6,7,8,9,10" in full_code
+    assert "+10" in full_code
+
+
 def test_progress_event_verifier_passed_is_none_when_skipped() -> None:
     """Regression: when skip_verify=True the worker synthesizes a
     trivially-passing verdict, which used to bubble up to the progress

@@ -164,6 +164,19 @@ class _PageResult:
     worker_wall_ms: int = 0
 
 
+def _format_verifier_failing_pages(ids: tuple[int, ...], limit: int = 10) -> str:
+    """Format failing-page IDs for a warning code: comma-separated ints,
+    no brackets, no spaces, capped at ``limit`` with a ``+N`` suffix for
+    longer lists. Keeps warning codes grep-friendly and bounded length.
+    """
+    sorted_ids = sorted(ids)
+    if len(sorted_ids) <= limit:
+        return ",".join(str(n) for n in sorted_ids)
+    head = sorted_ids[:limit]
+    remaining = len(sorted_ids) - limit
+    return f"{','.join(str(n) for n in head)}+{remaining}"
+
+
 def _enforce_input_policy(
     tri: TriageReport,
     options: CompressOptions,
@@ -991,8 +1004,12 @@ def compress(
             )
             raise ContentDriftError(msg)
         tag = "accept-drift" if options.accept_drift else "fast-mode"
+        # Warning codes must stay grep-friendly — no brackets, no spaces.
+        # _format_verifier_failing_pages caps at the first 10 ids with a
+        # +N suffix for longer lists.
         warnings_list.append(
-            f"verifier-fail-{tag}-pages-{list(verifier_result.failing_pages)}",
+            f"verifier-fail-{tag}-pages-"
+            f"{_format_verifier_failing_pages(verifier_result.failing_pages)}",
         )
 
     # --- Hashes ---
