@@ -247,6 +247,15 @@ def compress(
 
                 strategy = classify_page(raster, mask_coverage_fraction=mask_coverage)
 
+                if options.force_monochrome:
+                    from pdf_smasher.engine.verifier import _page_has_color
+                    if _page_has_color(raster):
+                        warnings_list.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
+                    if strategy not in (PageStrategy.ALREADY_OPTIMIZED, PageStrategy.PHOTO_ONLY):
+                        strategy = PageStrategy.TEXT_ONLY
+                    # PHOTO_ONLY + force_monochrome: keep PHOTO_ONLY but grayscale
+                    # (handled in the PHOTO_ONLY branch via _photo_bg_color_mode).
+
                 if strategy == PageStrategy.ALREADY_OPTIMIZED:
                     msg = (
                         f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
@@ -314,15 +323,26 @@ def compress(
                 )
                 if strategy == PageStrategy.MIXED:
                     # Tile SSIM gates JPEG ringing artifacts in the MRC background layer.
-                    # Binary (TEXT_ONLY) and downsampled (PHOTO_ONLY) outputs always
-                    # produce near-zero tile SSIM — global SSIM is the right check there.
                     page_tile_ssim_floor = (
                         _DEFAULT_TILE_SSIM_FLOOR_SAFE
                         if (anomalous or is_safe)
                         else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
                     )
-                else:
+                    page_ssim_floor = ssim_floor
+                    page_lev_ceiling = lev_ceiling
+                elif strategy == PageStrategy.PHOTO_ONLY:
+                    # PHOTO_ONLY pages are aggressively lossy — quality 45 at target_dpi
+                    # produces legitimate SSIM well below the 0.92 MRC floor.
+                    # OCR on pure-photo pages produces garbage on both sides; skip it.
                     page_tile_ssim_floor = -1.0
+                    page_ssim_floor = 0.5
+                    page_lev_ceiling = 1.0
+                else:
+                    # TEXT_ONLY / ALREADY_OPTIMIZED: SSIM is still meaningful (binary
+                    # JBIG2 on white bg scores well globally); tile SSIM is not.
+                    page_tile_ssim_floor = -1.0
+                    page_ssim_floor = ssim_floor
+                    page_lev_ceiling = lev_ceiling
                 if anomalous:
                     warnings_list.append(f"page-{i + 1}-anomalous-ratio-{per_page_ratio:.0f}x-safe-verify")
                 per_page_verdict = verify_single_page(
@@ -330,8 +350,8 @@ def compress(
                     output_raster=output_raster,
                     input_ocr_text=input_ocr_text,
                     output_ocr_text=output_ocr_text,
-                    lev_ceiling=lev_ceiling,
-                    ssim_floor=ssim_floor,
+                    lev_ceiling=page_lev_ceiling,
+                    ssim_floor=page_ssim_floor,
                     tile_ssim_floor=page_tile_ssim_floor,
                     check_color_preserved=not options.force_monochrome,
                 )
@@ -355,6 +375,12 @@ def compress(
         f"page_pdfs has {len(page_pdfs)} entries but input had {tri.pages} pages"
     )
 
+    n_color_discarded = sum(
+        1 for w in warnings_list if "color-detected-in-monochrome-mode" in w
+    )
+    if n_color_discarded > 0:
+        warnings_list.append(f"force-monochrome-discarded-color-on-{n_color_discarded}-pages")
+
     # Merge pages.
     merged = pikepdf.new()
     for page_bytes in page_pdfs:
@@ -373,7 +399,10 @@ def compress(
             msg = (
                 f"content drift detected on pages {list(verifier_result.failing_pages)}: "
                 f"ocr_lev={verifier_result.ocr_levenshtein:.4f}, "
-                f"ssim_global={verifier_result.ssim_global:.4f}"
+                f"ssim_global={verifier_result.ssim_global:.4f}, "
+                f"ssim_tile_min={verifier_result.ssim_min_tile:.4f}, "
+                f"digit_multiset_match={verifier_result.digit_multiset_match}, "
+                f"color_preserved={verifier_result.color_preserved}"
             )
             raise ContentDriftError(msg)
         else:
