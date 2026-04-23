@@ -689,6 +689,25 @@ def compress(
     t0 = time.monotonic()
     options = options or CompressOptions()
 
+    def _check_total_timeout(phase: str) -> None:
+        """Raise TotalTimeoutError if the cumulative wall-clock since t0
+        exceeds options.total_timeout_seconds.
+
+        Called between pipeline phases (post-triage, post-per-page, post-
+        merge, post-verify). ``total_timeout_seconds=0`` disables the
+        watchdog entirely.
+        """
+        budget = options.total_timeout_seconds
+        if budget <= 0:
+            return
+        elapsed = time.monotonic() - t0
+        if elapsed > budget:
+            msg = (
+                f"total_timeout_seconds={budget} exceeded after {phase}: "
+                f"{elapsed:.2f}s elapsed"
+            )
+            raise TotalTimeoutError(msg)
+
     def _emit(
         phase: str,
         message: str,
@@ -768,6 +787,7 @@ def compress(
     )
 
     _enforce_input_policy(tri, options, input_data)
+    _check_total_timeout("triage")
 
     # --- Passthrough: min_input_mb floor ---
     # If the input is below the configured minimum size, return it
@@ -1093,6 +1113,8 @@ def compress(
             f"1.0x = no parallelism)",
         )
 
+    _check_total_timeout("per-page")
+
     # Merge pages in original order (matters when parallel completes out of order).
     page_pdfs: list[bytes] = [page_pdfs_by_index[i] for i in sorted(_selected_indices)]
 
@@ -1126,6 +1148,8 @@ def compress(
         f"(ratio {len(input_data) / max(1, len(output_bytes)):.2f}x)",
         ratio=len(input_data) / max(1, len(output_bytes)),
     )
+
+    _check_total_timeout("merge")
 
     # --- Passthrough: min_ratio floor ---
     # If realized compression ratio is below options.min_ratio, return

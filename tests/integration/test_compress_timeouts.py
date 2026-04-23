@@ -26,6 +26,65 @@ def _make_pdf(n: int = 1, with_payload: bool = False) -> bytes:
     return buf.getvalue()
 
 
+# ---------- total_timeout_seconds (W3-13d) ----------
+
+
+@pytest.mark.integration
+def test_total_timeout_fires_on_long_run() -> None:
+    """A cumulative wall-clock > total_timeout_seconds must raise
+    ``TotalTimeoutError``. Uses a tiny budget and a slow mocked worker
+    so the watchdog trips during the merge phase.
+    """
+    import time as _time
+    from unittest.mock import patch
+
+    from pdf_smasher import CompressOptions, compress
+    from pdf_smasher.exceptions import TotalTimeoutError
+
+    pdf = _make_pdf(2)
+
+    import pdf_smasher as _pkg
+    _real = _pkg._process_single_page  # noqa: SLF001 — accessing to re-dispatch in test
+
+    def _slow_worker(w: object) -> object:
+        # Call the real implementation AFTER sleeping to eat the budget.
+        _time.sleep(0.6)
+        return _real(w)  # type: ignore[arg-type]
+
+    opts = CompressOptions(
+        max_workers=1,
+        per_page_timeout_seconds=120,  # don't let per-page fire first
+        total_timeout_seconds=1,  # 0.6s sleep x 2 pages ≈ 1.2s > 1s budget
+        skip_verify=True,
+        accept_drift=True,
+        min_ratio=0.0,
+    )
+    with (
+        patch.object(_pkg, "_process_single_page", _slow_worker),
+        pytest.raises(TotalTimeoutError),
+    ):
+        compress(pdf, options=opts)
+
+
+@pytest.mark.integration
+def test_total_timeout_zero_disables_watchdog() -> None:
+    """total_timeout_seconds=0 disables the watchdog entirely."""
+    from pdf_smasher import CompressOptions, compress
+
+    pdf = _make_pdf(1)
+    opts = CompressOptions(
+        total_timeout_seconds=0,
+        skip_verify=True,
+        accept_drift=True,
+        min_ratio=0.0,
+    )
+    # Must not raise — the default would have been fine anyway on this
+    # tiny input, but a zero budget must not itself cause an immediate
+    # timeout.
+    _out, report = compress(pdf, options=opts)
+    assert report.status in {"ok", "passed_through"}
+
+
 # ---------- per_page_timeout_seconds (W3-13c) ----------
 
 
