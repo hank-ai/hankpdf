@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 
 _MASK_COVERAGE_MIXED_FLOOR = 0.05  # below this → single-image route
-_LIGHT_PIXEL_VALUE = 230  # grayscale >= this counts as "paper-like"
+LIGHT_PIXEL_VALUE = 230  # public — shared with foreground.detect_paper_color
 _LIGHT_PIXEL_FRACTION_UNIFORM = 0.80  # >=80% light pixels = paper-dominated (text-like bg)
 
 
@@ -36,9 +36,9 @@ class PageStrategy(Enum):
 
 
 def _light_pixel_fraction(raster: Image.Image) -> float:
-    """Fraction of grayscale pixels brighter than ``_LIGHT_PIXEL_VALUE`` — paper-like."""
+    """Fraction of grayscale pixels brighter than ``LIGHT_PIXEL_VALUE`` — paper-like."""
     gray = np.asarray(raster.convert("L"), dtype=np.uint8)
-    return float((gray >= _LIGHT_PIXEL_VALUE).sum()) / gray.size
+    return float((gray >= LIGHT_PIXEL_VALUE).sum()) / gray.size
 
 
 def classify_page(

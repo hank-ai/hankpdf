@@ -85,3 +85,50 @@ def test_monochrome_tolerance_matches_verifier_constant() -> None:
     from pdf_smasher.engine.verifier import CHANNEL_SPREAD_COLOR_TOLERANCE
 
     assert _MONOCHROME_CHANNEL_SPREAD_TOLERANCE == CHANNEL_SPREAD_COLOR_TOLERANCE
+
+
+# ---------- detect_paper_color (Task 2) ----------
+
+from pdf_smasher.engine.foreground import detect_paper_color  # noqa: E402
+
+
+def test_detect_paper_color_returns_rgb_tuple() -> None:
+    arr = np.full((200, 200, 3), 245, dtype=np.uint8)
+    result = detect_paper_color(Image.fromarray(arr))
+    assert isinstance(result, tuple)
+    assert len(result) == 3
+    assert all(0 <= c <= 255 for c in result)
+
+
+def test_detect_paper_color_matches_dominant_light_color() -> None:
+    """Cream paper (245, 240, 220) with black text — detect ~(245, 240, 220)."""
+    arr = np.full((300, 300, 3), [245, 240, 220], dtype=np.uint8)
+    arr[80:120, 80:220] = 0  # black text
+    result = detect_paper_color(Image.fromarray(arr))
+    assert abs(result[0] - 245) <= 5
+    assert abs(result[1] - 240) <= 5
+    assert abs(result[2] - 220) <= 5
+
+
+def test_detect_paper_color_falls_back_to_white_when_no_light_pixels() -> None:
+    """Entirely dark page: default to white."""
+    arr = np.zeros((100, 100, 3), dtype=np.uint8)
+    result = detect_paper_color(Image.fromarray(arr))
+    assert result == (255, 255, 255)
+
+
+def test_detect_paper_color_uses_same_threshold_as_strategy_classify() -> None:
+    """Both code paths must agree on 'what counts as paper' (Wave 1 B.C4)."""
+    from pdf_smasher.engine.foreground import _PAPER_LIGHT_THRESHOLD
+    from pdf_smasher.engine.strategy import LIGHT_PIXEL_VALUE
+
+    assert LIGHT_PIXEL_VALUE == _PAPER_LIGHT_THRESHOLD
+
+
+def test_detect_paper_color_cream_stock_exactly_at_boundary() -> None:
+    """A page at RGB (230, 225, 210) is at the threshold — must be detected."""
+    arr = np.full((200, 200, 3), [230, 225, 210], dtype=np.uint8)
+    result = detect_paper_color(Image.fromarray(arr))
+    assert result[0] == 230
+    assert result[1] == 225
+    assert result[2] == 210

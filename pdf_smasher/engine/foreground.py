@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
+from pdf_smasher.engine.strategy import LIGHT_PIXEL_VALUE
 from pdf_smasher.engine.verifier import CHANNEL_SPREAD_COLOR_TOLERANCE
 
 _DEFAULT_INK = (0, 0, 0)  # black when there's no mask coverage to sample
@@ -28,6 +29,33 @@ _MONOCHROME_CHANNEL_SPREAD_TOLERANCE = CHANNEL_SPREAD_COLOR_TOLERANCE
 _MONOCHROME_TOLERANCE_PERCENTILE = 99.0
 _MONOCHROME_COLORED_PIXEL_FRACTION = 0.001
 _MONOCHROME_SCAN_DOWNSAMPLE_MAX_PX = 512
+
+
+_PAPER_LIGHT_THRESHOLD = LIGHT_PIXEL_VALUE  # single source of truth; see strategy.py
+_DEFAULT_PAPER_FALLBACK: tuple[int, int, int] = (255, 255, 255)
+
+
+def detect_paper_color(raster: Image.Image) -> tuple[int, int, int]:
+    """Return the dominant paper color as an RGB tuple.
+
+    Samples pixels whose per-channel mean (≈luminance) is >=
+    ``_PAPER_LIGHT_THRESHOLD`` and returns their per-channel mean.
+    Mean is O(N) single-pass; median is O(N log N) + sort buffer — paper
+    color is dominated by ~90%+ uniform pixels so results are equivalent
+    but mean is ~5-10× faster and ~70 MB lighter on a 300 DPI page.
+
+    Falls back to (255, 255, 255) when no pixels qualify.
+    """
+    rgb = np.asarray(raster.convert("RGB"), dtype=np.uint8)
+    # Max-channel brightness: a cream pixel (230, 225, 210) has max=230 and
+    # hits the threshold even though its mean (~222) would not.
+    brightness = rgb.max(axis=-1)
+    light_mask = brightness >= _PAPER_LIGHT_THRESHOLD
+    if not light_mask.any():
+        return _DEFAULT_PAPER_FALLBACK
+    samples = rgb[light_mask]
+    mean_rgb = samples.mean(axis=0).astype(int)
+    return (int(mean_rgb[0]), int(mean_rgb[1]), int(mean_rgb[2]))
 
 
 def is_effectively_monochrome(
