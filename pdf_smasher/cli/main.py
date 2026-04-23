@@ -291,6 +291,14 @@ def _parse_pages_spec(spec: str) -> set[int]:
                 msg = f"invalid page {part!r}: must be 1-indexed"
                 raise ValueError(msg)
             out.add(n)
+    # Total cardinality cap — a per-range check alone allows
+    # `--pages 1-1000000,2000001-3000000,…` to accumulate unbounded.
+    if len(out) > _MAX_PAGES_RANGE:
+        msg = (
+            f"--pages total set too large: {len(out):,} pages; cap is "
+            f"{_MAX_PAGES_RANGE:,} total pages to prevent memory exhaustion"
+        )
+        raise ValueError(msg)
     return out
 
 

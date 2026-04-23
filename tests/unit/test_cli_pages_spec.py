@@ -60,3 +60,10 @@ def test_range_at_cap_accepted() -> None:
 def test_range_over_cap_rejected() -> None:
     with pytest.raises(ValueError, match=r"too large|cap"):
         _parse_pages_spec("1-1000001")
+
+
+def test_multi_range_total_cardinality_capped() -> None:
+    """Regression: 1M cap is on TOTAL set, not per-range."""
+    spec = ",".join(f"{1 + i * 2_000_000}-{1_000_000 + i * 2_000_000}" for i in range(10))
+    with pytest.raises(ValueError, match=r"too large|cap|total"):
+        _parse_pages_spec(spec)
