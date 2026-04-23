@@ -78,6 +78,48 @@ _ANOMALY_RATIO_THRESHOLD = 200.0
 # if the count is at or below this; otherwise summarize.
 _FAILING_PAGES_INLINE_LIMIT = 10
 
+# Below this page count, the inline serial path is faster than pool startup
+# overhead. See docs/superpowers/plans/2026-04-23-per-page-parallelism.md.
+_PARALLEL_MIN_PAGES = 4
+
+
+from dataclasses import dataclass as _dc  # noqa: E402 — adjacent to other module-level aliases
+
+
+@_dc(frozen=True)
+class _WorkerInput:
+    """Single-page compression job. All fields serialize cleanly over the
+    stdlib multiprocessing marshaling path (dataclasses, primitives, bytes).
+    """
+
+    input_page_pdf: bytes  # 1-page PDF extracted from source
+    page_index: int  # 0-indexed position in original PDF
+    total_pages: int  # for human-readable log messages
+    page_size: tuple[float, float]  # (width_pt, height_pt)
+    source_dpi: int
+    bg_target_dpi: int
+    effective_bg_codec: str
+    options: CompressOptions
+    is_safe: bool
+    lev_ceiling: float
+    ssim_floor: float
+
+
+@_dc(frozen=True)
+class _PageResult:
+    """What a worker returns. `page_index` is the original position; the
+    parent places results into a dict keyed by this and sorts at merge.
+    """
+
+    page_index: int
+    composed_bytes: bytes
+    strategy_name: str  # one of "text_only" / "photo_only" / "mixed"
+    verdict: Any  # PageVerdict — engine.verifier.PageVerdict
+    per_page_warnings: tuple[str, ...]
+    input_bytes: int
+    output_bytes: int
+    ratio: float
+
 
 def _mrc_compose(
     raster: Any,
@@ -118,6 +160,220 @@ def _mrc_compose(
         bg_codec=bg_codec,
         bg_jpeg_quality=bg_jpeg_quality,
         bg_subsampling=bg_subsampling,
+    )
+
+
+def _process_single_page(winput: _WorkerInput) -> _PageResult:
+    """Run the full per-page pipeline on a single-page PDF slice.
+
+    This function runs in a worker process when parallelism is enabled, or
+    inline in the main process for small jobs / serial mode. It takes ONLY
+    its own single-page PDF (not the whole source) so worker memory stays
+    bounded to one page's raster + compose buffers.
+
+    Imports are function-local so worker processes don't pay the engine
+    import cost until they actually run (pool startup is cheap).
+    """
+    import numpy as np
+
+    from pdf_smasher.engine.compose import (
+        compose_photo_only_page,
+        compose_text_only_page,
+    )
+    from pdf_smasher.engine.foreground import (
+        detect_paper_color,
+        extract_foreground,
+        is_effectively_monochrome,
+    )
+    from pdf_smasher.engine.mask import build_mask
+    from pdf_smasher.engine.ocr import tesseract_word_boxes
+    from pdf_smasher.engine.rasterize import rasterize_page
+    from pdf_smasher.engine.strategy import PageStrategy, classify_page
+    from pdf_smasher.engine.text_layer import add_text_layer
+    from pdf_smasher.engine.verifier import (
+        _DEFAULT_TILE_SSIM_FLOOR_SAFE,
+        _DEFAULT_TILE_SSIM_FLOOR_STANDARD,
+        _page_has_color,
+        verify_single_page,
+    )
+
+    i = winput.page_index
+    total = winput.total_pages
+    width_pt, height_pt = winput.page_size
+    options = winput.options
+    is_safe = winput.is_safe
+    lev_ceiling = winput.lev_ceiling
+    ssim_floor = winput.ssim_floor
+    warnings: list[str] = []
+
+    # --- Rasterize + OCR (input) ---
+    raster = rasterize_page(winput.input_page_pdf, page_index=0, dpi=winput.source_dpi)
+    word_boxes = tesseract_word_boxes(raster, language=options.ocr_language)
+    ocr_text = " ".join(b.text for b in word_boxes)
+
+    # Source-truth: prefer native PDF text layer when present.
+    from pypdfium2 import PdfDocument as _Pdfium
+
+    _doc = _Pdfium(winput.input_page_pdf)
+    try:
+        _tp = _doc[0].get_textpage()
+        try:
+            _native_text = _tp.get_text_range()
+        finally:
+            _tp.close()
+    finally:
+        _doc.close()
+    input_ocr_text = (
+        _native_text.strip() if _native_text and _native_text.strip() else ocr_text
+    )
+
+    # --- Mask + classify ---
+    mask = build_mask(raster)
+    mask_arr = np.asarray(mask.convert("1"), dtype=bool)
+    mask_coverage = float(mask_arr.sum()) / max(1, mask_arr.size)
+    strategy = classify_page(raster, mask_coverage_fraction=mask_coverage)
+
+    if options.force_monochrome and _page_has_color(raster):
+        warnings.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
+
+    if strategy == PageStrategy.ALREADY_OPTIMIZED:
+        msg = (
+            f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
+            "compress() has no handler for this value."
+        )
+        raise AssertionError(msg)
+
+    # --- Strategy dispatch ---
+    if strategy == PageStrategy.TEXT_ONLY:
+        if not options.force_monochrome and not is_effectively_monochrome(raster):
+            warnings.append(f"page-{i + 1}-text-only-demoted-to-mixed-color-detected")
+            strategy = PageStrategy.MIXED
+            _JBIG2_CASCADE_STATE.tripped = False
+            composed = _mrc_compose(
+                raster,
+                mask,
+                width_pt,
+                height_pt,
+                winput.bg_target_dpi,
+                winput.source_dpi,
+                bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
+                bg_jpeg_quality=options.target_color_quality,
+                bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+                force_grayscale=options.force_monochrome,
+            )
+        else:
+            fg = extract_foreground(raster, mask=mask)
+            paper = detect_paper_color(raster)
+            composed = compose_text_only_page(
+                mask=mask,
+                foreground_color=fg.ink_color,
+                paper_color=paper,
+                page_width_pt=width_pt,
+                page_height_pt=height_pt,
+            )
+    elif strategy == PageStrategy.PHOTO_ONLY:
+        _photo_bg_color_mode: Literal["rgb", "grayscale"] = (
+            "grayscale"
+            if (options.force_monochrome or is_effectively_monochrome(raster))
+            else "rgb"
+        )
+        composed = compose_photo_only_page(
+            raster=raster,
+            page_width_pt=width_pt,
+            page_height_pt=height_pt,
+            target_dpi=options.photo_target_dpi,
+            bg_color_mode=_photo_bg_color_mode,
+            bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
+            jpeg_quality=options.target_color_quality,
+            subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+        )
+    else:  # MIXED
+        _JBIG2_CASCADE_STATE.tripped = False
+        composed = _mrc_compose(
+            raster,
+            mask,
+            width_pt,
+            height_pt,
+            winput.bg_target_dpi,
+            winput.source_dpi,
+            bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
+            bg_jpeg_quality=options.target_color_quality,
+            bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+            force_grayscale=options.force_monochrome,
+        )
+        if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
+            warnings.append(f"page-{i + 1}-jbig2-fallback-to-flate")
+
+    if options.ocr:
+        composed = add_text_layer(
+            composed,
+            page_index=0,
+            word_boxes=word_boxes,
+            raster_width_px=raster.size[0],
+            raster_height_px=raster.size[1],
+            page_width_pt=width_pt,
+            page_height_pt=height_pt,
+        )
+
+    # --- Streaming verify ---
+    output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
+    output_ocr_text = " ".join(
+        b.text for b in tesseract_word_boxes(output_raster, language=options.ocr_language)
+    )
+    per_page_input_estimate = raster.width * raster.height * 3
+    per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
+    anomalous = (
+        per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD
+        and strategy != PageStrategy.TEXT_ONLY
+    )
+    if strategy == PageStrategy.MIXED:
+        page_tile_ssim_floor = (
+            _DEFAULT_TILE_SSIM_FLOOR_SAFE
+            if (anomalous or is_safe)
+            else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
+        )
+        page_ssim_floor = ssim_floor
+        page_lev_ceiling = lev_ceiling
+    elif strategy == PageStrategy.PHOTO_ONLY:
+        page_tile_ssim_floor = -1.0
+        page_ssim_floor = 0.5
+        page_lev_ceiling = 1.0
+    else:
+        page_tile_ssim_floor = -1.0
+        page_ssim_floor = ssim_floor
+        page_lev_ceiling = lev_ceiling
+    if anomalous:
+        warnings.append(
+            f"page-{i + 1}-anomalous-ratio-{per_page_pixel_ratio:.0f}x-safe-verify",
+        )
+    verdict = verify_single_page(
+        input_raster=raster,
+        output_raster=output_raster,
+        input_ocr_text=input_ocr_text,
+        output_ocr_text=output_ocr_text,
+        lev_ceiling=page_lev_ceiling,
+        ssim_floor=page_ssim_floor,
+        tile_ssim_floor=page_tile_ssim_floor,
+        check_color_preserved=not options.force_monochrome,
+    )
+
+    in_bytes = len(winput.input_page_pdf)
+    out_bytes = len(composed)
+    true_ratio = in_bytes / max(1, out_bytes)
+
+    # Use `total` (captured above) for the log string only — this proves
+    # the local variable isn't accidentally unused when reading the code.
+    del total
+
+    return _PageResult(
+        page_index=i,
+        composed_bytes=composed,
+        strategy_name=strategy.name.lower(),
+        verdict=verdict,
+        per_page_warnings=tuple(warnings),
+        input_bytes=in_bytes,
+        output_bytes=out_bytes,
+        ratio=true_ratio,
     )
 
 
@@ -226,27 +482,9 @@ def compress(
 
     # Lazy imports of engine modules so ``from pdf_smasher import CompressOptions``
     # doesn't pay the startup cost of loading pdfium / OpenCV / Tesseract.
-    import numpy as np
-
     from pdf_smasher.engine.canonical import canonical_input_sha256
-    from pdf_smasher.engine.compose import compose_photo_only_page, compose_text_only_page
-    from pdf_smasher.engine.foreground import (
-        detect_paper_color,
-        extract_foreground,
-        is_effectively_monochrome,
-    )
-    from pdf_smasher.engine.mask import build_mask
-    from pdf_smasher.engine.ocr import tesseract_word_boxes
-    from pdf_smasher.engine.rasterize import rasterize_page
-    from pdf_smasher.engine.strategy import PageStrategy, classify_page
-    from pdf_smasher.engine.text_layer import add_text_layer
     from pdf_smasher.engine.triage import triage as _triage
-    from pdf_smasher.engine.verifier import (
-        _DEFAULT_TILE_SSIM_FLOOR_SAFE,
-        _DEFAULT_TILE_SSIM_FLOOR_STANDARD,
-        _VerifierAggregator,
-        verify_single_page,
-    )
+    from pdf_smasher.engine.verifier import _VerifierAggregator
 
     # --- Triage ---
     _emit("triage", f"triage: {len(input_data):,} bytes input")
@@ -308,8 +546,6 @@ def compress(
 
     import pypdfium2 as pdfium
 
-    page_pdfs: list[bytes] = []
-
     # We need page dimensions — open with pdfium once for sizing.
     pdf_dims = pdfium.PdfDocument(input_data)
     page_sizes: list[tuple[float, float]] = []
@@ -320,12 +556,10 @@ def compress(
     finally:
         pdf_dims.close()
 
-    # Measure per-page input bytes by splitting the source PDF. This is
-    # an extra pikepdf pass but gives us honest per-page compression
-    # ratios (real input_bytes/output_bytes per page, not the pixel-count
-    # anomaly signal we use internally). Only measure selected pages to
-    # save work when --pages is used.
-    input_page_bytes: dict[int, int] = {}
+    # Split the source PDF into per-page byte slices. Each worker (parallel
+    # or serial) gets only its own 1-page PDF, never the whole source.
+    # Byproduct: length → per-page input bytes used for honest ratio display.
+    single_page_pdfs: dict[int, bytes] = {}
     with pikepdf.open(io.BytesIO(input_data)) as _src_split:
         for i in _selected_indices:
             _single = pikepdf.new()
@@ -333,7 +567,7 @@ def compress(
                 _single.pages.append(_src_split.pages[i])
                 _buf = io.BytesIO()
                 _single.save(_buf, linearize=False)
-                input_page_bytes[i] = len(_buf.getvalue())
+                single_page_pdfs[i] = _buf.getvalue()
             finally:
                 _single.close()
 
@@ -360,208 +594,66 @@ def compress(
         "already_optimized": 0,
     }
 
-    # Open input PDF once for native text extraction.
-    _src_pdf_for_native_text = pdfium.PdfDocument(input_data)
-    try:
-        for _pos, i in enumerate(_selected_indices, start=1):
-            width_pt, height_pt = page_sizes[i]
-            _emit(
-                "page_start",
-                f"page {i + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
-                current=_pos,
-                total=len(_selected_indices),
-            )
-            try:
-                raster = rasterize_page(input_data, page_index=i, dpi=source_dpi)
-                word_boxes = tesseract_word_boxes(raster, language=options.ocr_language)
-                ocr_text = " ".join(b.text for b in word_boxes)
+    # Page results accumulate by original index; output merges in sorted order
+    # regardless of completion order (matters when parallel).
+    page_pdfs_by_index: dict[int, bytes] = {}
 
-                # SOURCE-TRUTH: prefer native PDF text layer when present.
-                _page_obj = _src_pdf_for_native_text[i]
-                _tp = _page_obj.get_textpage()
-                try:
-                    _native_text = _tp.get_text_range()
-                finally:
-                    _tp.close()
-                input_ocr_text = (
-                    _native_text.strip() if _native_text and _native_text.strip() else ocr_text
-                )
+    def _merge_result(pos: int, result: _PageResult) -> None:
+        """Accumulate a worker result into parent state + emit page_done."""
+        page_pdfs_by_index[result.page_index] = result.composed_bytes
+        warnings_list.extend(result.per_page_warnings)
+        verifier_agg.merge(result.page_index, result.verdict)
+        strategy_counts[result.strategy_name] += 1
+        _emit(
+            "page_done",
+            f"page {result.page_index + 1}/{tri.pages} done: strategy={result.strategy_name}, "
+            f"{result.input_bytes:,}→{result.output_bytes:,} bytes "
+            f"({result.ratio:.2f}x), "
+            f"verifier={'pass' if result.verdict.passed else 'fail'}",
+            current=pos,
+            total=len(_selected_indices),
+            strategy=result.strategy_name,
+            ratio=result.ratio,
+            input_bytes=result.input_bytes,
+            output_bytes=result.output_bytes,
+            verifier_passed=result.verdict.passed,
+        )
 
-                mask = build_mask(raster)
-                mask_arr = np.asarray(mask.convert("1"), dtype=bool)
-                mask_coverage = float(mask_arr.sum()) / max(1, mask_arr.size)
+    for _pos, i in enumerate(_selected_indices, start=1):
+        width_pt, height_pt = page_sizes[i]
+        _emit(
+            "page_start",
+            f"page {i + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
+            current=_pos,
+            total=len(_selected_indices),
+        )
+        winput = _WorkerInput(
+            input_page_pdf=single_page_pdfs[i],
+            page_index=i,
+            total_pages=tri.pages,
+            page_size=(width_pt, height_pt),
+            source_dpi=source_dpi,
+            bg_target_dpi=bg_target_dpi,
+            effective_bg_codec=effective_bg_codec,
+            options=options,
+            is_safe=is_safe,
+            lev_ceiling=lev_ceiling,
+            ssim_floor=ssim_floor,
+        )
+        try:
+            result = _process_single_page(winput)
+        except KeyboardInterrupt:
+            page_pdfs_by_index.clear()
+            raise
+        except (AssertionError, CompressError):
+            raise
+        except Exception as e:
+            msg = f"compression failed on page {i + 1}/{tri.pages}: {e}"
+            raise CompressError(msg) from e
+        _merge_result(_pos, result)
 
-                strategy = classify_page(raster, mask_coverage_fraction=mask_coverage)
-
-                if options.force_monochrome:
-                    from pdf_smasher.engine.verifier import _page_has_color
-
-                    if _page_has_color(raster):
-                        warnings_list.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
-                    # force_monochrome means "encode in grayscale, not RGB" — NOT
-                    # "binarize everything." The strategy chosen by classify_page
-                    # is respected; downstream code flips bg_color_mode to
-                    # "grayscale" based on options.force_monochrome. Binarizing
-                    # a fuzzy medical scan via TEXT_ONLY loses stroke detail and
-                    # produces visible text quality regressions.
-
-                if strategy == PageStrategy.ALREADY_OPTIMIZED:
-                    msg = (
-                        f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
-                        "compress() has no handler for this value."
-                    )
-                    raise AssertionError(msg)  # noqa: TRY301 — defensive guard; classify_page currently never emits this
-                if strategy == PageStrategy.TEXT_ONLY:
-                    if not options.force_monochrome and not is_effectively_monochrome(raster):
-                        warnings_list.append(
-                            f"page-{i + 1}-text-only-demoted-to-mixed-color-detected"
-                        )
-                        strategy = PageStrategy.MIXED
-                        _JBIG2_CASCADE_STATE.tripped = False
-                        composed = _mrc_compose(
-                            raster,
-                            mask,
-                            width_pt,
-                            height_pt,
-                            bg_target_dpi,
-                            source_dpi,
-                            bg_codec=effective_bg_codec,
-                            bg_jpeg_quality=options.target_color_quality,
-                            bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
-                            force_grayscale=options.force_monochrome,
-                        )
-                    else:
-                        fg = extract_foreground(raster, mask=mask)
-                        paper = detect_paper_color(raster)
-                        composed = compose_text_only_page(
-                            mask=mask,
-                            foreground_color=fg.ink_color,
-                            paper_color=paper,
-                            page_width_pt=width_pt,
-                            page_height_pt=height_pt,
-                        )
-                elif strategy == PageStrategy.PHOTO_ONLY:
-                    _photo_bg_color_mode: Literal["rgb", "grayscale"] = (
-                        "grayscale"
-                        if (options.force_monochrome or is_effectively_monochrome(raster))
-                        else "rgb"
-                    )
-                    composed = compose_photo_only_page(
-                        raster=raster,
-                        page_width_pt=width_pt,
-                        page_height_pt=height_pt,
-                        target_dpi=options.photo_target_dpi,
-                        bg_color_mode=_photo_bg_color_mode,
-                        bg_codec=effective_bg_codec,
-                        jpeg_quality=options.target_color_quality,
-                        subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
-                    )
-                else:  # MIXED
-                    _JBIG2_CASCADE_STATE.tripped = False
-                    composed = _mrc_compose(
-                        raster,
-                        mask,
-                        width_pt,
-                        height_pt,
-                        bg_target_dpi,
-                        source_dpi,
-                        bg_codec=effective_bg_codec,
-                        bg_jpeg_quality=options.target_color_quality,
-                        bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
-                        force_grayscale=options.force_monochrome,
-                    )
-                    if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
-                        warnings_list.append(f"page-{i + 1}-jbig2-fallback-to-flate")
-
-                if options.ocr:
-                    composed = add_text_layer(
-                        composed,
-                        page_index=0,
-                        word_boxes=word_boxes,
-                        raster_width_px=raster.size[0],
-                        raster_height_px=raster.size[1],
-                        page_width_pt=width_pt,
-                        page_height_pt=height_pt,
-                    )
-
-                # Streaming verify: rasterize output, compare, drop rasters.
-                output_raster = rasterize_page(composed, page_index=0, dpi=source_dpi)
-                output_ocr_text = " ".join(
-                    b.text
-                    for b in tesseract_word_boxes(output_raster, language=options.ocr_language)
-                )
-                per_page_input_estimate = raster.width * raster.height * 3
-                per_page_ratio = per_page_input_estimate / max(1, len(composed))
-                anomalous = (
-                    per_page_ratio > _ANOMALY_RATIO_THRESHOLD and strategy != PageStrategy.TEXT_ONLY
-                )
-                if strategy == PageStrategy.MIXED:
-                    # Tile SSIM gates JPEG ringing artifacts in the MRC background layer.
-                    page_tile_ssim_floor = (
-                        _DEFAULT_TILE_SSIM_FLOOR_SAFE
-                        if (anomalous or is_safe)
-                        else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
-                    )
-                    page_ssim_floor = ssim_floor
-                    page_lev_ceiling = lev_ceiling
-                elif strategy == PageStrategy.PHOTO_ONLY:
-                    # PHOTO_ONLY pages are aggressively lossy — quality 45 at target_dpi
-                    # produces legitimate SSIM well below the 0.92 MRC floor.
-                    # OCR on pure-photo pages produces garbage on both sides; skip it.
-                    page_tile_ssim_floor = -1.0
-                    page_ssim_floor = 0.5
-                    page_lev_ceiling = 1.0
-                else:
-                    # TEXT_ONLY / ALREADY_OPTIMIZED: SSIM is still meaningful (binary
-                    # JBIG2 on white bg scores well globally); tile SSIM is not.
-                    page_tile_ssim_floor = -1.0
-                    page_ssim_floor = ssim_floor
-                    page_lev_ceiling = lev_ceiling
-                if anomalous:
-                    warnings_list.append(
-                        f"page-{i + 1}-anomalous-ratio-{per_page_ratio:.0f}x-safe-verify"
-                    )
-                per_page_verdict = verify_single_page(
-                    input_raster=raster,
-                    output_raster=output_raster,
-                    input_ocr_text=input_ocr_text,
-                    output_ocr_text=output_ocr_text,
-                    lev_ceiling=page_lev_ceiling,
-                    ssim_floor=page_ssim_floor,
-                    tile_ssim_floor=page_tile_ssim_floor,
-                    check_color_preserved=not options.force_monochrome,
-                )
-                verifier_agg.merge(i, per_page_verdict)
-                del raster, output_raster, input_ocr_text, output_ocr_text
-                page_pdfs.append(composed)
-                strategy_counts[strategy.name.lower()] += 1
-                _in_bytes = input_page_bytes.get(i, 0)
-                _out_bytes = len(composed)
-                _true_ratio = _in_bytes / max(1, _out_bytes) if _in_bytes else 0.0
-                _emit(
-                    "page_done",
-                    f"page {i + 1}/{tri.pages} done: strategy={strategy.name.lower()}, "
-                    f"{_in_bytes:,}→{_out_bytes:,} bytes ({_true_ratio:.2f}x), "
-                    f"verifier={'pass' if per_page_verdict.passed else 'fail'}",
-                    current=_pos,
-                    total=len(_selected_indices),
-                    strategy=strategy.name.lower(),
-                    ratio=_true_ratio,
-                    input_bytes=_in_bytes,
-                    output_bytes=_out_bytes,
-                    verifier_passed=per_page_verdict.passed,
-                )
-
-            except KeyboardInterrupt:
-                page_pdfs.clear()
-                raise
-            except AssertionError, CompressError:
-                raise
-            except Exception as e:
-                msg = f"compression failed on page {i + 1}/{tri.pages}: {e}"
-                raise CompressError(msg) from e
-    finally:
-        _src_pdf_for_native_text.close()
+    # Merge pages in original order (matters when parallel completes out of order).
+    page_pdfs: list[bytes] = [page_pdfs_by_index[i] for i in sorted(_selected_indices)]
 
     assert len(page_pdfs) == len(_selected_indices), (
         f"page_pdfs has {len(page_pdfs)} entries but {len(_selected_indices)} were selected"
