@@ -62,12 +62,12 @@ _MAX_PAGES_RANGE = 1_000_000  # cap --pages "lo-hi" span to prevent DoS via
 
 
 def _positive_float(raw: str) -> float:
-    """argparse type for flags that must be > 0 (like --max-output-mb).
+    """argparse type for flags that must be > 0.
 
-    Without this, `--max-output-mb 0` passes argparse, propagates through
-    the full compress pipeline, and only crashes at the very end when
-    split_pdf_by_size rejects max_bytes <= 0. Failing fast at parse time
-    keeps the error local to the CLI flag the user got wrong.
+    Without this, `0` passes argparse, propagates through the full compress
+    pipeline, and only crashes at the very end when a downstream validator
+    rejects it. Failing fast at parse time keeps the error local to the
+    CLI flag the user got wrong.
     """
     try:
         f = float(raw)
@@ -75,7 +75,26 @@ def _positive_float(raw: str) -> float:
         msg = f"invalid float: {raw!r}"
         raise argparse.ArgumentTypeError(msg) from e
     if f <= 0:
-        msg = f"--max-output-mb must be > 0 (got {f})"
+        msg = f"must be > 0 (got {f})"
+        raise argparse.ArgumentTypeError(msg)
+    return f
+
+
+def _positive_mb_value(raw: str) -> float:
+    """argparse type for megabyte flags where int(value * 1024**2) must be
+    >= 1 (i.e., the value must round up to at least one byte).
+
+    ``_positive_float`` alone would accept ``1e-10`` — > 0 but rounds to
+    zero bytes, which propagates as ``max_bytes=0`` into
+    ``split_pdf_by_size`` and raises a bare ValueError deep in the pipeline.
+    Reject at parse time so the user gets a clear message naming the flag.
+    """
+    f = _positive_float(raw)
+    if int(f * 1024 * 1024) < 1:
+        msg = (
+            f"must round to >= 1 byte (got {f} MB = "
+            f"{int(f * 1024 * 1024)} bytes). Try a value >= 0.000001."
+        )
         raise argparse.ArgumentTypeError(msg)
     return f
 
@@ -260,7 +279,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--max-output-mb",
-        type=_positive_float,
+        type=_positive_mb_value,
         default=None,
         help=(
             "Cap the output PDF size. If the compressed output exceeds this "

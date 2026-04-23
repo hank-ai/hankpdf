@@ -108,6 +108,24 @@ def test_max_output_mb_negative_rejected(tmp_path) -> None:  # type: ignore[no-u
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("value", ["1e-10", "0.0000001"])
+def test_max_output_mb_rejects_tiny_values_at_parse_time(tmp_path, value: str) -> None:  # type: ignore[no-untyped-def]
+    """Values where int(value * 1024 * 1024) == 0 must be rejected at parse time,
+    not fail inside the pipeline.
+
+    _positive_float accepts 1e-10 (> 0), then max_bytes = int(1e-10 * 1024**2)
+    rounds to 0, and split_pdf_by_size raises a bare ValueError deep in the
+    pipeline — the user got an EXIT_ENGINE_ERROR for a flag value that
+    should have been rejected at the CLI.
+    """
+    in_path = _make_big_pdf(tmp_path, n_pages=1, payload_kb_per_page=10)
+    out_path = tmp_path / "out.pdf"
+    with pytest.raises(SystemExit) as ex:
+        main([str(in_path), "-o", str(out_path), "--max-output-mb", value])
+    assert ex.value.code == 2
+
+
+@pytest.mark.integration
 def test_chunk_pad_width_scales_beyond_999(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Regression: DCR Wave 2 flagged the hard-coded {:03d} pad width
     as sort-breaking past 999 chunks. Pad must scale to len(str(total)).
