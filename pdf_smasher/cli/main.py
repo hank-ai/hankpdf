@@ -422,10 +422,14 @@ def _format_report(report, fmt: str) -> str:  # type: ignore[no-untyped-def]
         return json.dumps(payload, default=str)
     # Plain text
     pct = (report.output_bytes / max(1, report.input_bytes)) * 100
+    v_status = report.verifier.status
+    suffix = f" verifier={v_status}"
+    if report.warnings:
+        suffix += f" warnings={len(report.warnings)}"
     return (
         f"ok  {report.input_bytes:,} -> {report.output_bytes:,} bytes "
         f"({pct:.1f}%, ratio {report.ratio:.2f}x, {report.pages} pages, "
-        f"{report.wall_time_ms} ms)"
+        f"{report.wall_time_ms} ms){suffix}"
     )
 
 
@@ -895,6 +899,27 @@ def main(argv: list[str] | None = None) -> int:
                             "longer belong to this output.",
                             file=sys.stderr,
                         )
+
+    # Verifier-status banner. Default skip_verify=True is a UX trap:
+    # users see a clean text report and assume the output was content-
+    # checked against the input. Surface verifier.status explicitly on
+    # stderr when it's not a clean pass. --quiet suppresses the banner
+    # along with the rest of the progress chrome.
+    if not args.quiet:
+        v_status = report.verifier.status
+        if v_status == "skipped":
+            print(
+                "[hankpdf] warning: content-preservation verifier was "
+                "SKIPPED (default). Output was NOT content-checked "
+                "against input. Use --verify to enable.",
+                file=sys.stderr,
+            )
+        elif v_status == "fail":
+            print(
+                "[hankpdf] warning: content-preservation verifier FAILED "
+                f"on {len(report.verifier.failing_pages)} page(s)",
+                file=sys.stderr,
+            )
 
     if not args.quiet and args.report != "none":
         line = _format_report(report, args.report)
