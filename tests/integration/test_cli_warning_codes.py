@@ -14,7 +14,7 @@ import pikepdf
 import pytest
 
 from pdf_smasher.cli.main import main
-from pdf_smasher.cli.warning_codes import CliWarningCode
+from pdf_smasher.cli.warning_codes import CliErrorCode, CliWarningCode
 
 
 def _make_pdf(tmp_path, n_pages: int = 2):  # type: ignore[no-untyped-def]
@@ -30,6 +30,12 @@ def _make_pdf(tmp_path, n_pages: int = 2):  # type: ignore[no-untyped-def]
 def _assert_code(code: CliWarningCode, text: str) -> None:
     assert f"[{code}]" in text, (
         f"expected stable code [{code}] in stderr; got:\n{text}"
+    )
+
+
+def _assert_error_code(code: CliErrorCode, text: str) -> None:
+    assert f"[{code}]" in text, (
+        f"expected stable error code [{code}] in stderr; got:\n{text}"
     )
 
 
@@ -143,3 +149,53 @@ def test_w_max_output_mb_stdout(tmp_path, monkeypatch) -> None:  # type: ignore[
     assert rc == 0, f"rc={rc}"
     err = fake_stderr.getvalue()
     _assert_code("W-MAX-OUTPUT-MB-STDOUT", err)
+
+
+# ---------- refusal error codes (E-*) ----------
+
+
+@pytest.mark.integration
+def test_e_input_encrypted_code(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """Encrypted PDF without password → E-INPUT-ENCRYPTED."""
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    in_path = tmp_path / "enc.pdf"
+    pdf.save(in_path, encryption=pikepdf.Encryption(user="s", owner="o"))
+    out_path = tmp_path / "out.pdf"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 10, f"expected EXIT_ENCRYPTED=10, got {rc}"
+    err = capsys.readouterr().err
+    _assert_error_code("E-INPUT-ENCRYPTED", err)
+
+
+@pytest.mark.integration
+def test_e_input_signed_code(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """Signed PDF without opt-in → E-INPUT-SIGNED."""
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.Root["/AcroForm"] = pikepdf.Dictionary(SigFlags=3, Fields=pikepdf.Array([]))
+    in_path = tmp_path / "signed.pdf"
+    pdf.save(in_path)
+    out_path = tmp_path / "out.pdf"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 11, f"expected EXIT_SIGNED=11, got {rc}"
+    err = capsys.readouterr().err
+    _assert_error_code("E-INPUT-SIGNED", err)
+
+
+@pytest.mark.integration
+def test_e_input_oversize_code(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """Input > max-input-mb → E-INPUT-OVERSIZE."""
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    in_path = tmp_path / "in.pdf"
+    pdf.save(in_path)
+    out_path = tmp_path / "out.pdf"
+    # Set a tiny max to guarantee a refusal.
+    rc = main([
+        str(in_path), "-o", str(out_path),
+        "--max-input-mb", "0.0001",
+    ])
+    assert rc == 12, f"expected EXIT_OVERSIZE=12, got {rc}"
+    err = capsys.readouterr().err
+    _assert_error_code("E-INPUT-OVERSIZE", err)

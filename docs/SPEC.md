@@ -633,6 +633,24 @@ Stable codes (see `pdf_smasher/cli/warning_codes.py` — the `CliWarningCode` Li
 - `W-IMAGE-EXPORT-PARTIAL-FAILURE` — image-export mode failed mid-way through a multi-page export. Emitted alongside the list of pages written before the failure. Exit code depends on the underlying cause (`EXIT_MALICIOUS=14`, `EXIT_DECOMPRESSION_BOMB=16`, `EXIT_ENGINE_ERROR=30`).
 - `W-CHUNK-WRITE-PARTIAL-FAILURE` — chunk write failed mid-way (disk full / permission / path error). Exit code `EXIT_ENGINE_ERROR=30`.
 
+Refusal / failure error codes (`E-*` — tag `[hankpdf] error` lines):
+
+- `E-INPUT-ENCRYPTED` — input is encrypted and no password was supplied. Exit code `EXIT_ENCRYPTED=10`.
+- `E-INPUT-SIGNED` — input carries a digital signature; `--allow-signed-invalidation` not supplied. Exit code `EXIT_SIGNED=11`.
+- `E-INPUT-CERTIFIED` — input carries a certifying signature (`/Perms /DocMDP`); `--allow-certified-invalidation` not supplied. Exit code `EXIT_CERTIFIED_SIG=15`.
+- `E-INPUT-OVERSIZE` — input exceeds `--max-input-mb` or `--max-pages`. Exit code `EXIT_OVERSIZE=12`.
+- `E-INPUT-CORRUPT` — pikepdf / qpdf could not parse the input. Exit code `EXIT_CORRUPT=13`.
+- `E-INPUT-MALICIOUS` — input tripped a sandbox resource cap (JBIG2 bomb, xref loop). Exit code `EXIT_MALICIOUS=14`.
+- `E-INPUT-DECOMPRESSION-BOMB` — declared or rendered pixel count exceeds the decompression-bomb cap (~715 Mpx). Exit code `EXIT_DECOMPRESSION_BOMB=16`.
+- `E-INPUT-NOT-PDF` — input did not start with `%PDF-` magic bytes. Exit code `EXIT_CORRUPT=13` (reserved; emitted by future strict-magic-check path).
+- `E-VERIFIER-FAIL` — content-drift verifier aborted the job. Exit code `EXIT_VERIFIER_FAIL=20`.
+- `E-ENGINE-ERROR` — generic `CompressError` not covered by the more specific codes above. Exit code `EXIT_ENGINE_ERROR=30`.
+- `E-TIMEOUT-PER-PAGE` — a page exceeded `per_page_timeout_seconds`. Exit code `EXIT_ENGINE_ERROR=30`.
+- `E-TIMEOUT-TOTAL` — the run exceeded `total_timeout_seconds`. Exit code `EXIT_ENGINE_ERROR=30`.
+- `E-OCR-TIMEOUT` — a Tesseract subprocess exceeded the per-page timeout (raised from inside `tesseract_word_boxes`). Exit code `EXIT_ENGINE_ERROR=30`.
+
+Exit codes disambiguate the refusal class for scripts that key on `$?`; the `E-*` codes are for scripts that tee stderr to a log and grep by code. Both interfaces are stable.
+
 ## 10. Build matrix
 
 | Target | Python | Artifact | Notes |

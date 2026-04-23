@@ -23,8 +23,11 @@ from pdf_smasher import (
     DecompressionBombError,
     EncryptedPDFError,
     MaliciousPDFError,
+    OcrTimeoutError,
     OversizeError,
+    PerPageTimeoutError,
     SignedPDFError,
+    TotalTimeoutError,
     __version__,
     _enforce_input_policy,
     compress,
@@ -32,6 +35,7 @@ from pdf_smasher import (
 )
 from pdf_smasher.cli.warning_codes import emit as _warn
 from pdf_smasher.cli.warning_codes import emit_error as _warn_error
+from pdf_smasher.cli.warning_codes import emit_refusal as _refuse
 from pdf_smasher.cli.warning_codes import line_prefix as _line_prefix
 from pdf_smasher.engine.chunking import split_pdf_by_size
 from pdf_smasher.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
@@ -639,13 +643,13 @@ def _run_image_export(
     try:
         tri = triage(input_bytes)
     except MaliciousPDFError as e:
-        print(f"refused: malicious PDF ({e})", file=sys.stderr)
+        print(_refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label), file=sys.stderr)
         return EXIT_MALICIOUS
     except DecompressionBombError as e:
-        print(f"refused: decompression bomb ({e})", file=sys.stderr)
+        print(_refuse("E-INPUT-DECOMPRESSION-BOMB", f"decompression bomb ({e})", input_name=_label), file=sys.stderr)
         return EXIT_DECOMPRESSION_BOMB
     except CompressError as e:
-        print(f"refused: {e}", file=sys.stderr)
+        print(_refuse("E-INPUT-CORRUPT", str(e), input_name=_label), file=sys.stderr)
         return EXIT_CORRUPT
 
     # Enforce the same safety gates as compress(). Encrypted/signed/oversize
@@ -653,16 +657,16 @@ def _run_image_export(
     try:
         _enforce_input_policy(tri, _build_options(args), input_bytes)
     except EncryptedPDFError as e:
-        print(f"refused: encrypted without password ({e})", file=sys.stderr)
+        print(_refuse("E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label), file=sys.stderr)
         return EXIT_ENCRYPTED
     except CertifiedSignatureError as e:
-        print(f"refused: certifying signature ({e})", file=sys.stderr)
+        print(_refuse("E-INPUT-CERTIFIED", f"certifying signature ({e})", input_name=_label), file=sys.stderr)
         return EXIT_CERTIFIED_SIG
     except SignedPDFError as e:
-        print(f"refused: signed PDF ({e})", file=sys.stderr)
+        print(_refuse("E-INPUT-SIGNED", f"signed PDF ({e})", input_name=_label), file=sys.stderr)
         return EXIT_SIGNED
     except OversizeError as e:
-        print(f"refused: oversize ({e})", file=sys.stderr)
+        print(_refuse("E-INPUT-OVERSIZE", f"oversize ({e})", input_name=_label), file=sys.stderr)
         return EXIT_OVERSIZE
 
     if only_pages is not None:
@@ -1019,31 +1023,58 @@ def main(argv: list[str] | None = None) -> int:
                 only_pages=only_pages,
             )
         except EncryptedPDFError as e:
-            print(f"refused: encrypted without password ({e})", file=sys.stderr)
+            print(_refuse("E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label), file=sys.stderr)
             return EXIT_ENCRYPTED
         except CertifiedSignatureError as e:
-            print(f"refused: certifying signature ({e})", file=sys.stderr)
+            print(_refuse("E-INPUT-CERTIFIED", f"certifying signature ({e})", input_name=_label), file=sys.stderr)
             return EXIT_CERTIFIED_SIG
         except SignedPDFError as e:
-            print(f"refused: signed PDF ({e})", file=sys.stderr)
+            print(_refuse("E-INPUT-SIGNED", f"signed PDF ({e})", input_name=_label), file=sys.stderr)
             return EXIT_SIGNED
         except OversizeError as e:
-            print(f"refused: oversize ({e})", file=sys.stderr)
+            print(_refuse("E-INPUT-OVERSIZE", f"oversize ({e})", input_name=_label), file=sys.stderr)
             return EXIT_OVERSIZE
         except DecompressionBombError as e:
-            print(f"refused: decompression bomb ({e})", file=sys.stderr)
+            print(_refuse("E-INPUT-DECOMPRESSION-BOMB", f"decompression bomb ({e})", input_name=_label), file=sys.stderr)
             return EXIT_DECOMPRESSION_BOMB
         except CorruptPDFError as e:
-            print(f"refused: corrupt PDF ({e})", file=sys.stderr)
+            print(_refuse("E-INPUT-CORRUPT", f"corrupt PDF ({e})", input_name=_label), file=sys.stderr)
             return EXIT_CORRUPT
         except MaliciousPDFError as e:
-            print(f"refused: malicious PDF ({e})", file=sys.stderr)
+            print(_refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label), file=sys.stderr)
             return EXIT_MALICIOUS
         except ContentDriftError as e:
-            print(f"aborted: content drift ({e})", file=sys.stderr)
+            print(
+                _warn_error("E-VERIFIER-FAIL", f"aborted: content drift ({e})", input_name=_label),
+                file=sys.stderr,
+            )
             return EXIT_VERIFIER_FAIL
+        # Timeouts — subclasses of CompressError; catch BEFORE the generic
+        # handler so they carry stable codes (exit code is EXIT_ENGINE_ERROR
+        # since timeouts aren't a separate code in the SPEC §2.2 table).
+        except OcrTimeoutError as e:
+            print(
+                _warn_error("E-OCR-TIMEOUT", f"OCR subprocess timed out ({e})", input_name=_label),
+                file=sys.stderr,
+            )
+            return EXIT_ENGINE_ERROR
+        except PerPageTimeoutError as e:
+            print(
+                _warn_error("E-TIMEOUT-PER-PAGE", f"per-page timeout ({e})", input_name=_label),
+                file=sys.stderr,
+            )
+            return EXIT_ENGINE_ERROR
+        except TotalTimeoutError as e:
+            print(
+                _warn_error("E-TIMEOUT-TOTAL", f"total wall-clock timeout ({e})", input_name=_label),
+                file=sys.stderr,
+            )
+            return EXIT_ENGINE_ERROR
         except CompressError as e:
-            print(f"error: {e}", file=sys.stderr)
+            print(
+                _warn_error("E-ENGINE-ERROR", str(e), input_name=_label),
+                file=sys.stderr,
+            )
             return EXIT_ENGINE_ERROR
     finally:
         if _bar is not None:

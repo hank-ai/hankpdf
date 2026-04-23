@@ -35,6 +35,27 @@ CliWarningCode = Literal[
     "W-CHUNK-WRITE-PARTIAL-FAILURE",
 ]
 
+# Refusal / failure error codes. These tag the `[hankpdf] error` lines so
+# batch log scraping can grep for a specific refusal reason without
+# depending on English wording. Exit codes disambiguate them too, but
+# log files mixing stdout+stderr from many jobs make grep more useful.
+# Source of truth: this Literal. SPEC.md §8.5.1 lists them.
+CliErrorCode = Literal[
+    "E-INPUT-ENCRYPTED",
+    "E-INPUT-SIGNED",
+    "E-INPUT-CERTIFIED",
+    "E-INPUT-CORRUPT",
+    "E-INPUT-MALICIOUS",
+    "E-INPUT-OVERSIZE",
+    "E-INPUT-DECOMPRESSION-BOMB",
+    "E-INPUT-NOT-PDF",
+    "E-ENGINE-ERROR",
+    "E-VERIFIER-FAIL",
+    "E-TIMEOUT-PER-PAGE",
+    "E-TIMEOUT-TOTAL",
+    "E-OCR-TIMEOUT",
+]
+
 WARN_PREFIX: Final = "[hankpdf] warning"
 ERROR_PREFIX: Final = "[hankpdf] error"
 
@@ -68,21 +89,38 @@ def emit(
 
 
 def emit_error(
-    code: CliWarningCode,
+    code: CliWarningCode | CliErrorCode,
     message: str,
     *,
     input_name: str | Path | None = None,
 ) -> str:
-    """Build a stable-code stderr ERROR line for partial-write failures.
+    """Build a stable-code stderr ERROR line for partial-write failures
+    and refusals.
 
     Same shape as :func:`emit`, but uses the ``error`` noun-phrase rather
-    than ``warning``. Used for ``W-*-PARTIAL-FAILURE`` codes where the
-    job already failed — not technically warnings.
+    than ``warning``. Accepts both ``W-*-PARTIAL-FAILURE`` codes (where
+    a job was partially completed) and ``E-*`` refusal/timeout codes.
     """
     tagged = f"[{code}]: {message}"
     if input_name is None:
         return f"{ERROR_PREFIX} {tagged}"
     return f"[hankpdf] {redact_filename(input_name)}: error {tagged}"
+
+
+def emit_refusal(
+    code: CliErrorCode,
+    reason: str,
+    *,
+    input_name: str | Path | None = None,
+) -> str:
+    """Build a stable-code refusal line for input-policy / engine rejects.
+
+    Thin wrapper around :func:`emit_error` that enforces the code is an
+    ``E-*`` refusal code (via the narrower CliErrorCode type) and uses
+    the word ``refused:`` in the message for backward compatibility with
+    scripts that already grep for it (see test_cli_e2e.py).
+    """
+    return emit_error(code, f"refused: {reason}", input_name=input_name)
 
 
 def line_prefix(input_name: str | Path | None) -> str:
