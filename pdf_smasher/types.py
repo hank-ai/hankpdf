@@ -65,6 +65,13 @@ class CompressOptions:
     total_timeout_seconds: int = 1200
     photo_target_dpi: int = 200  # DPI for PHOTO_ONLY pages
 
+    # Concurrency. Each worker gets its own single-page PDF slice, so
+    # memory scales with (workers x one page's raster), not (workers x full source).
+    #   0 = auto (cpu_count - 2, clamped ≥ 1)
+    #   1 = serial (no process pool)
+    #   N > 1 = exactly N workers
+    max_workers: int = 0
+
     # Output
     emit_sidecar_manifest: bool = True
     output_pdf_version: str = "1.7"

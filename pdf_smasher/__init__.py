@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import shutil
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import IO, Any, Literal
 
 import pikepdf
@@ -81,6 +83,22 @@ _FAILING_PAGES_INLINE_LIMIT = 10
 # Below this page count, the inline serial path is faster than pool startup
 # overhead. See docs/superpowers/plans/2026-04-23-per-page-parallelism.md.
 _PARALLEL_MIN_PAGES = 4
+
+# Reserved cores left for the user's other work when auto-sizing the pool.
+_AUTO_WORKER_RESERVE = 2
+
+# options.max_workers values: 0 = auto, 1 = serial, N >= this = N workers.
+_MIN_EXPLICIT_WORKER_COUNT = 2
+
+
+def _resolve_worker_count(options: CompressOptions, n_pages: int) -> int:
+    """Return the actual number of workers for this run. 1 == serial path."""
+    if options.max_workers == 1:
+        return 1
+    if options.max_workers >= _MIN_EXPLICIT_WORKER_COUNT:
+        return min(options.max_workers, n_pages)
+    auto = max(1, (os.cpu_count() or 4) - _AUTO_WORKER_RESERVE)
+    return min(auto, n_pages)
 
 
 from dataclasses import dataclass as _dc  # noqa: E402 — adjacent to other module-level aliases
@@ -223,9 +241,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             _tp.close()
     finally:
         _doc.close()
-    input_ocr_text = (
-        _native_text.strip() if _native_text and _native_text.strip() else ocr_text
-    )
+    input_ocr_text = _native_text.strip() if _native_text and _native_text.strip() else ocr_text
 
     # --- Mask + classify ---
     mask = build_mask(raster)
@@ -323,8 +339,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     per_page_input_estimate = raster.width * raster.height * 3
     per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
     anomalous = (
-        per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD
-        and strategy != PageStrategy.TEXT_ONLY
+        per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD and strategy != PageStrategy.TEXT_ONLY
     )
     if strategy == PageStrategy.MIXED:
         page_tile_ssim_floor = (
@@ -619,19 +634,13 @@ def compress(
             verifier_passed=result.verdict.passed,
         )
 
-    for _pos, i in enumerate(_selected_indices, start=1):
-        width_pt, height_pt = page_sizes[i]
-        _emit(
-            "page_start",
-            f"page {i + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
-            current=_pos,
-            total=len(_selected_indices),
-        )
-        winput = _WorkerInput(
+    # Build worker inputs once.
+    winputs: list[_WorkerInput] = [
+        _WorkerInput(
             input_page_pdf=single_page_pdfs[i],
             page_index=i,
             total_pages=tri.pages,
-            page_size=(width_pt, height_pt),
+            page_size=page_sizes[i],
             source_dpi=source_dpi,
             bg_target_dpi=bg_target_dpi,
             effective_bg_codec=effective_bg_codec,
@@ -640,17 +649,68 @@ def compress(
             lev_ceiling=lev_ceiling,
             ssim_floor=ssim_floor,
         )
-        try:
-            result = _process_single_page(winput)
-        except KeyboardInterrupt:
-            page_pdfs_by_index.clear()
-            raise
-        except (AssertionError, CompressError):
-            raise
-        except Exception as e:
-            msg = f"compression failed on page {i + 1}/{tri.pages}: {e}"
-            raise CompressError(msg) from e
-        _merge_result(_pos, result)
+        for i in _selected_indices
+    ]
+
+    n_workers = _resolve_worker_count(options, len(_selected_indices))
+    use_pool = n_workers > 1 and len(_selected_indices) >= _PARALLEL_MIN_PAGES
+
+    def _page_error_context(page_index: int, exc: BaseException) -> str:
+        return f"compression failed on page {page_index + 1}/{tri.pages}: {exc}"
+
+    if use_pool:
+        _emit(
+            "triage",
+            f"parallel dispatch: {n_workers} workers x {len(winputs)} pages",
+            total=len(winputs),
+        )
+        # In the parallel path we DO NOT emit per-page page_start events —
+        # workers all start simultaneously so the "rasterizing pN" label
+        # doesn't mean anything. Only page_done fires (from completion order).
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            future_to_winput: dict[Any, _WorkerInput] = {
+                ex.submit(_process_single_page, w): w for w in winputs
+            }
+            # `as_completed` iterates in completion order. `_pos` is 1-indexed
+            # completion position, which is what tqdm wants for the progress bar.
+            try:
+                for _pos, fut in enumerate(as_completed(future_to_winput), start=1):
+                    w = future_to_winput[fut]
+                    try:
+                        result = fut.result()
+                    except KeyboardInterrupt:
+                        ex.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except AssertionError, CompressError:
+                        ex.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    except Exception as e:
+                        ex.shutdown(wait=False, cancel_futures=True)
+                        msg = _page_error_context(w.page_index, e)
+                        raise CompressError(msg) from e
+                    _merge_result(_pos, result)
+            except BaseException:  # pragma: no cover — cancellation path
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise
+    else:
+        for _pos, w in enumerate(winputs, start=1):
+            _emit(
+                "page_start",
+                f"page {w.page_index + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
+                current=_pos,
+                total=len(winputs),
+            )
+            try:
+                result = _process_single_page(w)
+            except KeyboardInterrupt:
+                page_pdfs_by_index.clear()
+                raise
+            except AssertionError, CompressError:
+                raise
+            except Exception as e:
+                msg = _page_error_context(w.page_index, e)
+                raise CompressError(msg) from e
+            _merge_result(_pos, result)
 
     # Merge pages in original order (matters when parallel completes out of order).
     page_pdfs: list[bytes] = [page_pdfs_by_index[i] for i in sorted(_selected_indices)]

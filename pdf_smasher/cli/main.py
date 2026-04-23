@@ -127,6 +127,16 @@ def _parser() -> argparse.ArgumentParser:
             "report.warnings. Use only after visually verifying the output."
         ),
     )
+    p.add_argument(
+        "--max-workers",
+        type=int,
+        default=0,
+        help=(
+            "Per-page parallelism. 0 (default) = auto (cpu_count-2, min 1). "
+            "1 = serial. N>1 = exactly N workers. Each worker gets its own "
+            "single-page PDF slice, never the whole source."
+        ),
+    )
 
     # Reporting
     p.add_argument("--report", choices=["text", "json", "jsonl", "none"], default="text")
@@ -175,6 +185,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         target_color_quality=args.target_color_quality,
         force_monochrome=args.force_monochrome,
         accept_drift=args.accept_drift,
+        max_workers=args.max_workers,
         legal_codec_profile="ccitt-g4" if args.legal_mode else None,
         target_pdf_a=args.target_pdfa,
         ocr=args.ocr,
