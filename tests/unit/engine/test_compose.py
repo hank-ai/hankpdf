@@ -172,3 +172,69 @@ def test_compose_output_has_no_fg_xobject_when_using_imagemask() -> None:
         # /FG as a separate foreground image XObject must NOT exist — the
         # mask XObject (/MASK) carries the foreground via /ImageMask.
         assert "/FG" not in names
+
+
+# ---------- bg_color_mode (Task 3) ----------
+
+import io  # noqa: E402
+
+import pikepdf  # noqa: E402
+
+
+def test_mrc_uses_devicegray_when_bg_color_mode_is_grayscale() -> None:
+    """bg_color_mode='grayscale' → DeviceGray JPEG in the output PDF."""
+    arr = np.full((300, 300, 3), 240, dtype=np.uint8)
+    bg = Image.fromarray(arr)
+    fg = _black_blob_foreground()
+    mask = _blank_mask()
+    out = compose_mrc_page(
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_color_mode="grayscale",
+    )
+    with pikepdf.open(io.BytesIO(out)) as pdf:
+        bg_xobj = pdf.pages[0].Resources.XObject["/BG"]
+        assert str(bg_xobj.stream_dict.get("/ColorSpace")) == "/DeviceGray"
+
+
+def test_mrc_uses_devicergb_when_bg_color_mode_is_rgb() -> None:
+    """bg_color_mode='rgb' → DeviceRGB even on a gray-looking bg."""
+    arr = np.full((300, 300, 3), 240, dtype=np.uint8)
+    bg = Image.fromarray(arr)
+    fg = _black_blob_foreground()
+    mask = _blank_mask()
+    out = compose_mrc_page(
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+        bg_color_mode="rgb",
+    )
+    with pikepdf.open(io.BytesIO(out)) as pdf:
+        bg_xobj = pdf.pages[0].Resources.XObject["/BG"]
+        assert str(bg_xobj.stream_dict.get("/ColorSpace")) == "/DeviceRGB"
+
+
+def test_mrc_default_bg_color_mode_is_rgb() -> None:
+    """Default preserves existing RGB behavior; caller explicitly opts into grayscale."""
+    arr = np.full((300, 300, 3), 240, dtype=np.uint8)
+    bg = Image.fromarray(arr)
+    fg = _black_blob_foreground()
+    mask = _blank_mask()
+    out = compose_mrc_page(
+        foreground=fg,
+        foreground_color=(0, 0, 0),
+        mask=mask,
+        background=bg,
+        page_width_pt=612.0,
+        page_height_pt=792.0,
+    )
+    with pikepdf.open(io.BytesIO(out)) as pdf:
+        bg_xobj = pdf.pages[0].Resources.XObject["/BG"]
+        assert str(bg_xobj.stream_dict.get("/ColorSpace")) == "/DeviceRGB"

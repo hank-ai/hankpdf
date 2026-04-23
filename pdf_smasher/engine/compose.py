@@ -21,7 +21,9 @@ from __future__ import annotations
 import io
 import subprocess
 import zlib
-from typing import Any
+from typing import Any, Literal
+
+BgColorMode = Literal["rgb", "grayscale"]
 
 import pikepdf
 from PIL import Image
@@ -122,20 +124,27 @@ def compose_mrc_page(
     page_width_pt: float,
     page_height_pt: float,
     bg_jpeg_quality: int = _JPEG_QUALITY_BG,
+    bg_color_mode: BgColorMode = "rgb",
 ) -> bytes:
     """Build a mixed-content (MRC) PDF page: background + masked foreground."""
     pdf, page = _new_page_pdf(page_width_pt, page_height_pt)
 
     # --- Background image XObject (JPEG) ---
-    bg_data = _jpeg_bytes(background.convert("RGB"), bg_jpeg_quality)
+    if bg_color_mode == "grayscale":
+        bg_prepared = background.convert("L")
+        bg_color_space = pikepdf.Name.DeviceGray
+    else:
+        bg_prepared = background.convert("RGB")
+        bg_color_space = pikepdf.Name.DeviceRGB
+    bg_data = _jpeg_bytes(bg_prepared, bg_jpeg_quality)
     bg_xobj = _make_stream(
         pdf,
         data=bg_data,
         Type=pikepdf.Name.XObject,
         Subtype=pikepdf.Name.Image,
-        Width=background.size[0],
-        Height=background.size[1],
-        ColorSpace=pikepdf.Name.DeviceRGB,
+        Width=bg_prepared.size[0],
+        Height=bg_prepared.size[1],
+        ColorSpace=bg_color_space,
         BitsPerComponent=8,
         Filter=pikepdf.Name.DCTDecode,
     )
@@ -194,17 +203,19 @@ def compose_photo_only_page(
     target_dpi: int,
     jpeg_quality: int = _JPEG_QUALITY_BG,
     subsampling: int = _JPEG_SUBSAMPLING_444,
+    bg_color_mode: BgColorMode = "rgb",
 ) -> bytes:
     """Photo-only page: single full-page JPEG. No mask, no MRC overhead."""
     pdf, page = _new_page_pdf(page_width_pt, page_height_pt)
 
-    # Downsample the raster to target DPI for the photo encoding.
     target_w = max(1, round(page_width_pt * target_dpi / 72))
     target_h = max(1, round(page_height_pt * target_dpi / 72))
-    resized = raster.convert("RGB").resize(
-        (target_w, target_h),
-        Image.Resampling.LANCZOS,
-    )
+    if bg_color_mode == "grayscale":
+        resized = raster.convert("L").resize((target_w, target_h), Image.Resampling.LANCZOS)
+        color_space = pikepdf.Name.DeviceGray
+    else:
+        resized = raster.convert("RGB").resize((target_w, target_h), Image.Resampling.LANCZOS)
+        color_space = pikepdf.Name.DeviceRGB
     data = _jpeg_bytes(resized, jpeg_quality, subsampling=subsampling)
     xobj = _make_stream(
         pdf,
@@ -213,7 +224,7 @@ def compose_photo_only_page(
         Subtype=pikepdf.Name.Image,
         Width=resized.size[0],
         Height=resized.size[1],
-        ColorSpace=pikepdf.Name.DeviceRGB,
+        ColorSpace=color_space,
         BitsPerComponent=8,
         Filter=pikepdf.Name.DCTDecode,
     )
