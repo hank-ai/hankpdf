@@ -324,6 +324,42 @@ def test_pre_allocation_pixel_budget_check() -> None:
         )
 
 
+def test_pillow_decompression_bomb_translated_to_our_class() -> None:
+    """Pillow raises PIL.Image.DecompressionBombError; our code must catch
+    it and re-raise as pdf_smasher.DecompressionBombError so the CLI can
+    route it to EXIT_DECOMPRESSION_BOMB=16.
+
+    Regression: Pillow's DecompressionBombError is NOT a subclass of ours,
+    so ``except DecompressionBombError`` in the CLI used to miss it entirely
+    and it would fall through to EXIT_ENGINE_ERROR=30.
+    """
+    from unittest.mock import patch
+
+    import PIL.Image
+
+    from pdf_smasher import DecompressionBombError as HankBomb
+    from pdf_smasher.engine import image_export as ie
+
+    pdf_bytes = _make_pdf(1)
+
+    def _raise_pillow_bomb(*_args: object, **_kwargs: object) -> None:
+        msg = "synthetic pillow bomb"
+        raise PIL.Image.DecompressionBombError(msg)
+
+    # Patch rasterize_page so we control exactly when the Pillow bomb fires
+    # inside the generator's per-page try. We use the image_export module's
+    # re-export so the patch hits the real call site.
+    with patch.object(ie, "rasterize_page", _raise_pillow_bomb), pytest.raises(HankBomb):
+        list(
+            iter_pages_as_images(
+                pdf_bytes,
+                page_indices=[0],
+                image_format="jpeg",
+                dpi=72,
+            ),
+        )
+
+
 def test_iter_pages_rejects_excessive_dpi_at_library_level() -> None:
     """Library callers must not bypass the --image-dpi cap.
 

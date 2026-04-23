@@ -20,6 +20,7 @@ import io
 from collections.abc import Callable, Iterator
 from typing import Literal
 
+import PIL.Image
 import pypdfium2 as pdfium
 
 from pdf_smasher.engine.rasterize import rasterize_page
@@ -120,6 +121,33 @@ def iter_pages_as_images(
     )
 
 
+def _reraise_per_page_error(
+    exc: BaseException,
+    page_index: int,
+    total: int,
+) -> None:
+    """Re-raise a per-page exception with the appropriate typing.
+
+    Consolidates the per-page error translation so ``_iter_pages_impl``'s
+    ``except`` stays a single branch (keeps the PLR0912 branch count under
+    ruff's cap). Never returns normally.
+
+    - ``DecompressionBombError`` (ours): propagate unchanged so the CLI can
+      route it to ``EXIT_DECOMPRESSION_BOMB=16``.
+    - ``PIL.Image.DecompressionBombError`` (Pillow's class, NOT a subclass
+      of ours): translate to our typed class so the CLI's
+      ``except DecompressionBombError`` routes uniformly.
+    - Anything else: wrap in ``RuntimeError`` with ``"page N/total"``
+      context. Original chained via ``__cause__``.
+    """
+    if isinstance(exc, DecompressionBombError):
+        raise exc
+    if isinstance(exc, PIL.Image.DecompressionBombError):
+        raise DecompressionBombError(str(exc)) from exc
+    wrapped = f"image export failed on page {page_index + 1}/{total}: {exc}"
+    raise RuntimeError(wrapped) from exc
+
+
 def _page_size_points(pdf_bytes: bytes, page_index: int) -> tuple[float, float]:
     """Open the PDF briefly and return (width_pt, height_pt) for the given
     page WITHOUT rasterizing. Used for the pre-allocation pixel-budget check.
@@ -215,13 +243,8 @@ def _iter_pages_impl(
                     method=webp_method,
                 )
             encoded = buf.getvalue()
-        except DecompressionBombError:
-            # Typed error — propagate unchanged so the CLI can route it
-            # to EXIT_DECOMPRESSION_BOMB. Do not wrap in RuntimeError.
-            raise
-        except Exception as exc:
-            wrapped = f"image export failed on page {page_index + 1}/{total}: {exc}"
-            raise RuntimeError(wrapped) from exc
+        except Exception as exc:  # noqa: BLE001 — helper re-raises every path (never returns)
+            _reraise_per_page_error(exc, page_index, total)
         yield encoded
         if progress_callback is not None:
             progress_callback("page_done", pos, total)
