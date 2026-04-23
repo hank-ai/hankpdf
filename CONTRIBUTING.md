@@ -44,7 +44,20 @@ uv run pre-commit run --all-files       # manual run
 
 - Branch off `main`; keep PRs small and focused.
 - Every PR gets CI green (lint, type-check, unit tests, integration tests) before merge.
-- Commits use Conventional-Commits-ish format (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`).
+- Commits use Conventional-Commits-ish format. Accepted type prefixes:
+  - `feat:` — new user-visible capability
+  - `fix:` — bug fix
+  - `chore:` — tooling / deps / housekeeping
+  - `docs:` — documentation-only change
+  - `refactor:` — internal restructure with no behavior change
+  - `test:` — tests-only change
+  - `perf:` — measurable performance improvement
+  - `security:` — security-hardening change that isn't purely a bugfix
+    (e.g., new gate, tightened default)
+  - `observability:` — logging / metrics / progress-event surface changes
+  - `diag:` — diagnostic tooling / scripts not shipped as product
+  A scope in parentheses is encouraged for multi-module repos, e.g.
+  `fix(cli): …` or `feat(image-export): …`.
 - Tests are required for new functionality. Golden-output tests record expected ratio bands, not exact sizes — cross-host non-determinism is real (see `docs/ARCHITECTURE.md` §5 on the Tesseract LSTM non-determinism gotcha).
 - No new AGPL / GPL dependencies. Permissive licenses only (Apache-2.0 / BSD / MIT / MPL-2.0).
 
