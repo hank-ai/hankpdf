@@ -100,6 +100,36 @@ class TriageReport:
     notes: tuple[str, ...] = ()
 
 
+ProgressPhase = Literal[
+    "triage",
+    "triage_complete",
+    "page_start",
+    "page_done",
+    "merge_start",
+    "merge_complete",
+    "verify_complete",
+]
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    """Structured progress event emitted during :func:`compress`.
+
+    Carries no PHI — only phase, page indices, strategy names, and byte
+    counts. CLI renders via tqdm; programmatic callers can log, collect
+    metrics, or drive their own UI. ``total`` and ``current`` are both
+    0 outside the per-page phase.
+    """
+
+    phase: ProgressPhase
+    message: str
+    current: int = 0  # 1-indexed page number during per-page phases
+    total: int = 0  # total page count
+    strategy: str | None = None  # for page_start / page_done
+    ratio: float | None = None  # for page_done (per-page ratio estimate)
+    verifier_passed: bool | None = None  # for page_done
+
+
 @dataclass(frozen=True)
 class CompressReport:
     """Result of a compression run. See docs/SPEC.md §2.3 for schema."""

@@ -308,6 +308,36 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
     assert report.strategy_distribution["photo_only"] == 1
     assert report.strategy_distribution["mixed"] == 1
 
+    # only_pages=[1] must shrink the output to a single page (the TEXT_ONLY one).
+    _, subset_report = compress(
+        pdf_in,
+        options=CompressOptions(mode="fast"),
+        only_pages={1},
+    )
+    assert subset_report.pages == 1
+    assert subset_report.status == "ok"
+    assert subset_report.strategy_distribution["text_only"] == 1
+    assert subset_report.strategy_distribution["photo_only"] == 0
+    assert subset_report.strategy_distribution["mixed"] == 0
+
+    # only_pages=[1, 3] must produce a 2-page output.
+    _, subset2_report = compress(
+        pdf_in,
+        options=CompressOptions(mode="fast"),
+        only_pages={1, 3},
+    )
+    assert subset2_report.pages == 2
+
+
+@pytest.mark.integration
+def test_compress_rejects_out_of_range_only_pages() -> None:
+    """only_pages must validate against the actual page count."""
+    from pdf_smasher.exceptions import CompressError
+
+    pdf_in = _text_only_fixture()  # 1 page
+    with pytest.raises(CompressError, match=r"out of range|only_pages"):
+        compress(pdf_in, only_pages={1, 99})
+
 
 # ---------- Task 5: photo-only regression gate + fidelity ----------
 

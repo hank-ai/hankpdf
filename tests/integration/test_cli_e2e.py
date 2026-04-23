@@ -110,6 +110,7 @@ def _make_mixed_pdf(tmp_path) -> object:  # type: ignore[no-untyped-def]
 
     arr = np.full((2200, 1700, 3), 140, dtype=np.uint8)
     arr[300:1900, 200:1500] = 80  # dark band → MIXED routing
+    arr[50:100, 50:400] = [200, 40, 40]  # red banner → not effectively monochrome
     img = Image.fromarray(arr)
     draw = ImageDraw.Draw(img)
     try:
@@ -142,9 +143,9 @@ def _make_mixed_pdf(tmp_path) -> object:  # type: ignore[no-untyped-def]
 
 @pytest.mark.integration
 def test_cli_force_monochrome_flag_routes_through_options(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """--force-monochrome on the CLI must reach CompressOptions and produce
-    a strictly smaller output than the default run (the mono path collapses
-    the MRC JPEG background entirely on TEXT_ONLY).
+    """--force-monochrome on the CLI must reach CompressOptions and cause the
+    MRC background to be encoded in DeviceGray (not DeviceRGB). On already-gray
+    fixtures the bytes may be identical; the colorspace change is the gate.
     """
     in_path = _make_mixed_pdf(tmp_path)
     out_default = tmp_path / "default.pdf"
@@ -154,10 +155,19 @@ def test_cli_force_monochrome_flag_routes_through_options(tmp_path) -> None:  # 
     assert rc1 == 0
     rc2 = main([str(in_path), "-o", str(out_mono), "--mode", "fast", "--force-monochrome"])
     assert rc2 == 0
-    assert out_mono.stat().st_size < out_default.stat().st_size, (
-        "--force-monochrome must reduce output size vs default run; "
-        f"default={out_default.stat().st_size}, mono={out_mono.stat().st_size}"
-    )
+
+    # Inspect /BG colorspace in each output
+    def _bg_colorspace(p) -> str:  # type: ignore[no-untyped-def]
+        with pikepdf.open(p) as pdf:
+            xobj = pdf.pages[0].Resources.XObject
+            # Find whichever key is the bg image (MRC: /BG; PHOTO_ONLY: /IM)
+            for k in ("/BG", "/IM"):
+                if k in xobj:
+                    return str(xobj[k].stream_dict.get("/ColorSpace"))
+            return "?"
+
+    assert _bg_colorspace(out_default) == "/DeviceRGB"
+    assert _bg_colorspace(out_mono) == "/DeviceGray"
 
 
 def test_cli_doctor_reports_jpeg2000_and_jbig2(capsys) -> None:  # type: ignore[no-untyped-def]

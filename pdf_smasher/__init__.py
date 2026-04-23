@@ -36,6 +36,7 @@ from pdf_smasher.exceptions import (
 from pdf_smasher.types import (
     CompressOptions,
     CompressReport,
+    ProgressEvent,
     TriageReport,
     VerifierResult,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "EnvironmentError",
     "MaliciousPDFError",
     "OversizeError",
+    "ProgressEvent",
     "SignedPDFError",
     "TriageReport",
     "VerifierResult",
@@ -72,6 +74,10 @@ _CHROMA_TO_PIL: dict[str, int] = {"4:4:4": 0, "4:2:2": 1, "4:2:0": 2}
 # dense text; anything above that on MIXED or PHOTO_ONLY is suspicious.
 _ANOMALY_RATIO_THRESHOLD = 200.0
 
+# When the verifier fails, list failing pages inline in the error message only
+# if the count is at or below this; otherwise summarize.
+_FAILING_PAGES_INLINE_LIMIT = 10
+
 
 def _mrc_compose(
     raster: Any,
@@ -84,6 +90,7 @@ def _mrc_compose(
     bg_codec: Literal["jpeg", "jpeg2000"] = "jpeg",
     bg_jpeg_quality: int = 45,
     bg_subsampling: int = 0,
+    force_grayscale: bool = False,
 ) -> bytes:
     """MRC composition helper (Task 4a). Caller decides bg_color_mode via raster check."""
     from pdf_smasher.engine.background import extract_background
@@ -98,7 +105,7 @@ def _mrc_compose(
         target_dpi=bg_target_dpi,
     )
     bg_color_mode: Literal["rgb", "grayscale"] = (
-        "grayscale" if is_effectively_monochrome(raster) else "rgb"
+        "grayscale" if (force_grayscale or is_effectively_monochrome(raster)) else "rgb"
     )
     return compose_mrc_page(
         foreground=fg.image,
@@ -157,7 +164,8 @@ def compress(
     input_data: bytes,
     options: CompressOptions | None = None,
     *,
-    progress_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[ProgressEvent], None] | None = None,
+    only_pages: set[int] | None = None,
 ) -> tuple[bytes, CompressReport]:
     """Compress a PDF.
 
@@ -165,18 +173,42 @@ def compress(
     report. Raises one of the :class:`CompressError` subclasses on refusal
     or drift.
 
-    ``progress_callback`` is an optional ``fn(message: str) -> None`` hook
-    invoked at pipeline milestones (triage complete, per-page dispatch and
-    completion, merge, verify, final). The CLI wires this to stderr unless
-    ``--quiet`` is passed. No PHI is included in messages — only page
-    indices, strategy names, and byte counts.
+    ``progress_callback`` is an optional ``fn(event: ProgressEvent) -> None``
+    hook invoked at pipeline milestones (triage, per-page start/done,
+    merge, verify). The CLI drives a tqdm progress bar from these events.
+    Events carry no PHI — only phase, page indices, strategy names, byte
+    counts, and ratios.
+
+    ``only_pages`` (1-indexed page numbers) restricts processing to a
+    subset of pages. The output PDF contains only the selected pages in
+    their original order. Pages outside the set are skipped entirely —
+    no rasterization, no OCR, no verification. Useful for smoke tests.
     """
     t0 = time.monotonic()
     options = options or CompressOptions()
 
-    def _emit(msg: str) -> None:
+    def _emit(
+        phase: str,
+        message: str,
+        *,
+        current: int = 0,
+        total: int = 0,
+        strategy: str | None = None,
+        ratio: float | None = None,
+        verifier_passed: bool | None = None,
+    ) -> None:
         if progress_callback is not None:
-            progress_callback(msg)
+            progress_callback(
+                ProgressEvent(
+                    phase=phase,  # type: ignore[arg-type]
+                    message=message,
+                    current=current,
+                    total=total,
+                    strategy=strategy,
+                    ratio=ratio,
+                    verifier_passed=verifier_passed,
+                ),
+            )
 
     # GUARD: legal_codec_profile (CCITT G4) is reserved for a later phase.
     # Placed before triage so the error is actionable even on empty input.
@@ -213,11 +245,35 @@ def compress(
     )
 
     # --- Triage ---
-    _emit(f"triage: {len(input_data):,} bytes input")
+    _emit("triage", f"triage: {len(input_data):,} bytes input")
     tri = _triage(input_data)
+
+    # Validate + apply only_pages filter.
+    if only_pages is not None:
+        if not only_pages:
+            msg = "only_pages is empty — no pages selected"
+            raise CompressError(msg)
+        out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]
+        if out_of_range:
+            msg = f"only_pages requested {sorted(out_of_range)} but input has {tri.pages} pages"
+            raise CompressError(msg)
+        # Convert to 0-indexed set for internal use, keep sorted order for output.
+        _selected_indices = sorted(p - 1 for p in only_pages)
+    else:
+        _selected_indices = list(range(tri.pages))
+
     _emit(
-        f"triage complete: {tri.pages} pages, classification={tri.classification}, "
-        f"encrypted={tri.is_encrypted}, signed={tri.is_signed}",
+        "triage_complete",
+        (
+            f"triage complete: {tri.pages} pages, classification={tri.classification}, "
+            f"encrypted={tri.is_encrypted}, signed={tri.is_signed}"
+            + (
+                f" — processing {len(_selected_indices)}/{tri.pages} pages"
+                if only_pages is not None
+                else ""
+            )
+        ),
+        total=len(_selected_indices),
     )
 
     if tri.classification == "require-password" and options.password is None:
@@ -286,9 +342,14 @@ def compress(
     # Open input PDF once for native text extraction.
     _src_pdf_for_native_text = pdfium.PdfDocument(input_data)
     try:
-        for i in range(tri.pages):
+        for _pos, i in enumerate(_selected_indices, start=1):
             width_pt, height_pt = page_sizes[i]
-            _emit(f"page {i + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)")
+            _emit(
+                "page_start",
+                f"page {i + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
+                current=_pos,
+                total=len(_selected_indices),
+            )
             try:
                 raster = rasterize_page(input_data, page_index=i, dpi=source_dpi)
                 word_boxes = tesseract_word_boxes(raster, language=options.ocr_language)
@@ -316,10 +377,12 @@ def compress(
 
                     if _page_has_color(raster):
                         warnings_list.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
-                    if strategy not in (PageStrategy.ALREADY_OPTIMIZED, PageStrategy.PHOTO_ONLY):
-                        strategy = PageStrategy.TEXT_ONLY
-                    # PHOTO_ONLY + force_monochrome: keep PHOTO_ONLY but grayscale
-                    # (handled in the PHOTO_ONLY branch via _photo_bg_color_mode).
+                    # force_monochrome means "encode in grayscale, not RGB" — NOT
+                    # "binarize everything." The strategy chosen by classify_page
+                    # is respected; downstream code flips bg_color_mode to
+                    # "grayscale" based on options.force_monochrome. Binarizing
+                    # a fuzzy medical scan via TEXT_ONLY loses stroke detail and
+                    # produces visible text quality regressions.
 
                 if strategy == PageStrategy.ALREADY_OPTIMIZED:
                     msg = (
@@ -344,6 +407,7 @@ def compress(
                             bg_codec=effective_bg_codec,
                             bg_jpeg_quality=options.target_color_quality,
                             bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+                            force_grayscale=options.force_monochrome,
                         )
                     else:
                         fg = extract_foreground(raster, mask=mask)
@@ -383,6 +447,7 @@ def compress(
                         bg_codec=effective_bg_codec,
                         bg_jpeg_quality=options.target_color_quality,
                         bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+                        force_grayscale=options.force_monochrome,
                     )
                     if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
                         warnings_list.append(f"page-{i + 1}-jbig2-fallback-to-flate")
@@ -450,9 +515,15 @@ def compress(
                 page_pdfs.append(composed)
                 strategy_counts[strategy.name.lower()] += 1
                 _emit(
+                    "page_done",
                     f"page {i + 1}/{tri.pages} done: strategy={strategy.name.lower()}, "
                     f"ratio={per_page_ratio:.1f}x, "
                     f"verifier={'pass' if per_page_verdict.passed else 'fail'}",
+                    current=_pos,
+                    total=len(_selected_indices),
+                    strategy=strategy.name.lower(),
+                    ratio=per_page_ratio,
+                    verifier_passed=per_page_verdict.passed,
                 )
 
             except KeyboardInterrupt:
@@ -466,8 +537,8 @@ def compress(
     finally:
         _src_pdf_for_native_text.close()
 
-    assert len(page_pdfs) == tri.pages, (
-        f"page_pdfs has {len(page_pdfs)} entries but input had {tri.pages} pages"
+    assert len(page_pdfs) == len(_selected_indices), (
+        f"page_pdfs has {len(page_pdfs)} entries but {len(_selected_indices)} were selected"
     )
 
     n_color_discarded = sum(1 for w in warnings_list if "color-detected-in-monochrome-mode" in w)
@@ -475,7 +546,11 @@ def compress(
         warnings_list.append(f"force-monochrome-discarded-color-on-{n_color_discarded}-pages")
 
     # Merge pages.
-    _emit(f"merging {tri.pages} pages into output PDF")
+    _emit(
+        "merge_start",
+        f"merging {len(page_pdfs)} pages into output PDF",
+        total=len(page_pdfs),
+    )
     merged = pikepdf.new()
     for page_bytes in page_pdfs:
         src = pikepdf.open(io.BytesIO(page_bytes))
@@ -487,20 +562,31 @@ def compress(
     merged.save(out_buf, linearize=False, deterministic_id=True)
     output_bytes = out_buf.getvalue()
     _emit(
+        "merge_complete",
         f"merge complete: {len(output_bytes):,} bytes "
         f"(ratio {len(input_data) / max(1, len(output_bytes)):.2f}x)",
+        ratio=len(input_data) / max(1, len(output_bytes)),
     )
 
     verifier_result = verifier_agg.result()
     if verifier_result.status == "fail":
         if options.mode != "fast":
+            summary = verifier_agg.failure_summary()
+            failing = list(verifier_result.failing_pages)
+            failing_display = (
+                f"pages {failing}"
+                if len(failing) <= _FAILING_PAGES_INLINE_LIMIT
+                else f"{len(failing)} pages ({failing[:5]} ... {failing[-3:]})"
+            )
             msg = (
-                f"content drift detected on pages {list(verifier_result.failing_pages)}: "
-                f"ocr_lev={verifier_result.ocr_levenshtein:.4f}, "
+                f"content drift on {failing_display}.\n\n"
+                f"{summary}\n\n"
+                f"raw metrics: ocr_lev={verifier_result.ocr_levenshtein:.4f}, "
                 f"ssim_global={verifier_result.ssim_global:.4f}, "
                 f"ssim_tile_min={verifier_result.ssim_min_tile:.4f}, "
                 f"digit_multiset_match={verifier_result.digit_multiset_match}, "
-                f"color_preserved={verifier_result.color_preserved}"
+                f"color_preserved={verifier_result.color_preserved}\n\n"
+                f"to proceed anyway (accepts drift): --mode fast"
             )
             raise ContentDriftError(msg)
         warnings_list.append(f"verifier-fail-fast-mode-pages-{list(verifier_result.failing_pages)}")
@@ -524,7 +610,7 @@ def compress(
         input_bytes=len(input_data),
         output_bytes=len(output_bytes),
         ratio=ratio,
-        pages=tri.pages,
+        pages=len(page_pdfs),
         wall_time_ms=wall_ms,
         engine="mrc",
         engine_version=__engine_version__,

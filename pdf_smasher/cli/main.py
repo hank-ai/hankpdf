@@ -106,11 +106,48 @@ def _parser() -> argparse.ArgumentParser:
     # Limits
     p.add_argument("--max-pages", type=int)
     p.add_argument("--max-input-mb", type=float, default=2000.0)
+    p.add_argument(
+        "--pages",
+        type=str,
+        default=None,
+        help=(
+            "Restrict processing to a subset of pages. 1-indexed. Accepts "
+            "comma-separated single pages and ranges, e.g. "
+            "'1,3-5,10' or '1-3' or '5'. Output PDF contains only the "
+            "selected pages in their original order. Useful for smoke tests."
+        ),
+    )
 
     # Reporting
     p.add_argument("--report", choices=["text", "json", "jsonl", "none"], default="text")
     p.add_argument("--quiet", action="store_true")
     return p
+
+
+def _parse_pages_spec(spec: str) -> set[int]:
+    """Parse a 1-indexed page spec like '1,3-5,10' into a set of ints.
+
+    Raises ValueError on malformed input.
+    """
+    out: set[int] = set()
+    for raw in spec.split(","):
+        part = raw.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo_s, hi_s = part.split("-", 1)
+            lo, hi = int(lo_s), int(hi_s)
+            if lo < 1 or hi < lo:
+                msg = f"invalid range {part!r}: must be 1-indexed, lo <= hi"
+                raise ValueError(msg)
+            out.update(range(lo, hi + 1))
+        else:
+            n = int(part)
+            if n < 1:
+                msg = f"invalid page {part!r}: must be 1-indexed"
+                raise ValueError(msg)
+            out.add(n)
+    return out
 
 
 def _read_password(args: argparse.Namespace) -> str | None:
@@ -236,43 +273,101 @@ def main(argv: list[str] | None = None) -> int:
 
     options = _build_options(args)
 
-    # Progress emit to stderr unless --quiet. Non-PHI: indices, strategy names,
-    # byte counts only. Goes to stderr so --report json on stdout stays clean.
-    def _progress(msg: str) -> None:
-        if not args.quiet:
-            print(f"[hankpdf] {msg}", file=sys.stderr, flush=True)
+    only_pages: set[int] | None = None
+    if args.pages:
+        try:
+            only_pages = _parse_pages_spec(args.pages)
+        except ValueError as e:
+            print(f"error: --pages {e}", file=sys.stderr)
+            return EXIT_USAGE
+
+    # Progress: tqdm bar for the per-page phase + plain stderr lines for
+    # the triage/merge/verify milestones. All output goes to stderr so that
+    # --report json on stdout stays clean for piping. --quiet suppresses both.
+    from tqdm import tqdm  # type: ignore[import-untyped]
+
+    from pdf_smasher import ProgressEvent
+
+    _bar: tqdm | None = None
+
+    def _progress(event: ProgressEvent) -> None:
+        nonlocal _bar
+        if args.quiet:
+            return
+        if event.phase == "triage_complete":
+            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
+            # Create the per-page bar up front with total page count.
+            _bar = tqdm(
+                total=event.total,
+                desc="pages",
+                unit="pg",
+                file=sys.stderr,
+                dynamic_ncols=True,
+                leave=True,
+            )
+        elif event.phase == "page_start" and _bar is not None:
+            _bar.set_postfix_str(f"rasterizing p{event.current}")
+        elif event.phase == "page_done" and _bar is not None:
+            tag = "pass" if event.verifier_passed else "FAIL"
+            _bar.set_postfix_str(
+                f"{event.strategy} {event.ratio:.1f}x {tag}"
+                if event.ratio is not None
+                else event.strategy or "",
+            )
+            _bar.update(1)
+            # On failure, tqdm.write a permanent line above the bar so the
+            # user can see *which* page failed without losing the bar.
+            if event.verifier_passed is False:
+                _bar.write(
+                    f"  ⚠ page {event.current}/{event.total} "
+                    f"({event.strategy}, ratio {event.ratio:.1f}x): verifier FAIL",
+                )
+        elif event.phase == "merge_start":
+            if _bar is not None:
+                _bar.close()
+                _bar = None
+            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
+        elif event.phase in {"merge_complete", "triage"}:
+            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
 
     try:
-        output_bytes, report = compress(
-            input_bytes, options=options, progress_callback=_progress,
-        )
-    except EncryptedPDFError as e:
-        print(f"refused: encrypted without password ({e})", file=sys.stderr)
-        return EXIT_ENCRYPTED
-    except CertifiedSignatureError as e:
-        print(f"refused: certifying signature ({e})", file=sys.stderr)
-        return EXIT_CERTIFIED_SIG
-    except SignedPDFError as e:
-        print(f"refused: signed PDF ({e})", file=sys.stderr)
-        return EXIT_SIGNED
-    except OversizeError as e:
-        print(f"refused: oversize ({e})", file=sys.stderr)
-        return EXIT_OVERSIZE
-    except DecompressionBombError as e:
-        print(f"refused: decompression bomb ({e})", file=sys.stderr)
-        return EXIT_DECOMPRESSION_BOMB
-    except CorruptPDFError as e:
-        print(f"refused: corrupt PDF ({e})", file=sys.stderr)
-        return EXIT_CORRUPT
-    except MaliciousPDFError as e:
-        print(f"refused: malicious PDF ({e})", file=sys.stderr)
-        return EXIT_MALICIOUS
-    except ContentDriftError as e:
-        print(f"aborted: content drift ({e})", file=sys.stderr)
-        return EXIT_VERIFIER_FAIL
-    except CompressError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return EXIT_ENGINE_ERROR
+        try:
+            output_bytes, report = compress(
+                input_bytes,
+                options=options,
+                progress_callback=_progress,
+                only_pages=only_pages,
+            )
+        except EncryptedPDFError as e:
+            print(f"refused: encrypted without password ({e})", file=sys.stderr)
+            return EXIT_ENCRYPTED
+        except CertifiedSignatureError as e:
+            print(f"refused: certifying signature ({e})", file=sys.stderr)
+            return EXIT_CERTIFIED_SIG
+        except SignedPDFError as e:
+            print(f"refused: signed PDF ({e})", file=sys.stderr)
+            return EXIT_SIGNED
+        except OversizeError as e:
+            print(f"refused: oversize ({e})", file=sys.stderr)
+            return EXIT_OVERSIZE
+        except DecompressionBombError as e:
+            print(f"refused: decompression bomb ({e})", file=sys.stderr)
+            return EXIT_DECOMPRESSION_BOMB
+        except CorruptPDFError as e:
+            print(f"refused: corrupt PDF ({e})", file=sys.stderr)
+            return EXIT_CORRUPT
+        except MaliciousPDFError as e:
+            print(f"refused: malicious PDF ({e})", file=sys.stderr)
+            return EXIT_MALICIOUS
+        except ContentDriftError as e:
+            print(f"aborted: content drift ({e})", file=sys.stderr)
+            return EXIT_VERIFIER_FAIL
+        except CompressError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return EXIT_ENGINE_ERROR
+    finally:
+        if _bar is not None:
+            _bar.close()
 
     # Write output
     if str(args.output) == "-":

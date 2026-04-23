@@ -183,7 +183,10 @@ def verify_single_page(
 
 
 class _VerifierAggregator:
-    """Streaming per-page verdict accumulator. Holds only O(1) scalars."""
+    """Streaming per-page verdict accumulator. Holds only O(1) scalars plus
+    per-check failure counters so the drift error can tell the user which
+    gates specifically tripped.
+    """
 
     def __init__(self) -> None:
         self._worst_lev: float = 0.0
@@ -192,17 +195,72 @@ class _VerifierAggregator:
         self._any_digit_mismatch: bool = False
         self._color_preserved: bool = True
         self._failing_pages: list[int] = []
+        # Per-check failure counts (accumulated from thresholds applied by caller).
+        self._n_digit_mismatch: int = 0
+        self._n_color_loss: int = 0
+        self._total_pages: int = 0
 
-    def merge(self, page_idx: int, verdict: PageVerdict) -> None:
+    def merge(
+        self,
+        page_idx: int,
+        verdict: PageVerdict,
+        *,
+        lev_ceiling: float | None = None,  # noqa: ARG002 — reserved for per-page threshold reporting
+        ssim_floor: float | None = None,  # noqa: ARG002 — reserved for per-page threshold reporting
+        tile_ssim_floor: float | None = None,  # noqa: ARG002 — reserved for per-page threshold reporting
+    ) -> None:
         self._worst_lev = max(self._worst_lev, verdict.lev)
         self._min_ssim_global = min(self._min_ssim_global, verdict.ssim_global)
         self._min_ssim_tile = min(self._min_ssim_tile, verdict.ssim_tile_min)
+        self._total_pages += 1
         if not verdict.digits_match:
             self._any_digit_mismatch = True
+            self._n_digit_mismatch += 1
         if not verdict.color_preserved:
             self._color_preserved = False
+            self._n_color_loss += 1
         if not verdict.passed:
             self._failing_pages.append(page_idx)
+
+    def failure_summary(self) -> str:
+        """Human-readable breakdown of which gates tripped. Empty if clean."""
+        if not self._failing_pages:
+            return ""
+        n_fail = len(self._failing_pages)
+        parts = [f"{n_fail}/{self._total_pages} pages failed the verifier:"]
+        if self._n_digit_mismatch:
+            parts.append(
+                f"  - {self._n_digit_mismatch} pages: digit multiset changed "
+                "(characters/digits differ between input and output OCR) — "
+                "most likely cause: binarization on TEXT_ONLY route dropped "
+                "or distorted small glyphs. Try dropping --force-monochrome.",
+            )
+        if self._worst_lev > _DEFAULT_LEVENSHTEIN_CEILING_STANDARD:
+            parts.append(
+                f"  - OCR text edit-distance up to {self._worst_lev:.2%} "
+                "(0.05 standard ceiling / 0.02 safe). Matches the digit check "
+                "above on most drift scenarios.",
+            )
+        if self._min_ssim_global < _DEFAULT_SSIM_FLOOR:
+            parts.append(
+                f"  - min global SSIM {self._min_ssim_global:.4f} "
+                "(0.92 floor). The rendered output looks structurally different "
+                "from the input. Try --target-color-quality 75 to raise bg "
+                "fidelity, or drop --mode fast if used.",
+            )
+        if self._min_ssim_tile < _DEFAULT_TILE_SSIM_FLOOR_STANDARD and self._min_ssim_tile > -1.0:
+            parts.append(
+                f"  - min tile SSIM {self._min_ssim_tile:.4f} "
+                "(0.85 standard / 0.88 safe). A localized region of a MIXED "
+                "page has bad JPEG artifacts. Raise --target-color-quality.",
+            )
+        if self._n_color_loss:
+            parts.append(
+                f"  - {self._n_color_loss} pages: input had color, output "
+                "does not. If you passed --force-monochrome, that's expected. "
+                "Otherwise there's a routing bug — please file an issue.",
+            )
+        return "\n".join(parts)
 
     def result(self) -> VerifierResult:
         return VerifierResult(

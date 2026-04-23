@@ -43,6 +43,7 @@ dependencies = [
     "opencv-python-headless>=4.13.0",
     "scikit-image>=0.26.0",
     "pytesseract>=0.3.13",
+    "tqdm>=4.67",
 ]
 
 [project.urls]
@@ -123,6 +124,7 @@ ignore = [
     "C901",     # main() has many error-class branches by design
     "PLR0911",  # many exit codes = many returns
     "PLR0912",
+    "PLR0915",  # main() is long by design — many exit paths + progress wiring
     "T201",     # print() is the CLI's UI
     "PLC0415",
     "S603",     # hardcoded binary names in --doctor
