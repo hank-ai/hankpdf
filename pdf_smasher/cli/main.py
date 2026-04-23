@@ -606,6 +606,32 @@ def main(argv: list[str] | None = None) -> int:
             "webp": "webp",
         }.get(ext, "pdf")
 
+    # Warn if an explicit --output-format overrides the -o extension.
+    # Users expect -o out.pdf to produce a PDF; if they also pass
+    # --output-format jpeg we silently wrote out.jpg with no explanation
+    # for the rename. Surface the override. DCR Wave 1.
+    if args.output_format is not None and args.output is not None:
+        o_ext = args.output.suffix.lower().lstrip(".")
+        implicit_format = {
+            "jpg": "jpeg",
+            "jpeg": "jpeg",
+            "png": "png",
+            "webp": "webp",
+            "pdf": "pdf",
+        }.get(o_ext)
+        if (
+            implicit_format is not None
+            and implicit_format != resolved_format
+            and not args.quiet
+        ):
+            print(
+                f"[hankpdf] warning: --output-format {resolved_format} "
+                f"overrides the .{o_ext} extension; output will be "
+                f"written as {resolved_format} regardless of the "
+                "filename suffix",
+                file=sys.stderr,
+            )
+
     # Image-export mode bypasses the MRC pipeline entirely.
     if resolved_format in {"jpeg", "png", "webp"}:
         return _run_image_export(args, input_bytes, only_pages, resolved_format)

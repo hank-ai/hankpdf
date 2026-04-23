@@ -129,3 +129,28 @@ def test_image_export_warns_on_max_output_mb(tmp_path, capsys) -> None:  # type:
     assert "image" in err.lower(), (
         f"expected 'image' in stderr warning; got: {err!r}"
     )
+
+
+@pytest.mark.integration
+def test_output_format_suffix_mismatch_warns(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """-o out.pdf --output-format jpeg should warn the user that we're
+    writing a JPEG regardless of the .pdf extension. DCR Wave 1:
+    silently writing a different format than the filename suggests is
+    a UX trap — surface the override."""
+    in_path = _make_pdf(tmp_path, n_pages=1)
+    # Intentional mismatch: extension says pdf, explicit format says jpeg.
+    # Use a subdir with a neutral name so the tmp-path doesn't happen to
+    # contain any of the keywords we're grepping for.
+    neutral_dir = tmp_path / "neutral"
+    neutral_dir.mkdir()
+    out_path = neutral_dir / "out.pdf"
+    rc = main([
+        str(in_path),
+        "-o", str(out_path),
+        "--output-format", "jpeg",
+    ])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "extension" in err.lower() or "overrides" in err.lower(), (
+        f"expected mismatch warning in stderr; got: {err!r}"
+    )
