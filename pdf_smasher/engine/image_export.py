@@ -103,6 +103,18 @@ def render_pages_as_images(
     out: list[bytes] = []
     for page_index in page_indices:
         raster = rasterize_page(pdf_bytes, page_index=page_index, dpi=dpi)
+        # Defense-in-depth: even with the CLI's --image-dpi cap, a PDF
+        # with extreme MediaBox dimensions (UserUnit multipliers etc.)
+        # could still produce a huge raster. Refuse > ~2 GB RGB buffers.
+        _max_px = 2 * 1024 * 1024 * 1024 // 3  # 2 GiB / 3 bytes per pixel
+        if raster.width * raster.height > _max_px:
+            msg = (
+                f"page {page_index + 1} rasterized to "
+                f"{raster.width}x{raster.height} px — exceeds the "
+                f"decompression-bomb cap ({_max_px / (1024 * 1024):.0f} MB "
+                "of raw pixels). Lower --image-dpi or --pages to proceed."
+            )
+            raise ValueError(msg)
         buf = io.BytesIO()
         rgb = raster.convert("RGB")
         if image_format == "jpeg":

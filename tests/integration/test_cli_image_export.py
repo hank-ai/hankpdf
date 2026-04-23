@@ -90,3 +90,20 @@ def test_image_export_empty_pages_spec_exits_usage_error(tmp_path, capsys) -> No
     assert "empty" in err.lower() or "no pages" in err.lower(), (
         f"expected 'empty' or 'no pages' in stderr; got: {err!r}"
     )
+
+
+@pytest.mark.integration
+def test_image_export_rejects_excessive_dpi(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """--image-dpi 5000 on a standard letter page would produce a
+    42000x54000 RGB buffer (~6 GB). Refuse before allocating.
+
+    argparse calls sys.exit(2) when a type validator raises
+    ArgumentTypeError, so we expect SystemExit with code 2.
+    """
+    in_path = _make_pdf(tmp_path, n_pages=1)
+    out_path = tmp_path / "out.jpg"
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(in_path), "-o", str(out_path), "--image-dpi", "5000"])
+    assert exc_info.value.code == 2, (
+        f"expected SystemExit(2) from argparse, got {exc_info.value.code}"
+    )

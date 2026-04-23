@@ -32,6 +32,30 @@ from pdf_smasher import (
 from pdf_smasher.engine.chunking import split_pdf_by_size
 from pdf_smasher.engine.image_export import render_pages_as_images
 
+_MAX_IMAGE_DPI = 1200  # 300 archival + 4x headroom; above this = OOM risk
+
+
+def _positive_dpi(raw: str) -> int:
+    """argparse type for --image-dpi. Reject unreasonably large or
+    non-positive values that would trigger a memory-exhaustion DoS in
+    rasterize_page()."""
+    try:
+        n = int(raw)
+    except ValueError as e:
+        msg = f"invalid int: {raw!r}"
+        raise argparse.ArgumentTypeError(msg) from e
+    if n < 1:
+        msg = f"--image-dpi must be >= 1 (got {n})"
+        raise argparse.ArgumentTypeError(msg)
+    if n > _MAX_IMAGE_DPI:
+        msg = (
+            f"--image-dpi capped at {_MAX_IMAGE_DPI} (got {n}); higher "
+            "values can exceed addressable memory on realistic page sizes"
+        )
+        raise argparse.ArgumentTypeError(msg)
+    return n
+
+
 # Exit codes per SPEC.md §2.2. Kept in sync with the CompressError class tree.
 EXIT_OK = 0
 EXIT_NOOP_PASSTHROUGH = 2
@@ -195,9 +219,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--image-dpi",
-        type=int,
+        type=_positive_dpi,
         default=150,
-        help="DPI for image-export formats. Default: 150. 300 for archival.",
+        help=f"DPI for image-export formats. Default: 150. 300 for archival. Max: {_MAX_IMAGE_DPI}.",
     )
     p.add_argument(
         "--jpeg-quality",
