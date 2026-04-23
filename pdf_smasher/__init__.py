@@ -570,7 +570,7 @@ def compress(
 
     verifier_result = verifier_agg.result()
     if verifier_result.status == "fail":
-        if options.mode != "fast":
+        if options.mode != "fast" and not options.accept_drift:
             summary = verifier_agg.failure_summary()
             failing = list(verifier_result.failing_pages)
             failing_display = (
@@ -589,7 +589,10 @@ def compress(
                 f"to proceed anyway (accepts drift): --mode fast"
             )
             raise ContentDriftError(msg)
-        warnings_list.append(f"verifier-fail-fast-mode-pages-{list(verifier_result.failing_pages)}")
+        tag = "accept-drift" if options.accept_drift else "fast-mode"
+        warnings_list.append(
+            f"verifier-fail-{tag}-pages-{list(verifier_result.failing_pages)}",
+        )
 
     # --- Hashes ---
     input_sha = hashlib.sha256(input_data).hexdigest()

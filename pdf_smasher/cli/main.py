@@ -117,6 +117,16 @@ def _parser() -> argparse.ArgumentParser:
             "selected pages in their original order. Useful for smoke tests."
         ),
     )
+    p.add_argument(
+        "--accept-drift",
+        action="store_true",
+        help=(
+            "Write the output PDF even if the content-preservation verifier "
+            "flags drift. Keeps the full-quality (300 DPI source) pipeline, "
+            "unlike --mode fast which also lowers DPI. Drift is recorded in "
+            "report.warnings. Use only after visually verifying the output."
+        ),
+    )
 
     # Reporting
     p.add_argument("--report", choices=["text", "json", "jsonl", "none"], default="text")
@@ -164,6 +174,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         target_bg_dpi=args.target_bg_dpi,
         target_color_quality=args.target_color_quality,
         force_monochrome=args.force_monochrome,
+        accept_drift=args.accept_drift,
         legal_codec_profile="ccitt-g4" if args.legal_mode else None,
         target_pdf_a=args.target_pdfa,
         ocr=args.ocr,
