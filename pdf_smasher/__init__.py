@@ -64,6 +64,9 @@ __all__ = [
 _JBIG2_CASCADE_STATE = threading.local()
 
 
+_CHROMA_TO_PIL: dict[str, int] = {"4:4:4": 0, "4:2:2": 1, "4:2:0": 2}
+
+
 def _mrc_compose(
     raster: Any,
     mask: Any,
@@ -73,6 +76,8 @@ def _mrc_compose(
     source_dpi: int,
     *,
     bg_codec: str = "jpeg",
+    bg_jpeg_quality: int = 45,
+    bg_subsampling: int = 0,
 ) -> bytes:
     """MRC composition helper (Task 4a). Caller decides bg_color_mode via raster check."""
     from pdf_smasher.engine.background import extract_background
@@ -96,6 +101,8 @@ def _mrc_compose(
         page_height_pt=height_pt,
         bg_color_mode=bg_color_mode,
         bg_codec=bg_codec,
+        bg_jpeg_quality=bg_jpeg_quality,
+        bg_subsampling=bg_subsampling,
     )
 
 
@@ -148,6 +155,16 @@ def compress(
     """
     t0 = time.monotonic()
     options = options or CompressOptions()
+
+    # GUARD: legal_codec_profile (CCITT G4) is reserved for a later phase.
+    # Placed before triage so the error is actionable even on empty input.
+    if options.legal_codec_profile:
+        msg = (
+            "legal_codec_profile (CCITT G4 fallback) is not implemented in this "
+            "build. Use legal_codec_profile=None and --engine mrc for Phase-2b "
+            "outputs; tracked for a later phase."
+        )
+        raise NotImplementedError(msg)
 
     # Lazy imports of engine modules so ``from pdf_smasher import CompressOptions``
     # doesn't pay the startup cost of loading pdfium / OpenCV / Tesseract.
@@ -284,6 +301,8 @@ def compress(
                         composed = _mrc_compose(
                             raster, mask, width_pt, height_pt, bg_target_dpi, source_dpi,
                             bg_codec=effective_bg_codec,
+                            bg_jpeg_quality=options.target_color_quality,
+                            bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
                         )
                     else:
                         fg = extract_foreground(raster, mask=mask)
@@ -308,12 +327,16 @@ def compress(
                         target_dpi=options.photo_target_dpi,
                         bg_color_mode=_photo_bg_color_mode,
                         bg_codec=effective_bg_codec,
+                        jpeg_quality=options.target_color_quality,
+                        subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
                     )
                 else:  # MIXED
                     _JBIG2_CASCADE_STATE.tripped = False
                     composed = _mrc_compose(
                         raster, mask, width_pt, height_pt, bg_target_dpi, source_dpi,
                         bg_codec=effective_bg_codec,
+                        bg_jpeg_quality=options.target_color_quality,
+                        bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
                     )
                     if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
                         warnings_list.append(f"page-{i + 1}-jbig2-fallback-to-flate")

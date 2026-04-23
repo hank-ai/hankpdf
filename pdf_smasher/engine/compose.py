@@ -173,6 +173,7 @@ def compose_mrc_page(
     bg_jpeg_quality: int = _JPEG_QUALITY_BG,
     bg_color_mode: BgColorMode = "rgb",
     bg_codec: BgCodec = "jpeg",
+    bg_subsampling: int = _JPEG_SUBSAMPLING_444,
 ) -> bytes:
     """Build a mixed-content (MRC) PDF page: background + masked foreground."""
     pdf, page = _new_page_pdf(page_width_pt, page_height_pt)
@@ -184,7 +185,12 @@ def compose_mrc_page(
     else:
         bg_prepared = background.convert("RGB")
         bg_color_space = pikepdf.Name.DeviceRGB
-    bg_data, bg_filter = _encode_bg(bg_prepared, bg_codec=bg_codec, jpeg_quality=bg_jpeg_quality)
+    bg_data, bg_filter = _encode_bg(
+        bg_prepared,
+        bg_codec=bg_codec,
+        jpeg_quality=bg_jpeg_quality,
+        subsampling=bg_subsampling,
+    )
     bg_xobj = _make_stream(
         pdf,
         data=bg_data,

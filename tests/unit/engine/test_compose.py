@@ -288,6 +288,39 @@ def test_compose_mrc_jpeg2000_bg_option() -> None:
         assert str(bg_xobj.stream_dict.get("/Filter")) == "/JPXDecode"
 
 
+def test_bg_jpeg_quality_affects_output_size() -> None:
+    """Lower bg_jpeg_quality produces smaller output — confirms the knob works."""
+    bg = _blank_background()
+    fg = _black_blob_foreground()
+    mask = _blank_mask()
+    out_hi = compose_mrc_page(
+        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
+        page_width_pt=612.0, page_height_pt=792.0, bg_jpeg_quality=80,
+    )
+    out_lo = compose_mrc_page(
+        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
+        page_width_pt=612.0, page_height_pt=792.0, bg_jpeg_quality=20,
+    )
+    assert len(out_lo) < len(out_hi)
+
+
+def test_bg_chroma_subsampling_affects_output_size() -> None:
+    """4:2:0 subsampling produces smaller JPEG than 4:4:4 on color content."""
+    rng = np.random.default_rng(seed=5)
+    bg = Image.fromarray(rng.integers(0, 256, size=(600, 600, 3), dtype=np.uint8))
+    fg = _black_blob_foreground()
+    mask = _blank_mask()
+    out_444 = compose_mrc_page(
+        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
+        page_width_pt=612.0, page_height_pt=792.0, bg_subsampling=0,
+    )
+    out_420 = compose_mrc_page(
+        foreground=fg, foreground_color=(0, 0, 0), mask=mask, background=bg,
+        page_width_pt=612.0, page_height_pt=792.0, bg_subsampling=2,
+    )
+    assert len(out_420) < len(out_444)
+
+
 def test_jpeg2000_produces_smaller_bg_than_jpeg_on_paper_texture() -> None:
     """JPEG2000 must produce a strictly smaller output than JPEG on paper
     texture when available — otherwise the option is not worth wiring.

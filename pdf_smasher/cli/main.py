@@ -82,6 +82,15 @@ def _parser() -> argparse.ArgumentParser:
             "paper textures but adds ~1-2 s/page (demoted to jpeg in fast mode)."
         ),
     )
+    p.add_argument(
+        "--bg-chroma",
+        choices=["4:4:4", "4:2:2", "4:2:0"],
+        default="4:4:4",
+        help=(
+            "Chroma subsampling for bg JPEG. 4:4:4 preserves colored text; "
+            "4:2:0 is smaller but smears color on thin strokes. Default: 4:4:4."
+        ),
+    )
 
     # OCR
     p.add_argument("--ocr", dest="ocr", action="store_true", default=True)
@@ -114,10 +123,11 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
     return CompressOptions(
         mode=args.mode,
         bg_codec=args.bg_codec,
+        bg_chroma_subsampling=args.bg_chroma,
         target_bg_dpi=args.target_bg_dpi,
         target_color_quality=args.target_color_quality,
         force_monochrome=args.force_monochrome,
-        legal_codec_profile=args.legal_mode,
+        legal_codec_profile="ccitt-g4" if args.legal_mode else None,
         target_pdf_a=args.target_pdfa,
         ocr=args.ocr,
         ocr_language=args.ocr_language,

@@ -32,8 +32,11 @@ class CompressOptions:
     force_monochrome: bool = False
     mode: Mode = "standard"
 
-    # Archival / legal profile
-    legal_codec_profile: bool = False
+    # Archival / legal profile.
+    # str because SPEC §1.1 names the profile "ccitt-g4" (a string value);
+    # None means "not requested". Bool was wrong — `False is not None` is True,
+    # which made the guard in compress() always fire and raise NotImplementedError.
+    legal_codec_profile: str | None = None
     target_pdf_a: bool = False
 
     # OCR behavior

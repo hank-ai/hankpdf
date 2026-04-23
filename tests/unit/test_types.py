@@ -16,7 +16,7 @@ def test_compress_options_defaults() -> None:
     assert opts.mode == "standard"
     assert opts.target_bg_dpi == 150
     assert opts.bg_chroma_subsampling == "4:4:4"
-    assert opts.legal_codec_profile is False
+    assert opts.legal_codec_profile is None
     assert opts.ocr is True
     assert opts.ocr_language == "eng"
     assert opts.allow_signed_invalidation is False

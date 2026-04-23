@@ -125,3 +125,17 @@ def test_compress_respects_mode_safe() -> None:
     pdf_out, report = compress(pdf_in, options=CompressOptions(mode="safe"))
     assert pdf_out.startswith(b"%PDF-")
     assert report.verifier.status in ("pass", "fail")
+
+
+def test_legal_codec_profile_raises_not_implemented() -> None:
+    """legal_codec_profile names a CCITT G4 profile we have NOT implemented.
+    Guard must fire before triage so the error is clear even on b\"\"."""
+    with pytest.raises(NotImplementedError, match="legal_codec_profile"):
+        compress(b"", options=CompressOptions(legal_codec_profile="ccitt-g4"))
+
+
+def test_legal_codec_profile_none_does_not_raise_at_construction() -> None:
+    """Default value (None) must not fire the guard — the previous bool=False
+    typing was wrong (False is not None is True, raising every call)."""
+    opts = CompressOptions()
+    assert opts.legal_codec_profile is None
