@@ -32,9 +32,25 @@ from pdf_smasher import (
 )
 from pdf_smasher.cli.warning_codes import emit as _warn
 from pdf_smasher.cli.warning_codes import emit_error as _warn_error
+from pdf_smasher.cli.warning_codes import line_prefix as _line_prefix
 from pdf_smasher.engine.chunking import split_pdf_by_size
 from pdf_smasher.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
 from pdf_smasher.utils.text import format_page_list_short
+
+
+def _input_label(input_path: Path | None) -> str | Path | None:
+    """Resolve the CLI input argument to a loggable label.
+
+    Returns ``None`` for stdin or missing args — :func:`_line_prefix` and
+    :func:`_warn` render that as the plain ``[hankpdf]`` prefix. Otherwise
+    returns the path unchanged; redaction happens inside the warning_codes
+    helpers per THREAT_MODEL.md §5.
+    """
+    if input_path is None:
+        return None
+    if str(input_path) == "-":
+        return None
+    return input_path
 
 # Keep CLI cap in lockstep with the library cap (which is the real
 # enforcer). The CLI layer just fails fast with a nicer argparse
@@ -446,6 +462,9 @@ def _run_image_export(
     requested page as JPEG/PNG. Invoked from main() when the user picks
     jpeg/png via --output-format or an image extension on -o.
     """
+    _label = _input_label(args.input)
+    _prefix = _line_prefix(_label)
+
     # --max-output-mb is a PDF-only concept (it splits a merged PDF into
     # size-bounded sibling files). In image-export mode each page is
     # already its own file, so the flag has no semantics here. Warn
@@ -456,6 +475,7 @@ def _run_image_export(
                 "W-MAX-OUTPUT-MB-IMAGE-MODE",
                 "--max-output-mb applies only to PDF output; "
                 "ignored in image-export mode",
+                input_name=_label,
             ),
             file=sys.stderr,
         )
@@ -596,7 +616,7 @@ def _run_image_export(
             target.write_bytes(blob)
             if not args.quiet:
                 print(
-                    f"wrote {target} ({len(blob):,} bytes, "
+                    f"{_prefix} wrote {target} ({len(blob):,} bytes, "
                     f"{image_format} @ {args.image_dpi} DPI)",
                     file=sys.stderr,
                 )
@@ -617,8 +637,8 @@ def _run_image_export(
                     total_bytes += len(blob)
                     if not args.quiet:
                         print(
-                            f"wrote {target.name} ({len(blob):,} bytes, "
-                            f"page {page_idx + 1})",
+                            f"{_prefix} wrote {target.name} "
+                            f"({len(blob):,} bytes, page {page_idx + 1})",
                             file=sys.stderr,
                         )
             except MaliciousPDFError as exc:
@@ -627,12 +647,13 @@ def _run_image_export(
                         "W-IMAGE-EXPORT-PARTIAL-FAILURE",
                         f"image export failed after writing "
                         f"{len(written_paths)}/{n} pages: {exc}",
+                        input_name=_label,
                     ),
                     file=sys.stderr,
                 )
                 if written_paths:
                     print(
-                        "[hankpdf] wrote these before failure: "
+                        f"{_prefix} wrote these before failure: "
                         f"{[p.name for p in written_paths]}",
                         file=sys.stderr,
                     )
@@ -643,12 +664,13 @@ def _run_image_export(
                         "W-IMAGE-EXPORT-PARTIAL-FAILURE",
                         f"image export failed after writing "
                         f"{len(written_paths)}/{n} pages: {exc}",
+                        input_name=_label,
                     ),
                     file=sys.stderr,
                 )
                 if written_paths:
                     print(
-                        "[hankpdf] wrote these before failure: "
+                        f"{_prefix} wrote these before failure: "
                         f"{[p.name for p in written_paths]}",
                         file=sys.stderr,
                     )
@@ -659,19 +681,20 @@ def _run_image_export(
                         "W-IMAGE-EXPORT-PARTIAL-FAILURE",
                         f"image export failed after writing "
                         f"{len(written_paths)}/{n} pages: {exc}",
+                        input_name=_label,
                     ),
                     file=sys.stderr,
                 )
                 if written_paths:
                     print(
-                        "[hankpdf] wrote these before failure: "
+                        f"{_prefix} wrote these before failure: "
                         f"{[p.name for p in written_paths]}",
                         file=sys.stderr,
                     )
                 return EXIT_ENGINE_ERROR
             if not args.quiet:
                 print(
-                    f"[hankpdf] exported {n} {image_format} pages "
+                    f"{_prefix} exported {n} {image_format} pages "
                     f"({total_bytes:,} total bytes, {args.image_dpi} DPI)",
                     file=sys.stderr,
                 )
@@ -701,6 +724,12 @@ def main(argv: list[str] | None = None) -> int:
         input_bytes = sys.stdin.buffer.read()
     else:
         input_bytes = args.input.read_bytes()
+
+    # Resolve the log-label once so every stderr line this run emits
+    # carries the same redacted filename prefix (per THREAT_MODEL.md §5).
+    # stdin returns None → plain "[hankpdf]" prefix; no empty hash.
+    _label = _input_label(args.input)
+    _prefix = _line_prefix(_label)
 
     options = _build_options(args)
 
@@ -761,6 +790,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"--output-format {resolved_format} overrides the "
                     f".{o_ext} extension; output will be written as "
                     f"{resolved_format} regardless of the filename suffix",
+                    input_name=_label,
                 ),
                 file=sys.stderr,
             )
@@ -783,7 +813,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.quiet:
             return
         if event.phase == "triage_complete":
-            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
+            print(f"{_prefix} {event.message}", file=sys.stderr, flush=True)
             # Create the per-page bar up front with total page count.
             _bar = tqdm(
                 total=event.total,
@@ -824,9 +854,9 @@ def main(argv: list[str] | None = None) -> int:
             if _bar is not None:
                 _bar.close()
                 _bar = None
-            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
+            print(f"{_prefix} {event.message}", file=sys.stderr, flush=True)
         elif event.phase in {"merge_complete", "triage"}:
-            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
+            print(f"{_prefix} {event.message}", file=sys.stderr, flush=True)
 
     try:
         try:
@@ -876,6 +906,7 @@ def main(argv: list[str] | None = None) -> int:
                     "W-MAX-OUTPUT-MB-STDOUT",
                     "--max-output-mb is ignored when -o - (stdout); "
                     "wrote merged output",
+                    input_name=_label,
                 ),
                 file=sys.stderr,
             )
@@ -902,6 +933,7 @@ def main(argv: list[str] | None = None) -> int:
                             f"{args.max_output_mb:.3f} MB). Single-page "
                             "PDFs cannot be split further; the oversize "
                             "output was retained.",
+                            input_name=_label,
                         ),
                         file=sys.stderr,
                     )
@@ -947,12 +979,13 @@ def main(argv: list[str] | None = None) -> int:
                             "W-CHUNK-WRITE-PARTIAL-FAILURE",
                             f"chunk write failed after "
                             f"{len(written_paths)}/{len(chunks)} chunks: {exc}",
+                            input_name=_label,
                         ),
                         file=sys.stderr,
                     )
                     if written_paths:
                         print(
-                            "[hankpdf] wrote these before failure: "
+                            f"{_prefix} wrote these before failure: "
                             f"{[p.name for p in written_paths]}",
                             file=sys.stderr,
                         )
@@ -960,7 +993,7 @@ def main(argv: list[str] | None = None) -> int:
                 oversize = [p for p in written_paths if p.stat().st_size > max_bytes]
                 if not args.quiet:
                     print(
-                        f"[hankpdf] wrote {len(chunks)} chunks "
+                        f"{_prefix} wrote {len(chunks)} chunks "
                         f"({args.max_output_mb:.1f} MB cap); "
                         f"sizes: {[f'{p.stat().st_size / (1024 * 1024):.2f} MB' for p in written_paths]}",
                         file=sys.stderr,
@@ -972,6 +1005,7 @@ def main(argv: list[str] | None = None) -> int:
                                 f"{len(oversize)} chunk(s) exceed the cap "
                                 "because they contain a single oversize "
                                 f"page: {[p.name for p in oversize]}",
+                                input_name=_label,
                             ),
                             file=sys.stderr,
                         )
@@ -984,6 +1018,7 @@ def main(argv: list[str] | None = None) -> int:
                                 f"previous run remain in {parent}: "
                                 f"{stale_names}. Remove them manually if "
                                 "they no longer belong to this output.",
+                                input_name=_label,
                             ),
                             file=sys.stderr,
                         )
@@ -1002,6 +1037,7 @@ def main(argv: list[str] | None = None) -> int:
                     "content-preservation verifier was SKIPPED (default). "
                     "Output was NOT content-checked against input. "
                     "Use --verify to enable.",
+                    input_name=_label,
                 ),
                 file=sys.stderr,
             )
@@ -1011,6 +1047,7 @@ def main(argv: list[str] | None = None) -> int:
                     "W-VERIFIER-FAILED",
                     "content-preservation verifier FAILED on "
                     f"{len(report.verifier.failing_pages)} page(s)",
+                    input_name=_label,
                 ),
                 file=sys.stderr,
             )

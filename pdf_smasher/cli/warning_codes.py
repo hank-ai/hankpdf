@@ -15,7 +15,10 @@ See ``docs/SPEC.md`` §8.5.1 for the canonical list and usage rules.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Final, Literal
+
+from pdf_smasher.utils.log import redact_filename
 
 # The full Literal set — if you add a code, add it here too. The Literal
 # makes `emit()` reject typos at type-check time.
@@ -36,24 +39,61 @@ WARN_PREFIX: Final = "[hankpdf] warning"
 ERROR_PREFIX: Final = "[hankpdf] error"
 
 
-def emit(code: CliWarningCode, message: str) -> str:
+def emit(
+    code: CliWarningCode,
+    message: str,
+    *,
+    input_name: str | Path | None = None,
+) -> str:
     """Build a stable-code stderr warning line. Caller prints it.
 
-    Example: ``emit("W-CHUNKS-EXCEED-CAP", "2 chunks exceed the cap…")``
-    returns ``"[hankpdf] warning [W-CHUNKS-EXCEED-CAP]: 2 chunks exceed the cap…"``.
+    Example: ``emit("W-CHUNKS-EXCEED-CAP", "2 chunks exceed the cap…",
+    input_name="in.pdf")`` returns
+    ``"[hankpdf] <redacted>: warning [W-CHUNKS-EXCEED-CAP]: 2 chunks exceed the cap…"``.
 
     The bracketed code lets batch scripts grep uniformly:
 
         grep -F "[W-CHUNKS-EXCEED-CAP]" job.log
+
+    ``input_name`` (optional) prefixes the redacted filename so a batch
+    script teeing all stderr to one log file can tell which input a line
+    refers to. Redacted via :func:`pdf_smasher.utils.log.redact_filename`
+    (sha1 prefix + last 8 chars) per THREAT_MODEL.md §5. When None the
+    filename prefix is omitted (programmatic stdin inputs, --doctor).
     """
-    return f"{WARN_PREFIX} [{code}]: {message}"
+    tagged = f"[{code}]: {message}"
+    if input_name is None:
+        return f"{WARN_PREFIX} {tagged}"
+    return f"[hankpdf] {redact_filename(input_name)}: warning {tagged}"
 
 
-def emit_error(code: CliWarningCode, message: str) -> str:
+def emit_error(
+    code: CliWarningCode,
+    message: str,
+    *,
+    input_name: str | Path | None = None,
+) -> str:
     """Build a stable-code stderr ERROR line for partial-write failures.
 
     Same shape as :func:`emit`, but uses the ``error`` noun-phrase rather
     than ``warning``. Used for ``W-*-PARTIAL-FAILURE`` codes where the
     job already failed — not technically warnings.
     """
-    return f"{ERROR_PREFIX} [{code}]: {message}"
+    tagged = f"[{code}]: {message}"
+    if input_name is None:
+        return f"{ERROR_PREFIX} {tagged}"
+    return f"[hankpdf] {redact_filename(input_name)}: error {tagged}"
+
+
+def line_prefix(input_name: str | Path | None) -> str:
+    """Return the ``[hankpdf] <redacted>:`` prefix for generic summary/log
+    lines (those that aren't warnings/errors). Pairs with `WARN_PREFIX`
+    / `ERROR_PREFIX` at the structural level — summary lines end up as
+    ``[hankpdf] <redacted>: wrote 12 chunks …`` instead of plain
+    ``[hankpdf] wrote 12 chunks …``.
+
+    Returns ``"[hankpdf]"`` when ``input_name`` is None (stdin, --doctor).
+    """
+    if input_name is None:
+        return "[hankpdf]"
+    return f"[hankpdf] {redact_filename(input_name)}:"
