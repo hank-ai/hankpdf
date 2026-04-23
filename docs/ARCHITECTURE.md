@@ -1,0 +1,298 @@
+# HankPDF — Architecture
+
+This document captures the design decisions and their rationale. For precise behavior specifications see [SPEC.md](SPEC.md). For algorithm and codec background see [KNOWLEDGE.md](KNOWLEDGE.md). For phased build plan see [ROADMAP.md](ROADMAP.md).
+
+## 1. Problem statement
+
+Scanned PDFs are massively oversized. Scanners default to 300 DPI color and embed JPEG pages at quality 90+, producing 200-page, 500 MB – 2 GB image-only PDFs where a 10 MB output would have been fine. These inputs inflate every downstream cost — upload bandwidth, storage, OCR, extraction — and often contain content (small print, handwriting, photos) where aggressive recompression risks silent content loss.
+
+HankPDF ships as a **local command-line tool**: PDF in, shrunk/resized searchable PDF out. Runs on the user's machine. No network calls, no telemetry, no persistent storage beyond the output and an optional sidecar report. Distributed as:
+
+1. **Python package** — `pip install pdf-smasher`. Brings `from pdf_smasher import compress` and the `hankpdf` CLI. User installs Tesseract + jbig2enc via their OS package manager (documented).
+2. **Docker image** — sealed runtime with all native deps baked in. For CI/CD, SFTP wrappers, batch jobs, and any host where you'd rather not install Tesseract.
+
+No GUI. No standalone binary. No platform installers. No code-signing. Users who want a drag-drop experience can wire `hankpdf` into their shell's "Send To" / Shortcuts / `.desktop` flow themselves.
+
+## 2. Engine foundation — permissive stack only
+
+Every component shipped to customers or called from our server must be under a license compatible with closed-source redistribution. AGPL and GPL dependencies are banned from the shipping path.
+
+| Component | Role | License |
+|---|---|---|
+| **pdfium** (Google/Chromium) | PDF parsing + rasterization | Apache-2.0 + BSD-3 |
+| **pypdfium2** | Python bindings for pdfium | Apache-2.0 |
+| **qpdf** | PDF structure manipulation, split/merge, repair | Apache-2.0 |
+| **pikepdf** | Python wrapper around qpdf | MPL-2.0 |
+| **Tesseract 5** | OCR (text layer + word geometry) | Apache-2.0 |
+| **jbig2enc** | 1-bit text/mask compression (generic region only) | Apache-2.0 |
+| **libjpeg-turbo** | JPEG background encoding | BSD / IJG |
+| **OpenJPEG** | JPEG2000 background encoding | BSD-2-Clause |
+| **OpenCV (headless)** | Segmentation, thresholding, connected components | Apache-2.0 |
+| **scikit-image** | SSIM verifier, image utilities | BSD-3 |
+| **NumPy** | Array math | BSD-3 |
+| **Pillow** | Python image I/O | HPND (MIT-like) |
+| **Leptonica** (transitively via Tesseract) | Document image primitives | BSD-2-Clause |
+
+**Explicitly excluded:**
+- Ghostscript (Artifex AGPL)
+- MuPDF (Artifex AGPL)
+- PyMuPDF (Artifex AGPL)
+- archive-pdf-tools (AGPL)
+- Foxit / Apryse / ABBYY / Adobe SDKs (commercial, expensive, opaque pricing)
+
+The exclusion of Ghostscript is the central licensing decision. It was the default "how you rasterize a PDF" for two decades in open source. Swapping to pdfium (a production-grade, permissive-licensed alternative that powers Chrome's PDF viewer) eliminates the entire AGPL problem without sacrificing capability.
+
+## 3. Language and runtime
+
+**CPython 3.14 (standard GIL)** for v1. Parallelism via **multiprocessing**, not threads.
+
+**Why not free-threaded Python 3.14t:** deep research surfaced that our entire compute-path dep chain currently has no `cp314t` wheels and is explicitly not free-thread-safe:
+
+- **pypdfium2** (5.7.x) ships only `py3-none-*` ctypes wheels. Its own docs state: *"PDFium is inherently not thread-safe. It is not allowed to call pdfium functions simultaneously across different threads, not even with different documents."* Maintainers closed the threading issue as "not planned" and recommend multiprocessing.
+- **pikepdf** (10.5.x) carries the PyPI classifier `Programming Language :: Python :: Free Threading :: 1 - Unstable`. No `cp314t` wheels; transitively blocked by lxml which also ships no `cp314t`.
+- **opencv-python-headless** (4.13.x) ships no `cp314t` wheels; open tracking issue `opencv/opencv#27933`.
+- Importing any of the above under `python3.14t` triggers CPython's safety valve and **silently re-enables the GIL process-wide**, leaving us with a 5–10% single-thread regression and zero parallelism benefit.
+
+**Our parallelism model:**
+- Page-level parallelism uses `multiprocessing.ProcessPoolExecutor`, sized to `sqrt(vCPU)` as a starting point (matches OCRmyPDF's empirically-validated rule for Tesseract).
+- A process-global `threading.Lock` wraps every pypdfium2 call inside a single process (pdfium is not safe even across different documents).
+- Input PDFs are split via qpdf `--split-pages` to per-page work units, shipped to workers, rejoined via qpdf `--empty --pages` (structural splice, no re-encode).
+
+**Revisit for v1.1:** when `cp314t` wheels are available for pypdfium2, pikepdf (+ lxml), opencv, and when pdfium declares thread-safety (unlikely near-term per upstream statements). Realistic earliest: Q3 2026.
+
+**Stack notes:**
+- Every listed Python-side dep has 3.14 (GIL) wheels today.
+- Tail-call interpreter and error-message improvements in 3.14 still apply to the GIL build.
+- The team's other services are Python-heavy; reusing tooling and CI patterns reduces total surface area.
+
+Alternatives considered and rejected:
+- **Rust/Go rewrite** — enormous scope, no existing MRC library, reinvents years of PDF edge-case handling.
+- **Python 3.12** — two-year-old, no reason to start a new project there.
+- **Node/TypeScript** — no credible OCR, no credible JBIG2, no credible PDF-manipulation ecosystem.
+
+## 4. Pipeline: Triage → Sanitize → Recompress
+
+Every PDF — regardless of origin — flows through three phases in this order. The phases are independently testable and independently sandboxable.
+
+### 4.1 Triage
+
+Goals: classify the input, decide whether to proceed, collect metadata for downstream decisions. Cheap operations only; never decodes image streams.
+
+Operations:
+- Structural scan via pikepdf (uses libqpdf; tolerates corrupt xrefs, surfaces repair warnings)
+- pdfid-style object walker — enumerates dangerous keys (`/JavaScript`, `/JS`, `/OpenAction`, `/AA`, `/Launch`, `/EmbeddedFiles`, `/RichMedia`, `/GoToR`)
+- Encryption detection (user password, owner password, certificate)
+- Signature detection (`/AcroForm` `/SigFlags`, `/Sig` fields)
+- Filter chain enumeration (flags already-JBIG2, DCT, CCITT, LZW content)
+- Page-level metadata: count, `/MediaBox`, `/Rotate`, OCGs, tagging (`/StructTreeRoot`, `/MarkInfo`)
+- PDF/A conformance detection (XMP `pdfaid:part`)
+
+Output: a `TriageReport` structure consumed by Sanitize. Classifies into one of: `proceed`, `refuse`, `pass-through`, `require-password`.
+
+### 4.2 Sanitize
+
+Goals: strip hostile or unneeded content, pre-repair structural issues, normalize to a canonical form that Recompress can operate on safely.
+
+Operations:
+- Strip `/JavaScript`, `/OpenAction`, `/AA`, `/Launch`, `/EmbeddedFiles`, `/RichMedia` — removal recorded in sidecar manifest, never in output XMP (see §7 on provenance).
+- qpdf-level repair if xref was corrupt.
+- Delinearize (linearization is added back after Recompress).
+- Decrypt in-process if user-supplied password (password never on argv, never logged, zeroed on drop).
+- Passthrough policy for signed PDFs, certificate-encrypted PDFs, and already-optimized PDFs (see §6).
+
+Output: a "clean" in-memory `pikepdf.Pdf` object ready for page-level work.
+
+### 4.3 Recompress
+
+Goals: achieve the target compression ratio while preserving content and searchability. The algorithm follows ITU-T T.44 (Mixed Raster Content) and draws on the DjVu foreground/background decomposition literature (Léon Bottou et al., AT&T Labs, 1998–2001). See [KNOWLEDGE.md §2](KNOWLEDGE.md) for the full technical reference.
+
+**Not all pages get MRC.** The research showed that MRC overhead (three image XObjects + SMask dict + transparency group) can exceed gains on text-only and photo-only pages, and re-MRC'ing an already-MRC'd input inflates output. Each page is classified before compression.
+
+#### 4.3.1 Per-page strategy selector
+
+Before compression, classify each page:
+
+| Class | Detection | Strategy |
+|---|---|---|
+| **Already-optimized** | Input page's image XObjects include existing `/JBIG2Decode` + `/SMask` pattern, or embedded JPEG at DCT quality < 40 | Pass-through — copy page unchanged |
+| **Text-only** | Mask coverage >95%, grayscale background variance <5% | Single `/JBIG2Decode` page image; no SMask, no background layer |
+| **Photo-only** | Mask coverage <5%, uniform high-frequency background | Single `/JPXDecode` (JPEG2000) page image; no foreground/mask split |
+| **Mixed** | Default | Full MRC pipeline (§4.3.3) |
+
+#### 4.3.2 CMYK pre-pass (applied to all classes)
+
+pdfium rasterizes CMYK content via a naive non-ICC-managed CMYK→sRGB lookup (`core/fxge/dib/cfx_cmyk_to_srgb.cpp`), producing desaturated colors. Public API emits only RGB/Gray bitmaps — no CMYK output path.
+
+**For pages whose input `/ColorSpace` is `/DeviceCMYK` or an ICC CMYK profile**, we do a managed conversion to sRGB via **littlecms** (lcms2, MIT-style license) before rasterization. This preserves color fidelity on medical/legal scans that arrive as CMYK.
+
+#### 4.3.3 MRC per-page pipeline (mixed pages)
+
+1. **Rasterize** via pdfium at working DPI (default 300). Caller holds the process-global pdfium lock.
+2. **Small-print check** (pre-OCR) — histogram connected-component pixel heights. If p50 x-height < 12 px, upscale 2× (OpenCV `INTER_CUBIC`) OR route to "full-JPEG safe mode" (skip MRC, encode page as single JPEG at elevated quality). Prevents silent drop of fine-print text below the 8 px threshold where Tesseract stops returning boxes.
+3. **Detect text regions** via Tesseract hOCR word boxes + OpenCV adaptive threshold (Sauvola/Niblack) + connected-components for non-text line art. Union, morphological close with 3×3 or 5×5 kernel.
+4. **Build 1-bit mask** matching foreground dimensions exactly (not resampled — Quartz/Preview drops SMasks with dimension mismatch).
+5. **Extract foreground layer** — text/line-art pixels at mask-1, encoded as **lossless JBIG2 generic region coding only** (no symbol mode, no refinement flag — avoids both Xerox-6/8 substitution and documented Acrobat crashes).
+6. **Extract background layer** — mask-0 pixels inpainted to fill text regions, downsampled to 100–150 DPI (default 150), encoded as JPEG2000 (OpenJPEG) OR JPEG. **JPEG uses chroma subsampling 4:4:4 (`subsampling=0`) not Pillow's default 4:2:0** — 4:2:0 smears colored text in the background layer (stamps, highlighter, colored ink).
+7. **Compose PDF page** — three image XObjects (mask, foreground, background) inside a Form XObject using standard PDF `/SMask` construct (PDF 1.4+). All image XObjects carry explicit `/ColorSpace [/ICCBased <sRGB>]` to fix Quartz-vs-pdfium color drift.
+8. **Embed invisible OCR text layer** — Tesseract output positioned from hOCR word boxes; text rendering mode 3 (invisible). Preserves copy-paste and search.
+9. **Assemble** — pages stitched via qpdf `--empty --pages` (structural splice, no re-encode). Deterministic `/ID` via qpdf `--deterministic-id`.
+10. **Output intent**: single sRGB `/OutputIntent` on the document (enables PDF/A-2u conformance).
+
+#### 4.3.4 Legal / archival codec profile
+
+Optional flag (`--legal-mode` on the CLI, `legal_codec_profile=True` on the API) forces **CCITT Group 4 instead of JBIG2** on the 1-bit layer. Reason: German BSI TR-03138 forbids JBIG2 for legally-compliant replacement scanning, and US NARA's PDF/A acceptable-codec list omits JBIG2. Paired with PDF/A-2u output target. Gives up ~20% compression on the 1-bit layer but unblocks gov / legal / archival workflows.
+
+#### 4.3.5 Expected ratios (unchanged)
+
+From published benchmarks on this exact algorithm:
+- Color scans: 5–20×
+- Mostly-text monochrome pages: 20–100×
+- Clean text-only legal/medical: 200×+
+
+Ratio comes primarily from aggressive background downsampling + color→mono detection, not from any single codec. JBIG2 contributes 20–50% of the mono gain; the rest is downsampling.
+
+## 5. Content-preservation verifier (mandatory gate)
+
+After Recompress, before returning the output, every page is verified against the input. Any page failing triggers `ContentDriftError` — the whole job aborts, nothing is silently shipped.
+
+**Non-determinism caveat.** Tesseract's LSTM is not bit-deterministic across hosts/platforms (float32 accumulation order varies by BLAS vendor + hardware). Verifier compares OCR text generated on the same host for both input-rasterization and output-rasterization to sidestep cross-host drift. The input OCR result is cached keyed by SHA-256 of the rasterized input page image; same input page reused → same text.
+
+Checks (all must pass):
+
+| Check | Metric | Threshold | Rationale |
+|---|---|---|---|
+| **Digit-multiset exact match** | Regex-extract digit runs (including decimals + unit suffixes `mg`/`mcg`/`mL`/`IU`) from input and output OCR text; multiset equality | Exact | Replaces "numeric confidence gate." Tesseract's per-word confidence is miscalibrated and the same number applies to every char in a word, so confidence-based gating on digits is fiction. Exact-match on digit runs is the only defensible test for "we didn't drop a decimal." |
+| **Reading-order-insensitive Levenshtein** | Bag-of-lines Levenshtein (split to lines, best-match pair, sum distances) | ≤ 2% | Multi-column medical forms reparse column order differently between input and output OCR passes. Raw sequence Levenshtein inflates without content change; bag-of-lines neutralizes the false signal. |
+| **Raw Levenshtein** | Sequence Levenshtein on page OCR text | ≤ 5% | Secondary; loose threshold because of the reading-order issue above. Both Levenshteins must pass. |
+| **Global SSIM** | scikit-image SSIM on full-page grayscale render | ≥ 0.92 | Catches gross structural drift. |
+| **Tile-level SSIM** | Min SSIM over 50×50-pixel tiles | ≥ 0.85 (standard) / ≥ 0.88 (safe mode) | Catches small-region drift that global SSIM averages away — critical for medical (smeared catheter tip, lost decimal point). |
+| **Structural audit** | Page count, `/Annot` count, form fields, signature presence, attachments | Exact match or explicitly-logged strip | Structure preservation. |
+
+**Safe mode** tightens thresholds and enables the stricter digit-multiset exact-match gate by default. On any tile SSIM <0.96, instead of returning a pass, the engine returns `ContentDriftError` with exit 21 — the caller (user or script) decides whether to accept the original or retry at different settings. Intended for content classes where stricter preservation matters (clinical records, legal documents, anything where a silent digit swap is unacceptable).
+
+**Pre-verifier content extraction**: the verifier runs OCR regardless of whether the user requested OCR in the output, because OCR diff is the primary signal. The OCR pass is disposable.
+
+**Invalid UTF-8 handling**: Tesseract occasionally emits invalid UTF-8 bytes; decode with `errors='replace'` both sides to maintain symmetry and avoid exceptions.
+
+**Decompression-bomb guard** (runs before any SSIM): `PIL.Image.MAX_IMAGE_PIXELS` set explicitly; decode wrapped in try/except → `DecompressionBombError` from our exception hierarchy; structured counter `rejected:decompression_bomb`.
+
+## 6. Weird-PDF handling matrix
+
+Each class gets an explicit policy. The full detection and response table lives in [SPEC.md §4](SPEC.md). Summary of policies:
+
+- **Refuse + pass-through** (return original, no recompression): certificate-encrypted, digitally signed (without explicit opt-in), already-heavily-lossy (JPEG q<40).
+- **Require input from user**: user-password-encrypted (prompt for password).
+- **Proceed with strip + log**: contains `/JavaScript`, `/OpenAction`, `/EmbeddedFiles`, etc.
+- **Proceed with pass-through of specific streams**: already-JBIG2 content (never re-decode JBIG2 outside sandbox — ForcedEntry / CVE-2021-30860 attack class).
+- **Proceed with preservation**: tagged PDFs (preserve `/StructTreeRoot`, `/MarkInfo`), CMYK color (preserve, don't convert to sRGB), unusual rotation metadata, layered OCGs, linearized PDFs.
+- **Refuse as malicious**: sandbox resource-cap-exceeded (JBIG2 bomb, xref loop, recursive forms, page size > 200"×200"), input > configured hard max.
+
+## 7. Provenance: sidecar manifest, not XMP
+
+Every output is accompanied by a `<input-basename>.hankpdf.json` sidecar containing:
+
+- Engine version
+- Compression ratio
+- Input / output SHA-256
+- List of strips (`/JavaScript`, `/EmbeddedFiles`, etc.)
+- Verifier metric values
+- Timestamp
+- Per-page warnings
+
+We do **not** write engine-version or strip-records into the output PDF's XMP metadata because:
+- XMP survives forwarding and forensic analysis — leaking "processed by pdf-smasher vX" is an OSINT signal attackers can use.
+- Writing XMP modifies the PDF byte range, invalidating any digital signature — even the "pass-through signed PDFs" case would break if we also wrote XMP.
+
+## 8. Sandboxing
+
+Every invocation of **Triage, Sanitize, AND Recompress** runs inside a process-level sandbox. Research surfaced that even Triage can segfault (pikepdf #568: `qpdf --check` passes, pikepdf still crashes on some malformed inputs with no diagnostic). A crashing Triage before compression is still a worker crash. All three phases get isolated children.
+
+### 8.1 All platforms — process-level isolation
+
+Engine work runs in a child subprocess so a malformed/hostile PDF can't kill the user's shell or whatever script is invoking HankPDF.
+
+- **Resource caps** (per child): `RLIMIT_AS` 2 GB default, `RLIMIT_CPU` 120 s per page, wall-clock watchdog 20 min per PDF.
+- **Unix (Linux, macOS)**: `resource.setrlimit(...)` on the child at startup.
+- **Windows**: Job Objects with memory and CPU limits and break-away-from-job disabled (via `pywin32` or equivalent).
+- **No network is opened by the engine** — the user's host firewall is the outer backstop; we don't need network isolation because we never try.
+
+### 8.2 Docker image — defense-in-depth for shared-runner users
+
+When HankPDF runs in our published Docker image, the image ships with:
+- Non-root user (`hankpdf`, UID 1000).
+- Read-only rootfs (except `/tmp`).
+- Baked seccomp profile allowlisting only the syscalls our native deps need (no `socket`, no `execve` post-setup, no `ptrace`, no `unshare`, no `clone3`).
+- No network by default when users follow our docs (`--network none`).
+
+Users who want stronger isolation (shared multi-tenant CI runners, hostile PDFs from unknown sources) can run our image under `gVisor runsc` or `Firecracker` themselves — we don't bundle those, but the image is known to work under both based on its seccomp-friendly footprint. That's a user operational choice, not a HankPDF-provided feature.
+
+## 9. Deployment shapes
+
+Both shapes run the engine **locally** on the user's machine. No network, no server, no telemetry. Anything the user does with the output — uploading to their own pipeline, emailing, archiving — is their business, not ours.
+
+### 9.1 The two install targets
+
+Same engine, two ways to get it onto a machine:
+
+- **Python package** (`pip install pdf-smasher`) — installs the `hankpdf` console script plus the importable Python API (`from pdf_smasher import compress, CompressOptions`). Primary target. Users install the non-Python native deps (Tesseract, jbig2enc) via their system package manager — one line on every major OS, documented in `docs/INSTALL.md`. Wheel is published to PyPI.
+- **Docker image** (`ghcr.io/ourorg/pdf-smasher:X.Y`) — ~300 MB multi-arch image with all native deps (pdfium, Tesseract, jbig2enc, OpenJPEG, qpdf) baked in. For users who don't want to manage native deps on the host; for CI pipelines; for SFTP upload wrappers; for sealed execution environments. Non-root user, writable `/tmp`, read-only rootfs friendly.
+
+Contract details — flags, exit codes, JSON report schema — in [SPEC.md §2](SPEC.md).
+
+### 9.2 What we are NOT building
+
+To keep scope honest:
+- **No standalone binary.** No PyInstaller per-platform executables, no code-signing, no Apple Developer ID, no Windows Authenticode, no notarization, no SmartScreen reputation game. Users who need a binary on a system without Python or Docker can PyInstaller-build one themselves from source in a few minutes — but we don't ship that as a product artifact.
+- **No GUI.** No drag-drop app, no Tauri shell, no desktop installer framework.
+- **No hosted service.** No SaaS, no API endpoint, no tenant system, no account system, no authentication, no sign-in flow.
+- **No telemetry.** No analytics, crash reporting, usage tracking, or phone-home. `--doctor` emits diagnostics to stdout only when the user runs it.
+- **No integration with any specific upstream.** HankPDF doesn't know or care where the input PDF came from or where the output is going.
+- **No auto-update.** Python users upgrade via `pip install -U pdf-smasher`. Docker users repin a tag. That's the whole mechanism.
+
+Users who want to wrap HankPDF inside their own ingestion pipeline, desktop app, or distribution can do so trivially via the CLI or Python API. That's their infrastructure, not ours.
+
+## 10. Configuration
+
+The single engine is exposed through a unified `compress(bytes, CompressOptions) -> (bytes, CompressReport)` interface. CLI flags and Python API calls all produce the same `CompressOptions` struct. See [SPEC.md §1.1](SPEC.md).
+
+Configuration precedence: command-line flag > environment variable > config file > built-in default.
+
+## 11. Security posture
+
+HankPDF runs on the user's machine. We are not a Business Associate, HIPAA covered entity, or data processor — the user's PDF never leaves their device by our action. But a compression tool that chokes on hostile input or leaks content via side-channels still creates real risk for the user. The posture below covers what we do to avoid being the weak link in *their* workflow.
+
+- **No network calls.** Engine makes zero outbound network requests during compression. The only network activity involved with HankPDF at all is whatever the user does with the output (we don't initiate any).
+- **No persistent storage outside user-requested output.** Input is read, output is written to the path the user specified, sidecar manifest (optional) sits next to output. `TemporaryDirectory()` context manager cleans intermediate files even on SIGKILL.
+- **Passwords**: never on argv (subprocess argv is `ps`-visible). Passed via `--password-file` or `HANKPDF_PASSWORD` env var. Held in a bytes buffer, zeroed on exit. `PR_SET_DUMPABLE=0` on Linux to block password leak via core dumps.
+- **Logs** stay on the user's machine. Filenames hashed when logged; OCR text never logged; error context uses structured enum codes, not free-text content. No log pushes to any server.
+- **Sandboxing** of the engine subprocess (see §8) protects the user's machine from hostile PDFs — not us from their content. If a malformed PDF would crash or RCE a parser, the sandbox contains it.
+- **CVE hygiene**: tight dependency pins (qpdf ≥11.6.3, OpenJPEG ≥2.5.4, pdfium tracked weekly). See [KNOWLEDGE.md §7](KNOWLEDGE.md).
+- **Release artifact integrity**: PyPI upload via trusted publishing (GitHub OIDC, no long-lived tokens); GHCR image via GitHub OIDC; GitHub Releases with SHA-256 checksums in release notes. Users can verify downloaded artifacts against published checksums. No separate code-signing infrastructure because we don't ship platform-native binaries.
+
+**If a user embeds HankPDF inside their own HIPAA-covered pipeline**, that pipeline's compliance is the user's responsibility. HankPDF makes that easier by never reaching off-machine, but we don't carry a BAA because there's no service to carry one against.
+
+## 12. What we're explicitly not building
+
+To keep scope honest:
+
+- **Not a generic PDF editor.** No page reordering, no redaction UI, no form filling.
+- **Not an OCR service.** We do OCR as a means to an end (searchability + verifier). Customers who want OCR-as-a-product should use Tesseract directly or commercial alternatives.
+- **Not a PDF/A conversion tool.** We aim for PDF/A-2u output where input permits, but we don't offer PDF/A-3, PDF/A-1b mode switches, or explicit archive-grade profiles.
+- **Not a MIME/OOXML compressor.** Only PDF input.
+- **Not image format conversion.** We don't accept TIFFs, JPEGs, or image folders. Wrap them in a PDF first.
+
+## 13. Decisions and open questions
+
+### Decided
+- **Product brand**: HankPDF.
+- **Repo/package name**: `pdf-smasher` (internal); CLI binary and all user-visible strings use `hankpdf` / HankPDF.
+- **Safe mode** (formerly working title "medical mode"): explicit opt-in via `--mode safe` flag or `mode="safe"` option. Default is `standard`.
+- **Test corpus strategy**: URL-referenced. Files live in an S3 bucket we control; the repo holds a manifest (filename + URL + SHA-256). CI caches; developers run `scripts/fetch_corpus.py` on demand. No Git LFS, no committed binaries.
+- **Real-corpus validation**: sample of PDFs collected from the open internet (Internet Archive, govinfo.gov, public-domain book scans, USPTO patents) plus synthetic edge-case fixtures we generate ourselves. No customer data, no DPAs, no BAAs — nothing to carry.
+
+### Also decided
+- **CPython 3.14 standard GIL for v1 (REVERSED from earlier free-threaded decision).** Research found that our full compute-path dep chain (pypdfium2, pikepdf, opencv-python, lxml) has no `cp314t` wheels in April 2026 and pypdfium2 is explicitly documented as not thread-safe by its maintainers. Running under `python3.14t` silently re-enables the GIL and delivers no parallelism benefit. Parallelism instead uses `multiprocessing.ProcessPoolExecutor`. Revisit `python3.14t` for v1.1 when ecosystem catches up.
+- **Corpus seed**: loose — pull a handful of oversized public PDFs from the open internet (Internet Archive book scans, govinfo.gov large reports, USPTO patents with diagrams). Keep it simple; grow it as we hit edge cases.
+- **Repo visibility**: private for now. Go public when ready.
+- **License**: Apache-2.0. Permissive (others may use, modify, redistribute) but requires attribution and NOTICE preservation — matches the "ok for others to use but must list us as author" requirement.
+- **DCO vs CLA**: moot while private. Revisit at the point of going public.

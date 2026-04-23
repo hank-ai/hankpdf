@@ -1,0 +1,64 @@
+HankPDF (pdf-smasher)
+Copyright 2026 Jack Neil
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+---
+
+This product includes, or depends on, third-party software. Their licenses
+are preserved below. None of these dependencies change the Apache-2.0
+license of HankPDF itself.
+
+------------------------------------------------------------------------
+pdfium (Apache-2.0 + BSD-3-Clause)
+    https://pdfium.googlesource.com/pdfium/
+    Copyright 2014 The PDFium Authors. All rights reserved.
+
+pypdfium2 (Apache-2.0, MPL-2.0, and BSD-3-Clause)
+    https://github.com/pypdfium2-team/pypdfium2
+
+qpdf (Apache-2.0)
+    https://github.com/qpdf/qpdf
+    Copyright 2005-2024 Jay Berkenbilt.
+
+pikepdf (MPL-2.0)
+    https://github.com/pikepdf/pikepdf
+    Copyright James R. Barlow.
+
+Tesseract OCR (Apache-2.0)
+    https://github.com/tesseract-ocr/tesseract
+    Copyright Google Inc. and the Tesseract contributors.
+
+Leptonica (BSD-2-Clause)
+    https://github.com/DanBloomberg/leptonica
+    Copyright Dan Bloomberg.
+
+jbig2enc (Apache-2.0)
+    https://github.com/agl/jbig2enc
+    Copyright Adam Langley.
+
+OpenJPEG (BSD-2-Clause)
+    https://www.openjpeg.org/
+    Copyright 2001-present, the OpenJPEG Authors.
+
+libjpeg-turbo (IJG / BSD-3-Clause)
+    https://libjpeg-turbo.org/
+
+OpenCV (Apache-2.0 for 4.5+)
+    https://opencv.org/
+    Copyright OpenCV Foundation and contributors.
+
+scikit-image (BSD-3-Clause)
+    https://scikit-image.org/
+
+NumPy (BSD-3-Clause)
+    https://numpy.org/
+
+Pillow (HPND / MIT-CMU)
+    https://python-pillow.org/
+    Copyright Fredrik Lundh and contributors; Jeffrey A. Clark (Alex)
+    and contributors.
+
+pytesseract (Apache-2.0)
+    https://github.com/madmaze/pytesseract
+------------------------------------------------------------------------

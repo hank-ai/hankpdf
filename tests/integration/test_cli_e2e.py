@@ -1,0 +1,101 @@
+"""End-to-end CLI tests: run hankpdf against real fixtures."""
+
+from __future__ import annotations
+
+import io
+import json
+
+import pikepdf
+import pypdfium2 as pdfium
+import pytest
+from PIL import Image, ImageDraw, ImageFont
+
+from pdf_smasher.cli.main import main
+
+
+def _make_pdf(tmp_path, text: str = "HELLO WORLD") -> object:  # type: ignore[no-untyped-def]
+    img = Image.new("RGB", (1700, 2200), color="white")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("Arial.ttf", 60)
+    except OSError:
+        font = ImageFont.load_default(size=60)
+    draw.text((200, 400), text, fill="black", font=font)
+
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    page = pdf.pages[0]
+    jbuf = io.BytesIO()
+    img.save(jbuf, format="JPEG", quality=92, subsampling=0)
+    xobj = pdf.make_stream(
+        jbuf.getvalue(),
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Image,
+        Width=img.width,
+        Height=img.height,
+        ColorSpace=pikepdf.Name.DeviceRGB,
+        BitsPerComponent=8,
+        Filter=pikepdf.Name.DCTDecode,
+    )
+    page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Scan=xobj))
+    page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Scan Do Q\n")
+    path = tmp_path / "in.pdf"
+    pdf.save(path)
+    return path
+
+
+@pytest.mark.integration
+def test_cli_end_to_end_happy_path(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    in_path = _make_pdf(tmp_path, text="SEARCHABLE TEXT")
+    out_path = tmp_path / "out.pdf"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 0
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+    # Output is a valid PDF and text is searchable.
+    pdf = pdfium.PdfDocument(out_path.read_bytes())
+    try:
+        tp = pdf[0].get_textpage()
+        text = tp.get_text_bounded()
+        tp.close()
+    finally:
+        pdf.close()
+    assert "SEARCHABLE" in text
+
+
+@pytest.mark.integration
+def test_cli_json_report(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    in_path = _make_pdf(tmp_path)
+    out_path = tmp_path / "out.pdf"
+    rc = main([str(in_path), "-o", str(out_path), "--report", "json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert "ratio" in data
+    assert "input_bytes" in data
+    assert data["pages"] == 1
+
+
+@pytest.mark.integration
+def test_cli_encrypted_input_exits_10(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    in_path = tmp_path / "enc.pdf"
+    pdf.save(in_path, encryption=pikepdf.Encryption(user="secret", owner="o"))
+    out_path = tmp_path / "out.pdf"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 10
+    assert not out_path.exists()
+
+
+@pytest.mark.integration
+def test_cli_signed_input_exits_11(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.Root["/AcroForm"] = pikepdf.Dictionary(SigFlags=3, Fields=pikepdf.Array([]))
+    in_path = tmp_path / "signed.pdf"
+    pdf.save(in_path)
+    out_path = tmp_path / "out.pdf"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 11

@@ -1,0 +1,36 @@
+# HankPDF
+
+Aggressive, safety-first PDF shrinker for scanned documents. Takes a PDF in, produces a shrunk/resized searchable PDF out. **Local tool. No network, no telemetry, no data leaves your machine.** Targets 8–15× typical compression (up to 200× on text-dominant scans) while preserving OCR searchability and guaranteeing no silent content loss.
+
+_Repo / package name: `pdf-smasher`. Product brand: **HankPDF**._
+
+**Status:** Architecture and planning phase. No code yet. Docs under `docs/` are the source of truth.
+
+## What it does
+
+Takes oversized scanned PDFs (typical input: 200-page, 800 MB image scans) and produces compact, searchable, verified outputs. **CLI-first. Two install targets, both run the same engine locally**:
+
+1. **Python package** — `pip install pdf-smasher`. Brings the `compress()` API and the `hankpdf` console script. Requires Tesseract + jbig2enc via your system package manager (one-line install on every major OS — see `docs/INSTALL.md`).
+2. **Docker image** — `ghcr.io/ourorg/pdf-smasher:X.Y`. All native deps baked in; zero host setup. Ideal for CI/CD, SFTP upload wrappers, batch jobs, and any environment where installing Tesseract on the host is inconvenient.
+
+**Not a service, not a GUI, not a signed installer.** HankPDF is a command-line tool. It runs entirely on the user's machine, never uploads PDFs anywhere, never phones home, writes no analytics, stores no persistent state beyond what the user asks (output PDF, optional sidecar manifest).
+
+## What makes it different
+
+- **Permissive license throughout** — no AGPL, no commercial SDK dependency. Built entirely on Apache-2.0 / BSD / MPL-2.0 components. We can ship, modify, and redistribute freely.
+- **Content-preservation invariant** — every output is gated by OCR-text diff, tile-level SSIM, and structural audit. We refuse rather than silently corrupt.
+- **Weird-PDF robust** — encrypted, signed, corrupt-xref, JBIG2-in, form XObjects, color profiles, linearized, tagged, PDF/A-3-embedded: each class has an explicit detect-and-handle policy. None crash the pipeline.
+- **Honest compression targets** — we promise what we deliver: ≥3× guaranteed, 8–15× typical, 50–200× best-case on text-only content. Not 200× on everything.
+
+## Documentation
+
+| Doc | Purpose |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design decisions, rationale, system diagram. The *why*. |
+| [docs/SPEC.md](docs/SPEC.md) | Functional spec — CLI contract, API surface, behaviors, edge-case policies. The *what*. |
+| [docs/KNOWLEDGE.md](docs/KNOWLEDGE.md) | Reference material: MRC algorithm, codec trade-offs, license notes, PDF internals, prior-art summaries. The *background*. |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Phased implementation checklist. The *how and when*. |
+
+## License
+
+Apache-2.0 (see `LICENSE` — TBD, tracked in roadmap Phase 0).

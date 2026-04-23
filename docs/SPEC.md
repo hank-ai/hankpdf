@@ -1,0 +1,490 @@
+# HankPDF — Functional Specification
+
+Precise behaviors, contracts, and data formats. For the *why* behind these choices see [ARCHITECTURE.md](ARCHITECTURE.md). For algorithm and codec background see [KNOWLEDGE.md](KNOWLEDGE.md).
+
+## 1. Python API (source of truth)
+
+All other surfaces (CLI, Docker entrypoint) call this API internally.
+
+### 1.1 Types
+
+```python
+@dataclass(frozen=True)
+class CompressOptions:
+    # Engine selection
+    engine: Literal["mrc", "downsample-only"] = "mrc"
+
+    # Quality/ratio knobs
+    target_bg_dpi: int = 150            # background layer DPI after downsample
+    target_color_quality: int = 55      # JPEG / JPEG2000 quality 0-100 for bg (calibrated 0-100, NOT PSNR dB)
+    bg_chroma_subsampling: Literal["4:4:4", "4:2:2", "4:2:0"] = "4:4:4"  # 4:4:4 avoids smearing colored text in bg
+    force_monochrome: bool = False      # skip color detection, treat all as B&W
+    mode: Literal["fast", "standard", "safe"] = "standard"
+
+    # Archival / legal profile
+    legal_codec_profile: bool = False   # force CCITT G4 instead of JBIG2 (BSI TR-03138 / NARA compliant)
+    target_pdf_a: bool = False          # target PDF/A-2u output (stricter codec/color-space constraints)
+
+    # OCR behavior
+    ocr: bool = True                    # embed OCR text layer in output
+    ocr_language: str = "eng"           # Tesseract language code(s), e.g. "eng+spa"
+
+    # Safety / behavior gates
+    allow_signed_invalidation: bool = False
+    allow_embedded_files: bool = False
+    password: str | None = None         # for encrypted inputs
+    min_input_mb: float = 0.0           # below this, skip compression and pass through
+    min_ratio: float = 1.5              # if achieved ratio < this, return original
+
+    # Limits
+    max_pages: int | None = None        # refuse inputs over this page count
+    max_input_mb: float = 2000.0        # refuse inputs over this size
+    per_page_timeout_seconds: int = 120
+    total_timeout_seconds: int = 1200
+
+    # Output
+    emit_sidecar_manifest: bool = True
+    output_pdf_version: str = "1.7"     # output PDF version target
+
+@dataclass(frozen=True)
+class CompressReport:
+    status: Literal["ok", "passed_through", "refused", "drift_aborted"]
+    exit_code: int                      # stable exit code; see §2.2
+    input_bytes: int
+    output_bytes: int
+    ratio: float                        # input_bytes / output_bytes (1.0 if passthrough)
+    pages: int
+    wall_time_ms: int
+    engine: str
+    engine_version: str
+    verifier: VerifierResult
+    warnings: list[str]                 # structured warning codes; see §7.2
+    strips: list[str]                   # what was stripped; see §4.4
+    input_sha256: str
+    output_sha256: str
+    reason: str | None                  # human-readable reason if refused/drift
+
+@dataclass(frozen=True)
+class VerifierResult:
+    status: Literal["pass", "fail", "skipped"]
+    ocr_levenshtein: float              # worst per-page Levenshtein ratio
+    ssim_global: float                  # min over pages
+    ssim_min_tile: float                # min over all tiles, all pages
+    numeric_confidence_delta: float     # min delta across pages
+    structural_match: bool              # exact match on structural audit
+    failing_pages: list[int]            # 1-indexed, empty on pass
+
+class CompressError(Exception): ...
+class EncryptedPDFError(CompressError): ...        # needs password
+class SignedPDFError(CompressError): ...           # signed, needs opt-in
+class CertifiedSignatureError(SignedPDFError): ... # /Perms/DocMDP — stricter opt-in required
+class MaliciousPDFError(CompressError): ...        # sandbox resource cap exceeded
+class ContentDriftError(CompressError): ...        # verifier failed
+class OversizeError(CompressError): ...            # exceeds max_input_mb or max_pages
+class DecompressionBombError(CompressError): ...   # exceeds Pillow MAX_IMAGE_PIXELS or pixel-count cap
+class CorruptPDFError(CompressError): ...          # unrecoverable by pikepdf/qpdf
+class EnvironmentError(CompressError): ...         # qpdf/pdfium version floor violated; see --doctor
+```
+
+### 1.2 Functions
+
+```python
+def compress(
+    input_data: bytes,
+    options: CompressOptions = CompressOptions(),
+) -> tuple[bytes, CompressReport]:
+    """
+    Compress a PDF. Returns (output_bytes, report).
+
+    On success: output_bytes is the compressed PDF.
+    On passthrough: output_bytes is the input unchanged.
+    On refuse or drift: raises the appropriate exception.
+    """
+
+def compress_stream(
+    input_stream: IO[bytes],
+    output_stream: IO[bytes],
+    options: CompressOptions = CompressOptions(),
+) -> CompressReport:
+    """
+    Streaming variant. Writes to output_stream, returns report.
+    Used by CLI stdin/stdout mode and the server worker.
+    """
+
+def triage(input_data: bytes) -> TriageReport:
+    """
+    Cheap structural scan. Never decodes image streams.
+    Returns classification + detected hazards.
+    """
+```
+
+## 2. CLI contract
+
+The CLI binary is named `hankpdf`. Same binary on Windows, macOS, Linux (file extension differs).
+
+### 2.1 Flags
+
+```
+hankpdf INPUT [-o OUTPUT] [--options...]
+
+Positional:
+  INPUT                     Path to input PDF, or "-" for stdin.
+
+Output:
+  -o, --output PATH         Path to output PDF, or "-" for stdout.
+                            Required unless --in-dir is used.
+  --in-dir PATH             Batch mode: directory of PDFs to process.
+  --out-dir PATH            Batch output directory (mirrors structure).
+
+Engine:
+  --engine {mrc,downsample-only}   Default: mrc.
+  --mode {fast,standard,safe}      Default: standard.
+  --target-bg-dpi INT              Default: 150.
+  --target-color-quality INT       Default: 55 (0-100 scale).
+  --bg-chroma {4:4:4,4:2:2,4:2:0}  Default: 4:4:4 (avoids smearing colored text; 4:2:0 only for photo-only pages).
+  --force-monochrome               Skip color detection.
+  --legal-mode                     Force CCITT G4 instead of JBIG2 (BSI / NARA compliance).
+  --target-pdfa                    Target PDF/A-2u output.
+
+OCR:
+  --ocr / --no-ocr          Default: --ocr (v1 server default is --no-ocr).
+  --ocr-language STR        Default: eng.
+
+Safety:
+  --allow-signed-invalidation  Explicit opt-in for signed PDFs.
+  --allow-certified-invalidation Explicit opt-in for certifying signatures (/Perms/DocMDP).
+  --allow-embedded-files       Keep /EmbeddedFiles instead of stripping.
+  --password-file PATH      Read password from file (never use --password on CLI; env var HANKPDF_PASSWORD also works).
+  --min-input-mb FLOAT      Passthrough if input below this.
+  --min-ratio FLOAT         Return input if achieved ratio below this.
+
+Limits:
+  --max-pages INT
+  --max-input-mb FLOAT
+  --per-page-timeout SECONDS
+  --total-timeout SECONDS
+
+Batch:
+  -j, --jobs INT            Parallel jobs (default: CPU/2).
+
+Reporting:
+  --report {text,json,jsonl,none}  Default: text.
+  --quiet                   Suppress non-error output.
+  --verbose                 Debug logging (no PHI).
+
+Meta:
+  -h, --help
+  --version
+  --verify-only             Run triage + verifier only. Do not produce output.
+  --doctor                  Print environment sanity report.
+```
+
+### 2.2 Exit codes
+
+Stable across versions. Scripts MUST branch on these, not on parsed stdout.
+
+| Code | Meaning | Script action |
+|---|---|---|
+| 0 | Compressed, verifier passed | Upload output |
+| 2 | No-op: input already small enough (below `--min-input-mb` or ratio below `--min-ratio`) | Upload input unchanged |
+| 10 | Refused: encrypted, no password | Prompt user or pass-through |
+| 11 | Refused: digitally signed, no invalidate flag | Pass-through original |
+| 15 | Refused: certifying signature (/Perms/DocMDP), requires stricter opt-in | Pass-through; never silently override |
+| 12 | Refused: oversize (`--max-pages` or `--max-input-mb`) | Pass-through, alert ops |
+| 13 | Refused: malformed / unrecoverable | Pass-through, log |
+| 14 | Refused: malicious (resource-cap exceeded in sandbox) | Quarantine, alert security |
+| 16 | Refused: decompression bomb (pixel-count cap exceeded) | Quarantine, alert security |
+| 20 | Verifier failed — content drift detected | Do NOT upload output; keep original |
+| 21 | Verifier inconclusive — safe mode manual review required | Route to human reviewer |
+| 30 | Engine internal error | Retry; then fall back to original |
+| 40 | Invalid CLI usage | Fix invocation |
+| 41 | Environment / dependency missing or version floor violated (`--doctor` will diagnose) | Install/repair — e.g. qpdf ≥11.6.3 |
+| 2xx | Transient (network to S3, license server, etc.) | Retry with exponential backoff |
+
+### 2.3 JSON report schema
+
+`--report json` writes one object to stdout; `--report jsonl` writes one object per line (for batch mode).
+
+```json
+{
+  "schema_version": 1,
+  "input": "chart-2026-04-21.pdf",
+  "output": "chart-2026-04-21.compressed.pdf",
+  "status": "ok",
+  "exit_code": 0,
+  "input_bytes": 818365952,
+  "output_bytes": 6291456,
+  "ratio": 130.1,
+  "pages": 212,
+  "wall_time_ms": 94321,
+  "engine": "mrc",
+  "engine_version": "1.4.2",
+  "verifier": {
+    "status": "pass",
+    "ocr_levenshtein": 0.004,
+    "ssim_global": 0.975,
+    "ssim_min_tile": 0.94,
+    "numeric_confidence_delta": 0.0,
+    "structural_match": true,
+    "failing_pages": []
+  },
+  "warnings": ["page-47-skipped-small-print"],
+  "strips": ["/JavaScript", "/OpenAction"],
+  "input_sha256": "3a7b...",
+  "output_sha256": "9f2c...",
+  "reason": null
+}
+```
+
+### 2.4 Streaming
+
+```bash
+cat input.pdf | hankpdf - -o - > output.pdf
+```
+
+- Input stdin requires `stdin` to be seekable OR the full input must fit in a tmpfs buffer (we buffer up to `--max-input-mb`).
+- Output stdout is valid only if report format is `none` or `json` (JSON goes to stderr in that case).
+
+### 2.5 Batch mode
+
+```bash
+hankpdf --in-dir ./in --out-dir ./out --jobs 4 --report jsonl
+```
+
+- Mirrors directory structure.
+- Emits one JSONL line per input on stdout.
+- Returns exit 0 if every file returned 0/2; otherwise exit 1 and JSONL entries record individual exit codes.
+
+## 3. (Reserved — CLI is the only user-facing surface)
+
+There is no GUI for HankPDF. The CLI (§2) and Python API (§1) are the only surfaces the user sees. Users who want drag-drop integration can add `hankpdf` to their OS's "Open with" list themselves — Windows Explorer "Send To", macOS Automator / Shortcuts, Linux `.desktop` files. Those are user-configured shell conveniences, not product features we ship.
+
+## 4. Weird-PDF taxonomy: detection + policy
+
+Complete enumeration of classes and the policy each receives.
+
+| Class | Detection | Policy | Exit code (if CLI) |
+|---|---|---|---|
+| Encrypted (user password) | `pikepdf.PasswordError` without key | If `options.password`: decrypt; else refuse with `EncryptedPDFError` | 10 |
+| Encrypted (owner password only) | Encrypted but opens without password | Proceed (owner-only doesn't gate access) | 0 |
+| Encrypted (certificate/public-key) | `/Encrypt` `/Filter /Adobe.PPKLite` | Refuse: pass-through | 11 |
+| Digitally signed | `/AcroForm /SigFlags` bit 1, or `/Sig` fields | Refuse unless `--allow-signed-invalidation`; audit-log invalidation | 11 |
+| Corrupt xref | qpdf repair warnings on open | Auto-repair; log; re-hash content; proceed | 0 |
+| Linearized | `/Linearized` dict at file start | Delinearize, recompress, re-linearize via qpdf `--linearize` | 0 |
+| Layered (OCGs) | `/OCProperties` present | Preserve layers; compress per-layer images | 0 |
+| Tagged PDF | `/StructTreeRoot` + `/MarkInfo /Marked true` | Preserve tags; pass-through unless user opts in via `mode=fast` | 0 |
+| Already contains JBIG2 | Any stream filter `/JBIG2Decode` | Never re-decode outside sandbox; pass through stream opaquely | 0 |
+| Form XObjects (`/Type /XObject /Subtype /Form`) | pikepdf object walk | Preserve as-is; don't rasterize | 0 |
+| CMYK content | Image `/ColorSpace /DeviceCMYK` or ICC | Preserve CMYK in output (legal color fidelity) | 0 |
+| Unusual rotation | `/Rotate` 90/180/270 | Preserve metadata; never pre-rotate pixels | 0 |
+| Huge page (>200"×200") | `/MediaBox` dimensions | Rasterize at adaptive DPI; cap pixel count 100 MP/page; refuse >100 MP | 12 |
+| PDF/A-1b/2b/2u input | XMP `pdfaid:part` + `pdfaid:conformance` | Preserve or strengthen level; refuse if we can't meet same level | 13 |
+| PDF/A-3 with embedded files | `pdfaid:part=3` + `/EmbeddedFiles` | Refuse unless `--allow-embedded-files`; log each embedded file SHA-256 | 12 |
+| Contains `/JavaScript`, `/JS` | Object walk | Strip; log to sidecar manifest | 0 |
+| Contains `/OpenAction`, `/AA` | Object walk | Strip; log to sidecar manifest | 0 |
+| Contains `/Launch` | Object walk | Strip; log to sidecar manifest | 0 |
+| Contains `/EmbeddedFiles` | Name tree | Strip unless `--allow-embedded-files`; log to sidecar manifest | 0 |
+| Contains `/RichMedia` or `/3D` | Annotation `/Subtype` | Strip; log to sidecar manifest | 0 |
+| Contains `/GoToR` with external URI | Action object | Strip; log to sidecar manifest | 0 |
+| Malicious (JBIG2 bomb, xref loop, recursive forms) | Sandbox resource cap tripped | SIGKILL the worker child; `MaliciousPDFError` | 14 |
+| Already aggressively compressed (DCT quality <40) | Heuristic on existing image streams | Return input unchanged; status=`passed_through` | 2 |
+| Oversize input (> `max_input_mb` or `max_pages`) | Size check before triage | Refuse; `OversizeError` | 12 |
+| Decompression bomb (pixel-count cap exceeded) | Total pages × page dims × bit depth > configured cap, OR Pillow raises `DecompressionBombError` on decode | Refuse; `DecompressionBombError`; quarantine | 16 |
+| Hybrid xref (`/XRefStm`) | Trailer has `/XRefStm` entry | Proceed; log warning — qpdf silently ignores `/Prev` chains inside xref streams (historical revisions lost) | 0 |
+| Chained incremental updates | Multiple `%%EOF` + `startxref` sections | Proceed; count revisions; log "collapsed N revisions" to sidecar manifest (audit trail impact) | 0 |
+| `/Metadata` points to non-stream object | `type(pdf.Root.Metadata) != Stream` (pikepdf #349, #568 class) | Swallow with try/except; treat as "no XMP available"; never crash verifier | 0 |
+| PDF 2.0 input | `%PDF-2.0` header + `/Version /2.0` in catalog | Proceed; log; downgrade to 1.7 for output; warn that PDF 2.0-only features (associated files, namespaces, enhanced tags) are discarded | 0 |
+| `/Perms` (permission signature) present | `trailer.Encrypt.Perms` present | Proceed with owner decrypt; log "removed permission signature" to sidecar manifest | 0 |
+| AcroForm with `/CO` calculation order + JavaScript | Walk `/AcroForm/CO`; scan `/AA`/`/A`/`/JS` | If stripping JS: flatten calculated fields to current displayed value (do not leave form blank); log | 0 |
+| Non-rectilinear `/Rotate` (not 0/90/180/270) | `/Rotate` not in {0,90,180,270} | Treat as malformed; clamp to nearest valid or reject | 13 |
+| `/Length` disagrees with actual stream bytes on page `/Contents` | Read-and-compare during triage | qpdf repairs silently; log every occurrence to sidecar manifest for audit | 0 |
+| Known-bad producer fingerprint | Scan `/Info /Producer` against list (Canon iR MF64x, HP M29w, Brother ADS, Kyocera TASKalfa, Ricoh Aficio 2232, eCopy ShareScan) | Route to high-caution mode: sandbox stricter, force deterministic ID, run extra qpdf --check validation | 0 |
+| `qpdf --check` warnings while pikepdf opens clean | Run qpdf --check side-channel; compare warning count | Proceed; log full warning set to sidecar manifest; add to verifier scrutiny | 0 |
+| Certifying signature (DocMDP) | `/AcroForm/SigFlags` bit 1 + `/Perms/DocMDP` present | Refuse by default; require separate `--allow-certified-invalidation` flag (stricter than regular signature opt-in) | 15 |
+| Pages with missing `/Contents` (empty page) | Page object walk | Proceed; don't error (common in driver-buggy MFP output) | 0 |
+| Already-optimized input (own-output or similar MRC) | Image XObjects contain existing `/JBIG2Decode` + `/SMask` pattern, OR DCT quality heuristic <40 | Pass-through (status=`passed_through`, exit 2); re-processing inflates size | 2 |
+| Huge `/ObjStm` (> 10,000 objects in single ObjStm) | ObjStm size walk | Refuse as resource-bomb candidate | 14 |
+| Filename contains non-NFC Unicode | Unicode normalization check at ingest | Normalize to NFC; log `filename_renormalized` counter (macOS NFD → Linux NFC silent data-loss class) | 0 |
+
+### 4.4 Strip log format
+
+Each strip is recorded in `report.strips` as a stable enum name:
+
+```
+/JavaScript
+/OpenAction
+/AdditionalActions
+/Launch
+/EmbeddedFiles
+/RichMedia
+/3DAnnotation
+/GoToR-External
+/PrinterMark
+```
+
+## 5. Canonical input hash (exposed for caller use)
+
+HankPDF computes a canonical-content hash of every input and includes it in the `CompressReport` / sidecar manifest. Callers who run HankPDF in a pipeline can use this for dedup, caching, or audit. HankPDF itself stores nothing and does no caching.
+
+### 5.1 Canonicalization
+
+1. Open input with pikepdf.
+2. Remove `/ID` from trailer.
+3. Remove `/Info /CreationDate`, `/Info /ModDate`.
+4. Strip XMP fields: `xmp:CreateDate`, `xmp:ModifyDate`, `xmp:MetadataDate`, producer strings.
+5. Re-serialize with pikepdf's deterministic object output mode (stable object numbering, lexicographic key ordering in dictionaries, no compression of cross-reference stream metadata).
+6. Hash the re-serialized bytes with SHA-256.
+
+### 5.2 What this catches
+
+- Same-content documents that only differ in metadata timestamps, producer strings, or random `/ID` arrays → same hash. (Useful: two email sends of the same scan dedupe.)
+- Two concatenations of the same pages with different page-tree structure → different hashes. Treated as distinct.
+
+### 5.3 Where it appears
+
+`CompressReport.canonical_input_sha256` and sidecar manifest `canonical_input_sha256` field. Caller decides what to do with it.
+
+## 6. Sidecar manifest schema
+
+Written alongside every successful output as `<output-basename>.hankpdf.json`.
+
+```json
+{
+  "schema_version": 1,
+  "input_sha256": "...",
+  "canonical_input_sha256": "...",
+  "output_sha256": "...",
+  "engine": "mrc",
+  "engine_version": "1.4.2",
+  "compressed_at": "2026-04-21T17:35:00Z",
+  "compression": {
+    "input_bytes": 818365952,
+    "output_bytes": 6291456,
+    "ratio": 130.1,
+    "pages": 212
+  },
+  "strips": ["/JavaScript", "/OpenAction"],
+  "verifier": { /* VerifierResult */ },
+  "warnings": ["page-47-skipped-small-print"],
+  "source": {
+    "cli_version": "1.4.2",
+    "host_platform": "linux-x86_64",
+    "options": { /* redacted CompressOptions — no password */ }
+  }
+}
+```
+
+## 7. Error model
+
+### 7.1 Exception hierarchy
+
+```
+CompressError
+├── EncryptedPDFError
+├── SignedPDFError
+├── MaliciousPDFError
+├── ContentDriftError
+├── OversizeError
+├── CorruptPDFError
+└── LicenseError
+```
+
+### 7.2 Structured warning codes
+
+Emitted via `report.warnings` as stable string enums (never free-text).
+
+```
+page-N-skipped-small-print
+page-N-ocr-low-confidence
+page-N-color-detected-in-monochrome-mode
+page-N-already-optimized
+xref-repaired
+strip-javascript
+strip-openaction
+strip-embedded-files
+signature-passthrough
+encrypted-owner-only
+pdfa-downgrade-refused
+```
+
+### 7.3 Human-readable messages
+
+Displayed via CLI default report mode. Never includes PHI or filenames verbatim — always uses generic phrasing.
+
+| Error | Message |
+|---|---|
+| `EncryptedPDFError` | "This PDF is password-protected. Provide the password or keep the original." |
+| `SignedPDFError` | "This PDF has a digital signature. Shrinking would invalidate it. Keep original or confirm invalidation." |
+| `CertifiedSignatureError` | "This PDF carries a certifying signature (author-certified, DocMDP). Invalidating it carries stronger legal risk than an ordinary signature. Contact support before proceeding." |
+| `MaliciousPDFError` | "This PDF could not be processed safely. Please contact support with this reference code." |
+| `DecompressionBombError` | "This PDF's images are unusually large and could exhaust memory. Refusing to process for safety. Contact support with this reference code." |
+| `ContentDriftError` | "We couldn't shrink this PDF without losing detail. Please keep the original." |
+| `OversizeError` | "This PDF is larger than we can process ({size} MB). Please split it first or contact support." |
+| `CorruptPDFError` | "This PDF appears damaged. Please re-scan or re-export it." |
+| `EnvironmentError` | "HankPDF environment check failed. Run `hankpdf --doctor` to see what's missing or out of date (e.g. qpdf must be ≥11.6.3 to avoid a known data-loss bug)." |
+
+## 8. Local logging and diagnostics
+
+HankPDF is a local tool. There is no metrics endpoint, no telemetry, no external log target. All observability is local-only and exists so the user (or a script wrapping HankPDF) can diagnose what happened on their own machine.
+
+### 8.1 CLI report
+
+Every invocation emits a `CompressReport` (see §1.1). For CLI use, `--report {text|json|jsonl|none}` controls output format. Schema frozen in §2.3.
+
+### 8.2 Logs (local only)
+
+- Written to **stderr** by default; `--log-file PATH` redirects to a file; `--quiet` suppresses non-error lines.
+- Structured JSON when `--log-format json`; human-friendly single lines otherwise.
+- `INFO` default; `DEBUG` includes internal state (segmentation tile counts, codec choices).
+- **Content hygiene** (even though logs stay local, users who wrap HankPDF in their own pipelines will pipe logs elsewhere):
+  - Raw filenames, OCR text, PDF content, passwords, `/Title`, `/Author`, `/Subject`, `/Keywords`, `/Producer` are never logged verbatim.
+  - Filenames appear as `sha1(basename)[:8]…basename[-8:]` in log lines. Implemented via `hankpdf.utils.log.redact_filename()`.
+  - CI lint rule bans `logger.info(f"...{filename}...")` and any log call with f-strings containing `path`, `filename`, `basename`, `producer`, `ocr_text`, `content`. Route everything through the `redact_*` helpers.
+
+### 8.3 Diagnostics (`--doctor`)
+
+Prints environment sanity report and exits — never runs compression. Output includes:
+- HankPDF version + engine version
+- Python version + free-thread-build flag (should be "not built" for v1)
+- Platform, CPU count, physical memory
+- Tesseract version + tessdata pack SHA-256
+- qpdf version (must be ≥11.6.3)
+- pdfium binary revision from the bundled pypdfium2
+- OpenJPEG version (must be ≥2.5.4)
+- jbig2enc vendor commit hash
+- PIL `MAX_IMAGE_PIXELS` setting
+- Exit 0 if all floor checks pass; exit 41 if any fail (with the specific fix hint).
+
+### 8.4 Self-counters (local, opt-in)
+
+By default, nothing persists between runs. Users who want to see cumulative stats across many runs can pass `--stats-file PATH`; HankPDF appends a JSONL entry per job to that file. This is **the user's file**, written only when they opt in. No rotation, no upload, no analytics.
+
+## 10. Build matrix
+
+| Target | Python | Artifact | Notes |
+|---|---|---|---|
+| PyPI wheel + sdist | 3.14 | Universal pure-Python wheel (`py3-none-any`) if feasible; per-platform wheels only if a pure-Python wheel can't express the native-dep declarations cleanly | Published via GitHub OIDC trusted publishing — no API tokens |
+| Docker image | 3.14 | Multi-arch (amd64 + arm64) | Debian slim or wolfi base; all native deps (pdfium, Tesseract, jbig2enc, OpenJPEG, qpdf) baked in; non-root `hankpdf` user; read-only rootfs friendly; image size target < 300 MB |
+
+**Not built**: standalone platform binaries (no PyInstaller artifacts), signed installers, code-signed releases. Users who need a binary can PyInstaller-build from source in a few minutes; we don't ship that as a product artifact.
+
+## 11. Versioning and compatibility
+
+- Semantic versioning: `MAJOR.MINOR.PATCH`.
+- **Engine version** advances independently from CLI version when the compression algorithm changes in a way that produces byte-different outputs from the same input. Written to `CompressReport.engine_version` and sidecar manifest.
+- **CLI exit codes and JSON report schema**: considered stable interfaces. Breaking changes require major version bump and a one-release deprecation warning.
+- **Python API**: `compress()` signature stable within major version; internal modules may change freely.
+- **Sidecar manifest schema**: versioned via `schema_version` field. Readers accept current and previous version.
+
+## 12. Testing interface
+
+Test determinism guarantees:
+
+- `triage()` is pure on bytes input.
+- `segment_page()` is deterministic on a **single host with a single Tesseract + OpenCV + pdfium build**. It is NOT deterministic across hosts — Tesseract's LSTM uses float32 ops whose accumulation order varies by BLAS vendor, hardware, and platform. Tests that assert exact text equality run on a pinned CI image only.
+- **Verifier** avoids cross-host non-determinism by caching input-OCR results keyed on SHA-256 of the rasterized input page image, and running both input-pass and output-pass OCR on the same host within the same process.
+- Integration tests run against a corpus of public-domain PDFs (see [ROADMAP.md Phase 0](ROADMAP.md)).
+- Golden-output tests record expected ratio **bands** (not exact sizes) — e.g., "this input must compress to between 4 and 8 MB." Pixel-level equality tests across hosts use SSIM tolerance, not byte equality.
+- Cross-platform verifier drift is measured: same input on macOS + Linux CI; difference must stay under a documented tolerance budget (set empirically during Phase 1 spike).
+
+Full test strategy in [ROADMAP.md Phase 0, Task T0.7](ROADMAP.md).

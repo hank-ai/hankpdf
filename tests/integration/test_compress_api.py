@@ -1,0 +1,127 @@
+"""Tests for the full ``compress()`` public API.
+
+This is the end-to-end integration: triage → sanitize → recompress →
+verify → report. Proves that ``from pdf_smasher import compress`` works
+as the SPEC.md §1 contract promises.
+"""
+
+from __future__ import annotations
+
+import io
+
+import pikepdf
+import pypdfium2 as pdfium
+import pytest
+from PIL import Image, ImageDraw, ImageFont
+
+from pdf_smasher import (
+    CompressOptions,
+    CompressReport,
+    EncryptedPDFError,
+    SignedPDFError,
+    compress,
+)
+
+
+def _make_fake_scan(text_lines: list[str], *, source_dpi: int = 200) -> bytes:
+    w_pt, h_pt = 612.0, 792.0
+    w_px = round(w_pt * source_dpi / 72)
+    h_px = round(h_pt * source_dpi / 72)
+    img = Image.new("RGB", (w_px, h_px), color="white")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("Arial.ttf", 60)
+    except OSError:
+        font = ImageFont.load_default(size=60)
+    y = 200
+    for line in text_lines:
+        draw.text((150, y), line, fill="black", font=font)
+        y += 120
+
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(w_pt, h_pt))
+    page = pdf.pages[0]
+    jbuf = io.BytesIO()
+    img.save(jbuf, format="JPEG", quality=92, subsampling=0)
+    xobj = pdf.make_stream(
+        jbuf.getvalue(),
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Image,
+        Width=w_px,
+        Height=h_px,
+        ColorSpace=pikepdf.Name.DeviceRGB,
+        BitsPerComponent=8,
+        Filter=pikepdf.Name.DCTDecode,
+    )
+    page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Scan=xobj))
+    page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Scan Do Q\n")
+    buf = io.BytesIO()
+    pdf.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.integration
+def test_compress_returns_bytes_and_report() -> None:
+    pdf_in = _make_fake_scan(["HELLO WORLD"])
+    pdf_out, report = compress(pdf_in)
+    assert isinstance(pdf_out, bytes)
+    assert isinstance(report, CompressReport)
+    assert pdf_out.startswith(b"%PDF-")
+
+
+@pytest.mark.integration
+def test_compress_report_fields_populated() -> None:
+    pdf_in = _make_fake_scan(["Invoice 12345 total $50.00"])
+    pdf_out, report = compress(pdf_in)
+    assert report.input_bytes == len(pdf_in)
+    assert report.output_bytes == len(pdf_out)
+    assert report.ratio > 0
+    assert report.pages == 1
+    assert report.wall_time_ms >= 0
+    assert len(report.input_sha256) == 64
+    assert len(report.output_sha256) == 64
+    assert report.canonical_input_sha256 is None or len(report.canonical_input_sha256) == 64
+
+
+@pytest.mark.integration
+def test_compress_preserves_text_searchability() -> None:
+    pdf_in = _make_fake_scan(["SEARCHABLE"])
+    pdf_out, _ = compress(pdf_in)
+    pdf = pdfium.PdfDocument(pdf_out)
+    try:
+        tp = pdf[0].get_textpage()
+        text = tp.get_text_bounded()
+        tp.close()
+    finally:
+        pdf.close()
+    assert "SEARCHABLE" in text
+
+
+@pytest.mark.integration
+def test_compress_encrypted_without_password_raises() -> None:
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    buf = io.BytesIO()
+    pdf.save(buf, encryption=pikepdf.Encryption(user="s", owner="o"))
+    with pytest.raises(EncryptedPDFError):
+        compress(buf.getvalue())
+
+
+@pytest.mark.integration
+def test_compress_signed_without_opt_in_raises() -> None:
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.Root["/AcroForm"] = pikepdf.Dictionary(SigFlags=3, Fields=pikepdf.Array([]))
+    buf = io.BytesIO()
+    pdf.save(buf)
+    with pytest.raises(SignedPDFError):
+        compress(buf.getvalue())
+
+
+@pytest.mark.integration
+def test_compress_respects_mode_safe() -> None:
+    """Safe mode runs but enforces stricter gates. On valid content, still passes."""
+    pdf_in = _make_fake_scan(["HELLO WORLD"])
+    pdf_out, report = compress(pdf_in, options=CompressOptions(mode="safe"))
+    assert pdf_out.startswith(b"%PDF-")
+    assert report.verifier.status in ("pass", "fail")

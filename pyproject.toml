@@ -1,0 +1,209 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pdf-smasher"
+version = "0.0.0"
+description = "Aggressive, safety-first PDF shrinker for scanned documents. CLI tool: PDF in, shrunk searchable PDF out."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Jack Neil" },
+]
+keywords = [
+    "pdf",
+    "compression",
+    "ocr",
+    "mrc",
+    "jbig2",
+    "scanned-documents",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Office/Business",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pypdfium2>=5.7.1",
+    "pikepdf>=10.5.1",
+    "Pillow>=12.2.0",
+    "numpy>=2.4.0",
+    "opencv-python-headless>=4.13.0",
+    "scikit-image>=0.26.0",
+    "pytesseract>=0.3.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/ourorg/pdf-smasher"
+Documentation = "https://github.com/ourorg/pdf-smasher/tree/main/docs"
+Repository = "https://github.com/ourorg/pdf-smasher"
+Issues = "https://github.com/ourorg/pdf-smasher/issues"
+
+[project.scripts]
+hankpdf = "pdf_smasher.cli.main:main"
+
+[project.optional-dependencies]
+# Placeholder — v1 ships no optional extras yet.
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pdf_smasher"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "pdf_smasher/**",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "docs/**",
+    "pyproject.toml",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-exclude = [
+    "scripts/generate_corpus",
+    "tests/corpus/_cache",
+    "tests/corpus/_generated",
+    ".firecrawl",
+]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",        # pydocstyle — enforce selectively later
+    "ANN",      # flake8-annotations — mypy is the source of truth
+    "COM812",   # ruff format handles trailing commas
+    "ISC001",   # ruff format handles implicit string concat
+    "TD",       # TODO comments ok during build-out
+    "FIX",      # TODO / FIXME warnings — noise during build-out
+    "S101",     # assert in tests is fine
+    "PLR0913",  # CompressOptions has many knobs by design
+    "E501",     # let ruff format deal with long lines
+    "CPY",      # no per-file copyright headers required
+    "TC001",    # TYPE_CHECKING import shuffling is cosmetic
+    "TC002",
+    "TC003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"pdf_smasher/__init__.py" = [
+    "C901",     # compress() is unavoidably complex (full pipeline in one function)
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",  # lazy imports to keep top-level import cheap
+]
+"pdf_smasher/cli/main.py" = [
+    "C901",     # main() has many error-class branches by design
+    "PLR0911",  # many exit codes = many returns
+    "PLR0912",
+    "T201",     # print() is the CLI's UI
+    "PLC0415",
+    "S603",     # hardcoded binary names in --doctor
+    "SIM108",
+]
+"pdf_smasher/engine/triage.py" = [
+    "SIM118",   # iterating pikepdf dict keys is more explicit via .keys()
+]
+"pdf_smasher/engine/codecs/*.py" = [
+    "S603", "S607",  # we invoke binaries like `jbig2` by name on purpose
+]
+"tests/**" = [
+    "S",        # assert / subprocess in tests is fine
+    "PLR",      # magic values in tests are fine
+    "D",        # no docstrings required in tests
+    "ANN",      # mypy handles typing
+    "INP001",   # tests/ is not a package
+    "ARG",      # unused fixture args are normal
+    "PLC0415",  # local import inside a test function is fine
+    "ERA001",   # rationale comments in tests are fine
+    "FBT",      # boolean positional args in parametrized tests are fine
+    "E741",     # short loop vars in tests are fine
+]
+"scripts/**" = [
+    "T201",     # print() is the UI for scripts
+    "S",        # no hardening required
+    "INP001",   # not a package
+    "BLE001",   # broad exception handling in CLI glue is OK
+    "PTH123",   # scripts don't need to use pathlib for every open()
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+# ---------------------------------------------------------------------------
+# Mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_explicit = false
+plugins = []
+
+[[tool.mypy.overrides]]
+module = [
+    "pypdfium2.*",
+    "pikepdf.*",
+    "pytesseract.*",
+    "cv2.*",
+    "skimage.*",
+]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: integration tests (may require native deps)",
+    "corpus: tests that need the fetched public-domain corpus",
+]
+
+[tool.coverage.run]
+source = ["pdf_smasher"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
