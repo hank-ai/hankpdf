@@ -33,6 +33,8 @@ from pdf_smasher.engine.chunking import split_pdf_by_size
 from pdf_smasher.engine.image_export import render_pages_as_images
 
 _MAX_IMAGE_DPI = 1200  # 300 archival + 4x headroom; above this = OOM risk
+_MAX_PAGES_RANGE = 1_000_000  # cap --pages "lo-hi" span to prevent DoS via
+# set(range(1, 10**11)) materialization — see DCR Wave 1.
 
 
 def _positive_dpi(raw: str) -> int:
@@ -274,6 +276,12 @@ def _parse_pages_spec(spec: str) -> set[int]:
             lo, hi = int(lo_s), int(hi_s)
             if lo < 1 or hi < lo:
                 msg = f"invalid range {part!r}: must be 1-indexed, lo <= hi"
+                raise ValueError(msg)
+            if hi - lo + 1 > _MAX_PAGES_RANGE:
+                msg = (
+                    f"range {part!r} too large: cap is {_MAX_PAGES_RANGE:,} "
+                    "pages per range to prevent memory exhaustion"
+                )
                 raise ValueError(msg)
             out.update(range(lo, hi + 1))
         else:
