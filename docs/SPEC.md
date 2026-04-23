@@ -74,7 +74,7 @@ class CompressReport:
     warnings: tuple[str, ...] = ()      # structured warning codes; see §8.5
     strips: tuple[str, ...] = ()        # what was stripped; see §4.4
     reason: str | None = None           # human-readable reason if refused/drift
-    schema_version: int = 1             # sidecar / JSON report schema version (see §11)
+    schema_version: int = 2             # sidecar / JSON report schema version (see §11)
     strategy_distribution: Mapping[str, int] = field(default_factory=dict)
     # strategy_distribution: per-page strategy counts — keys are
     # "text_only", "photo_only", "mixed", "already_optimized"; values are
@@ -343,7 +343,7 @@ Stable across versions. Scripts MUST branch on these, not on parsed stdout.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "input": "chart-2026-04-21.pdf",
   "output": "chart-2026-04-21.compressed.pdf",
   "status": "ok",
@@ -487,7 +487,7 @@ Written alongside every successful output as `<output-basename>.hankpdf.json`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "input_sha256": "...",
   "canonical_input_sha256": "...",
   "output_sha256": "...",
