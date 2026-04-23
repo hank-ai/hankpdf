@@ -59,6 +59,36 @@ __all__ = [
 ]
 
 
+def _extract_ground_truth_text(
+    pdf_bytes: bytes, page_index: int, fallback_ocr_text: str,
+) -> str:
+    """Return the native text layer for `page_index`, or `fallback_ocr_text`.
+
+    Prefers the native PDF text layer when present and non-empty; falls back
+    to the pre-computed OCR text when the page has no native layer (e.g., a
+    scanned PDF with no embedded text). Prevents both-OCR-wrong scenarios
+    where Tesseract misreads a digit on BOTH input and output (Task 0.5).
+    """
+    from pypdfium2 import PdfDocument as _Pdfium
+
+    try:
+        _doc = _Pdfium(pdf_bytes)
+        try:
+            _page = _doc[page_index]
+            _tp = _page.get_textpage()
+            try:
+                native = _tp.get_text_range()
+                if native and native.strip():
+                    return native.strip()
+            finally:
+                _tp.close()
+        finally:
+            _doc.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback_ocr_text
+
+
 def triage(input_data: bytes) -> TriageReport:
     """Cheap structural scan. Never decodes image streams. See SPEC.md §4."""
     from pdf_smasher.engine.triage import triage as _triage
@@ -139,39 +169,54 @@ def compress(
     finally:
         pdf_dims.close()
 
-    for i in range(tri.pages):
-        width_pt, height_pt = page_sizes[i]
-        raster = rasterize_page(input_data, page_index=i, dpi=source_dpi)
-        input_rasters.append(raster)
-        word_boxes = tesseract_word_boxes(raster, language=options.ocr_language)
-        input_ocr_texts.append(" ".join(b.text for b in word_boxes))
-        mask = build_mask(raster)
-        fg = extract_foreground(raster, mask=mask)
-        bg = extract_background(
-            raster,
-            mask=mask,
-            source_dpi=source_dpi,
-            target_dpi=bg_target_dpi,
-        )
-        composed = compose_mrc_page(
-            foreground=fg.image,
-            foreground_color=fg.ink_color,
-            mask=mask,
-            background=bg,
-            page_width_pt=width_pt,
-            page_height_pt=height_pt,
-        )
-        if options.ocr:
-            composed = add_text_layer(
-                composed,
-                page_index=0,
-                word_boxes=word_boxes,
-                raster_width_px=raster.size[0],
-                raster_height_px=raster.size[1],
+    # Open input PDF once for native text extraction (O(1) vs O(N) re-opens).
+    _src_pdf_for_native_text = pdfium.PdfDocument(input_data)
+    try:
+        for i in range(tri.pages):
+            width_pt, height_pt = page_sizes[i]
+            raster = rasterize_page(input_data, page_index=i, dpi=source_dpi)
+            input_rasters.append(raster)
+            word_boxes = tesseract_word_boxes(raster, language=options.ocr_language)
+            ocr_text = " ".join(b.text for b in word_boxes)
+            # SOURCE-TRUTH STRATEGY (Task 0.5): prefer native PDF text layer when
+            # present — Tesseract on raster can misread digits, causing false passes.
+            _page_obj = _src_pdf_for_native_text[i]
+            _tp = _page_obj.get_textpage()
+            try:
+                _native_text = _tp.get_text_range()
+            finally:
+                _tp.close()
+            input_ocr_text = _native_text.strip() if _native_text and _native_text.strip() else ocr_text
+            input_ocr_texts.append(input_ocr_text)
+            mask = build_mask(raster)
+            fg = extract_foreground(raster, mask=mask)
+            bg = extract_background(
+                raster,
+                mask=mask,
+                source_dpi=source_dpi,
+                target_dpi=bg_target_dpi,
+            )
+            composed = compose_mrc_page(
+                foreground=fg.image,
+                foreground_color=fg.ink_color,
+                mask=mask,
+                background=bg,
                 page_width_pt=width_pt,
                 page_height_pt=height_pt,
             )
-        page_pdfs.append(composed)
+            if options.ocr:
+                composed = add_text_layer(
+                    composed,
+                    page_index=0,
+                    word_boxes=word_boxes,
+                    raster_width_px=raster.size[0],
+                    raster_height_px=raster.size[1],
+                    page_width_pt=width_pt,
+                    page_height_pt=height_pt,
+                )
+            page_pdfs.append(composed)
+    finally:
+        _src_pdf_for_native_text.close()
 
     # Merge pages.
     merged = pikepdf.new()
