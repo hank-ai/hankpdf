@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -142,11 +143,11 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Cap the output PDF size. If the compressed output exceeds this "
-            "value, split into multiple files named {base}_0{ext}, "
-            "{base}_1{ext}, ... preserving page order. Useful for email "
-            "attachment limits, archival chunk sizes, etc. A single page "
-            "that's already larger than the cap is emitted alone (you'll "
-            "see a warning)."
+            "value, split into multiple files named {base}_001{ext}, "
+            "{base}_002{ext}, ... (zero-padded, 1-indexed) preserving page "
+            "order. Useful for email attachment limits, archival chunk "
+            "sizes, etc. A single page that's already larger than the cap "
+            "is emitted alone (you'll see a warning)."
         ),
     )
     p.add_argument(
@@ -710,9 +711,25 @@ def main(argv: list[str] | None = None) -> int:
                 base = args.output.stem
                 ext = args.output.suffix
                 parent = args.output.parent
+
+                # Detect stale chunks from prior runs that will not be
+                # overwritten because our new chunk count is smaller.
+                # Matches {base}_NNN{ext} with NNN > len(chunks). Pattern
+                # pinned to exactly 3 digits so we don't false-match legit
+                # non-chunk siblings like `smol_final.pdf`.
+                chunk_re = re.compile(
+                    rf"^{re.escape(base)}_(\d{{3}}){re.escape(ext)}$",
+                )
+                stale: list[Path] = []
+                if parent.exists():
+                    for existing in parent.iterdir():
+                        m = chunk_re.match(existing.name)
+                        if m is not None and int(m.group(1)) > len(chunks):
+                            stale.append(existing)
+
                 written_paths: list[Path] = []
-                for idx, chunk in enumerate(chunks):
-                    p = parent / f"{base}_{idx}{ext}"
+                for idx, chunk in enumerate(chunks, start=1):
+                    p = parent / f"{base}_{idx:03d}{ext}"
                     p.write_bytes(chunk)
                     written_paths.append(p)
                 oversize = [p for p in written_paths if p.stat().st_size > max_bytes]
@@ -728,6 +745,15 @@ def main(argv: list[str] | None = None) -> int:
                             f"[hankpdf] warning: {len(oversize)} chunk(s) exceed "
                             "the cap because they contain a single oversize page: "
                             f"{[p.name for p in oversize]}",
+                            file=sys.stderr,
+                        )
+                    if stale:
+                        stale_names = sorted(p.name for p in stale)
+                        print(
+                            f"[hankpdf] warning: {len(stale)} stale chunk "
+                            f"file(s) from a previous run remain in {parent}: "
+                            f"{stale_names}. Remove them manually if they no "
+                            "longer belong to this output.",
                             file=sys.stderr,
                         )
 
