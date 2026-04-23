@@ -88,11 +88,13 @@ def test_process_pool_path_also_equivalent(monkeypatch) -> None:  # type: ignore
     """
     pdf_in = _make_multi_page_pdf(n_pages=5)
     serial_bytes, _ = compress(
-        pdf_in, options=CompressOptions(mode="fast", max_workers=1),
+        pdf_in,
+        options=CompressOptions(mode="fast", max_workers=1),
     )
     monkeypatch.setenv("HANKPDF_POOL", "process")
     proc_bytes, proc_report = compress(
-        pdf_in, options=CompressOptions(mode="fast", max_workers=0),
+        pdf_in,
+        options=CompressOptions(mode="fast", max_workers=0),
     )
     assert proc_report.status == "ok"
     assert proc_report.pages == 5

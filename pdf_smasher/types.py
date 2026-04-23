@@ -52,6 +52,9 @@ class CompressOptions:
     allow_certified_invalidation: bool = False
     allow_embedded_files: bool = False
     accept_drift: bool = False  # if True, drift → warning instead of abort
+    skip_verify: bool = (
+        False  # if True, skip the content-drift verifier entirely (fastest; no OCR, no SSIM)
+    )
     password: str | None = None
 
     # Thresholds

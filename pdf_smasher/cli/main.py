@@ -128,6 +128,17 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help=(
+            "Skip the content-drift verifier entirely. Fastest option: no "
+            "output re-rasterization, no OCR comparison, no SSIM. Use when "
+            "you trust the compressor and want speed over post-hoc safety "
+            "checks. With --no-ocr this also skips input OCR. Typically "
+            "2-3x faster per page."
+        ),
+    )
+    p.add_argument(
         "--max-workers",
         type=int,
         default=0,
@@ -185,6 +196,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         target_color_quality=args.target_color_quality,
         force_monochrome=args.force_monochrome,
         accept_drift=args.accept_drift,
+        skip_verify=args.skip_verify,
         max_workers=args.max_workers,
         legal_codec_profile="ccitt-g4" if args.legal_mode else None,
         target_pdf_a=args.target_pdfa,

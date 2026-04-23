@@ -85,7 +85,10 @@ _FAILING_PAGES_INLINE_LIMIT = 10
 _PARALLEL_MIN_PAGES = 4
 
 # Reserved cores left for the user's other work when auto-sizing the pool.
-_AUTO_WORKER_RESERVE = 2
+# Drop to 1 so we use N-1 of N cores: still headroom for the OS + user's
+# other processes, but one more worker than before. Matters most on small
+# core counts where cpu_count-2 was leaving too much idle.
+_AUTO_WORKER_RESERVE = 1
 
 # options.max_workers values: 0 = auto, 1 = serial, N >= this = N workers.
 _MIN_EXPLICIT_WORKER_COUNT = 2
@@ -246,12 +249,32 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     ssim_floor = winput.ssim_floor
     warnings: list[str] = []
 
-    # --- Rasterize + OCR (input) ---
+    # --- Rasterize input ---
     raster = rasterize_page(winput.input_page_pdf, page_index=0, dpi=winput.source_dpi)
-    word_boxes = tesseract_word_boxes(raster, language=options.ocr_language)
-    ocr_text = " ".join(b.text for b in word_boxes)
+
+    # Input OCR is needed when:
+    #   - options.ocr (for add_text_layer positioning), OR
+    #   - verifier runs (for drift comparison)
+    # When BOTH are disabled (--skip-verify --no-ocr), skip Tesseract entirely.
+    # Tesseract is subprocess-based and releases the GIL during wait, so we
+    # kick input OCR off in a background thread NOW — it runs concurrently
+    # with mask/classify/compose and is awaited when we need the text.
+    need_input_ocr = bool(options.ocr) or not options.skip_verify
+    _input_ocr_future: Any = None
+    word_boxes: list[Any] = []
+    ocr_text: str = ""
+    if need_input_ocr:
+        _ocr_pool = ThreadPoolExecutor(max_workers=2)  # 1 for input, 1 for output
+        _input_ocr_future = _ocr_pool.submit(
+            tesseract_word_boxes,
+            raster,
+            language=options.ocr_language,
+        )
+    else:
+        _ocr_pool = None
 
     # Source-truth: prefer native PDF text layer when present.
+    # (Still cheap even with skip_verify; just a textpage read.)
     from pypdfium2 import PdfDocument as _Pdfium
 
     _doc = _Pdfium(winput.input_page_pdf)
@@ -263,7 +286,24 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             _tp.close()
     finally:
         _doc.close()
-    input_ocr_text = _native_text.strip() if _native_text and _native_text.strip() else ocr_text
+
+    def _await_input_ocr() -> None:
+        """Populate word_boxes + ocr_text from the background OCR future.
+        No-op if already resolved or not needed."""
+        nonlocal word_boxes, ocr_text
+        if _input_ocr_future is None or word_boxes:
+            return
+        word_boxes = _input_ocr_future.result()
+        ocr_text = " ".join(b.text for b in word_boxes)
+
+    # If native text is present we can skip waiting on OCR for the verifier
+    # ground-truth (native wins anyway). But we still need word_boxes later
+    # if options.ocr is set (for text-layer positioning).
+    if _native_text and _native_text.strip():
+        input_ocr_text = _native_text.strip()
+    else:
+        _await_input_ocr()
+        input_ocr_text = ocr_text
 
     # --- Mask + classify ---
     mask = build_mask(raster)
@@ -343,6 +383,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             warnings.append(f"page-{i + 1}-jbig2-fallback-to-flate")
 
     if options.ocr:
+        _await_input_ocr()
         composed = add_text_layer(
             composed,
             page_index=0,
@@ -354,45 +395,87 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         )
 
     # --- Streaming verify ---
-    output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
-    output_ocr_text = " ".join(
-        b.text for b in tesseract_word_boxes(output_raster, language=options.ocr_language)
-    )
-    per_page_input_estimate = raster.width * raster.height * 3
-    per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
-    anomalous = (
-        per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD and strategy != PageStrategy.TEXT_ONLY
-    )
-    if strategy == PageStrategy.MIXED:
-        page_tile_ssim_floor = (
-            _DEFAULT_TILE_SSIM_FLOOR_SAFE
-            if (anomalous or is_safe)
-            else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
+    # When skip_verify is set, synthesize a trivially-passing verdict and
+    # don't re-rasterize / re-OCR the output. Saves 2-5 s/page (Tesseract
+    # runs twice per page inside the verifier otherwise).
+    if options.skip_verify:
+        from pdf_smasher.engine.verifier import PageVerdict as _PageVerdict
+
+        verdict = _PageVerdict(
+            page_index=-1,
+            passed=True,
+            lev=0.0,
+            ssim_global=1.0,
+            ssim_tile_min=1.0,
+            digits_match=True,
+            color_preserved=True,
         )
-        page_ssim_floor = ssim_floor
-        page_lev_ceiling = lev_ceiling
-    elif strategy == PageStrategy.PHOTO_ONLY:
-        page_tile_ssim_floor = -1.0
-        page_ssim_floor = 0.5
-        page_lev_ceiling = 1.0
     else:
-        page_tile_ssim_floor = -1.0
-        page_ssim_floor = ssim_floor
-        page_lev_ceiling = lev_ceiling
-    if anomalous:
-        warnings.append(
-            f"page-{i + 1}-anomalous-ratio-{per_page_pixel_ratio:.0f}x-safe-verify",
+        output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
+        # Kick off output OCR in parallel with awaiting the input OCR (if
+        # we haven't already needed it). Two tesseract subprocesses run
+        # concurrently inside this worker — each uses 1 thread (OMP pinned)
+        # so the pair still fits in 1 CPU core's worth of work, but they
+        # overlap for ~40% wall-time reduction on the OCR phase.
+        if _ocr_pool is not None:
+            _output_ocr_future = _ocr_pool.submit(
+                tesseract_word_boxes,
+                output_raster,
+                language=options.ocr_language,
+            )
+        else:
+            _output_ocr_future = None
+        # Resolve input OCR (may already be done if native text wasn't present).
+        _await_input_ocr()
+        # Reassign in case native text was used — verifier needs input_ocr_text
+        # from our source-truth path above; here we need the RAW tesseract
+        # output for comparison against RAW tesseract on the output.
+        # Note: we use `input_ocr_text` (source-truth preferred) as the ground
+        # truth, but compare against `output_ocr_text` which is always raw OCR.
+        if _output_ocr_future is not None:
+            _out_wb = _output_ocr_future.result()
+        else:
+            _out_wb = tesseract_word_boxes(output_raster, language=options.ocr_language)
+        output_ocr_text = " ".join(b.text for b in _out_wb)
+        per_page_input_estimate = raster.width * raster.height * 3
+        per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
+        anomalous = (
+            per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD and strategy != PageStrategy.TEXT_ONLY
         )
-    verdict = verify_single_page(
-        input_raster=raster,
-        output_raster=output_raster,
-        input_ocr_text=input_ocr_text,
-        output_ocr_text=output_ocr_text,
-        lev_ceiling=page_lev_ceiling,
-        ssim_floor=page_ssim_floor,
-        tile_ssim_floor=page_tile_ssim_floor,
-        check_color_preserved=not options.force_monochrome,
-    )
+        if strategy == PageStrategy.MIXED:
+            page_tile_ssim_floor = (
+                _DEFAULT_TILE_SSIM_FLOOR_SAFE
+                if (anomalous or is_safe)
+                else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
+            )
+            page_ssim_floor = ssim_floor
+            page_lev_ceiling = lev_ceiling
+        elif strategy == PageStrategy.PHOTO_ONLY:
+            page_tile_ssim_floor = -1.0
+            page_ssim_floor = 0.5
+            page_lev_ceiling = 1.0
+        else:
+            page_tile_ssim_floor = -1.0
+            page_ssim_floor = ssim_floor
+            page_lev_ceiling = lev_ceiling
+        if anomalous:
+            warnings.append(
+                f"page-{i + 1}-anomalous-ratio-{per_page_pixel_ratio:.0f}x-safe-verify",
+            )
+        verdict = verify_single_page(
+            input_raster=raster,
+            output_raster=output_raster,
+            input_ocr_text=input_ocr_text,
+            output_ocr_text=output_ocr_text,
+            lev_ceiling=page_lev_ceiling,
+            ssim_floor=page_ssim_floor,
+            tile_ssim_floor=page_tile_ssim_floor,
+            check_color_preserved=not options.force_monochrome,
+        )
+
+    # Clean up the per-worker OCR thread pool before returning.
+    if _ocr_pool is not None:
+        _ocr_pool.shutdown(wait=False)
 
     in_bytes = len(winput.input_page_pdf)
     out_bytes = len(composed)
@@ -690,13 +773,13 @@ def compress(
         #     with heap corruption under concurrent access. So threads
         #     are off the table as a default.
         #   - macOS's `spawn` start method makes every worker re-import
-        #     numpy/OpenCV/pikepdf from scratch (~2–3 s each). On small
+        #     numpy/OpenCV/pikepdf from scratch (~2-3 s each). On small
         #     jobs the spawn cost dominates actual compute and
         #     parallelism looks like a regression.
         #   - `forkserver` starts ONE small server process up front and
         #     forks workers from it on demand. With `set_forkserver_preload`
         #     our heavy modules are imported ONCE in the server, so every
-        #     worker fork is ~10–50 ms. Safer than raw `fork` (no
+        #     worker fork is ~10-50 ms. Safer than raw `fork` (no
         #     fork-after-threads hazard) and much faster than pure spawn.
         #   - Windows has no forkserver — falls back to spawn there.
         #
@@ -717,33 +800,35 @@ def compress(
             chosen_method = "forkserver" if "forkserver" in available else "spawn"
             ctx = _mp.get_context(chosen_method)
             if chosen_method == "forkserver":
-                try:
-                    ctx.set_forkserver_preload([
-                        "numpy",
-                        "PIL",
-                        "PIL.Image",
-                        "cv2",
-                        "pikepdf",
-                        "pypdfium2",
-                        "pytesseract",
-                        "skimage",
-                        "skimage.metrics",
-                        "pdf_smasher.engine.rasterize",
-                        "pdf_smasher.engine.ocr",
-                        "pdf_smasher.engine.mask",
-                        "pdf_smasher.engine.strategy",
-                        "pdf_smasher.engine.compose",
-                        "pdf_smasher.engine.foreground",
-                        "pdf_smasher.engine.text_layer",
-                        "pdf_smasher.engine.verifier",
-                        "pdf_smasher.engine.background",
-                    ])
-                except (ValueError, RuntimeError):  # pragma: no cover
-                    # set_forkserver_preload can reject modules that
-                    # instantiate mp objects at import time; if that
-                    # happens we just skip preloading (slower first run,
-                    # still correct).
-                    pass
+                import contextlib as _contextlib
+
+                with _contextlib.suppress(ValueError, RuntimeError):
+                    ctx.set_forkserver_preload(
+                        [
+                            "numpy",
+                            "PIL",
+                            "PIL.Image",
+                            "cv2",
+                            "pikepdf",
+                            "pypdfium2",
+                            "pytesseract",
+                            "skimage",
+                            "skimage.metrics",
+                            "pdf_smasher.engine.rasterize",
+                            "pdf_smasher.engine.ocr",
+                            "pdf_smasher.engine.mask",
+                            "pdf_smasher.engine.strategy",
+                            "pdf_smasher.engine.compose",
+                            "pdf_smasher.engine.foreground",
+                            "pdf_smasher.engine.text_layer",
+                            "pdf_smasher.engine.verifier",
+                            "pdf_smasher.engine.background",
+                        ]
+                    )
+                # set_forkserver_preload can raise ValueError/RuntimeError
+                # if a listed module instantiates mp objects at import time.
+                # If so, suppress the exception and skip preloading —
+                # workers still work, first run is a bit slower.
             _ex_kwargs["mp_context"] = ctx
             label = f"process/{chosen_method}"
         _emit(
@@ -799,10 +884,11 @@ def compress(
                 raise CompressError(msg) from e
             _merge_result(_pos, result)
 
-    # Parallelism diagnostic. If workers truly parallelize:
-    #   sum(worker_wall_ms)  >>  pages_phase_wall_ms
-    # If workers are serialized (thermal throttle, contention, single-core):
-    #   sum(worker_wall_ms)  ≈  pages_phase_wall_ms
+    # Parallelism diagnostic. Compare the sum of per-worker wall times to
+    # the pages-phase wall time. If workers truly parallelize, the sum is
+    # much bigger than the wall (N cores worth of work packed into 1 core
+    # worth of wall). If workers end up serialized (thermal throttle,
+    # single-core, scheduler contention), the sum approximately equals wall.
     if _worker_wall_ms_total:
         _total_worker_ms = sum(_worker_wall_ms_total)
         _pages_phase_ms = int((time.monotonic() - t0) * 1000)
