@@ -612,13 +612,26 @@ Phase 2b adds the following per-page and per-job counters / warnings:
 
 #### 8.5.1 Stderr-only CLI warnings (not part of CompressReport.warnings)
 
-The CLI chunk writer prints the following to **stderr** when `--max-output-mb` is set and `--quiet` is not. These are human-readable diagnostics only; they are not appended to `CompressReport.warnings` (the chunk split happens in the CLI after `compress()` has already returned):
+The CLI prints the following to **stderr** when `--quiet` is not set. These are human-readable diagnostics only; they are not appended to `CompressReport.warnings` (the CLI wraps `compress()` so these come from the CLI layer, not the library).
 
-- `warning: N chunk(s) exceed the cap because they contain a single oversize page: [names]` — emitted when one or more emitted `{base}_NNN{ext}` chunks exceed `--max-output-mb` because an individual page is larger than the cap. Cannot be split further; emitted alone.
-- `warning: N stale chunk file(s) from a previous run remain in {dir}: [names]` — emitted when pre-existing `{base}_NNN{ext}` files with a zero-padded 3-digit index greater than the new chunk count remain in the output directory. The new run does not overwrite them (different indices). User must remove manually.
-- `warning: --max-output-mb applies only to PDF output; ignored in image-export mode` — emitted when `--max-output-mb` is combined with an image-export format.
-- `warning: --max-output-mb is ignored when -o - (stdout); wrote merged output` — emitted when `--max-output-mb` is combined with `-o -`.
-- `warning: --output-format X overrides the .Y extension; …` — emitted when the user's `--output-format` contradicts the `-o` file extension.
+Every stderr warning line starts with `[hankpdf] warning [CODE]:` and every stderr error line starts with `[hankpdf] error [CODE]:` so batch scripts can grep by code without depending on exact English wording:
+
+```
+grep -F "[W-CHUNKS-EXCEED-CAP]" job.log   # portable + stable across releases
+```
+
+Stable codes (see `pdf_smasher/cli/warning_codes.py` — the `CliWarningCode` Literal is the source of truth):
+
+- `W-MAX-OUTPUT-MB-IMAGE-MODE` — `--max-output-mb` is combined with an image-export format. The flag is PDF-only; image-export mode ignores it.
+- `W-MAX-OUTPUT-MB-STDOUT` — `--max-output-mb` is combined with `-o -` (stdout) AND the merged output exceeds the cap. Stdout can't be split; the merged bytes are emitted.
+- `W-OUTPUT-FORMAT-EXTENSION-OVERRIDE` — `--output-format` contradicts the `-o` file extension. The output-format flag wins.
+- `W-CHUNKS-EXCEED-CAP` — one or more emitted `{base}_NNN{ext}` chunks exceed `--max-output-mb` because an individual page is larger than the cap. Cannot be split further; emitted alone.
+- `W-STALE-CHUNK-FILES` — pre-existing `{base}_NNN{ext}` files with an index greater than the new chunk count remain in the output directory. The new run does NOT overwrite them (different indices). User must remove manually. **This warning is NOT suppressed by `--quiet`** — it affects correctness of downstream automation (cron jobs that glob `{base}_*.pdf`).
+- `W-SINGLE-CHUNK-OVERSIZE` — single-chunk output exceeds the `--max-output-mb` cap because the PDF contains a single oversize page. Cannot be split further; the oversize output was retained.
+- `W-VERIFIER-SKIPPED` — the content-preservation verifier was SKIPPED (default). Output was NOT content-checked against input. Use `--verify` to enable.
+- `W-VERIFIER-FAILED` — the verifier flagged drift but the job was configured to warn instead of abort (via `--accept-drift` or `--mode fast`).
+- `W-IMAGE-EXPORT-PARTIAL-FAILURE` — image-export mode failed mid-way through a multi-page export. Emitted alongside the list of pages written before the failure. Exit code depends on the underlying cause (`EXIT_MALICIOUS=14`, `EXIT_DECOMPRESSION_BOMB=16`, `EXIT_ENGINE_ERROR=30`).
+- `W-CHUNK-WRITE-PARTIAL-FAILURE` — chunk write failed mid-way (disk full / permission / path error). Exit code `EXIT_ENGINE_ERROR=30`.
 
 ## 10. Build matrix
 

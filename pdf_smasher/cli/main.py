@@ -30,6 +30,8 @@ from pdf_smasher import (
     compress,
     triage,
 )
+from pdf_smasher.cli.warning_codes import emit as _warn
+from pdf_smasher.cli.warning_codes import emit_error as _warn_error
 from pdf_smasher.engine.chunking import split_pdf_by_size
 from pdf_smasher.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
 from pdf_smasher.utils.text import format_page_list_short
@@ -450,8 +452,11 @@ def _run_image_export(
     # loudly rather than silently ignore.
     if args.max_output_mb is not None and not args.quiet:
         print(
-            "[hankpdf] warning: --max-output-mb applies only to PDF "
-            "output; ignored in image-export mode",
+            _warn(
+                "W-MAX-OUTPUT-MB-IMAGE-MODE",
+                "--max-output-mb applies only to PDF output; "
+                "ignored in image-export mode",
+            ),
             file=sys.stderr,
         )
 
@@ -618,8 +623,11 @@ def _run_image_export(
                         )
             except MaliciousPDFError as exc:
                 print(
-                    f"[hankpdf] error: image export failed after writing "
-                    f"{len(written_paths)}/{n} pages: {exc}",
+                    _warn_error(
+                        "W-IMAGE-EXPORT-PARTIAL-FAILURE",
+                        f"image export failed after writing "
+                        f"{len(written_paths)}/{n} pages: {exc}",
+                    ),
                     file=sys.stderr,
                 )
                 if written_paths:
@@ -631,8 +639,11 @@ def _run_image_export(
                 return EXIT_MALICIOUS
             except DecompressionBombError as exc:
                 print(
-                    f"[hankpdf] error: image export failed after writing "
-                    f"{len(written_paths)}/{n} pages: {exc}",
+                    _warn_error(
+                        "W-IMAGE-EXPORT-PARTIAL-FAILURE",
+                        f"image export failed after writing "
+                        f"{len(written_paths)}/{n} pages: {exc}",
+                    ),
                     file=sys.stderr,
                 )
                 if written_paths:
@@ -644,8 +655,11 @@ def _run_image_export(
                 return EXIT_DECOMPRESSION_BOMB
             except (RuntimeError, CompressError) as exc:
                 print(
-                    f"[hankpdf] error: image export failed after writing "
-                    f"{len(written_paths)}/{n} pages: {exc}",
+                    _warn_error(
+                        "W-IMAGE-EXPORT-PARTIAL-FAILURE",
+                        f"image export failed after writing "
+                        f"{len(written_paths)}/{n} pages: {exc}",
+                    ),
                     file=sys.stderr,
                 )
                 if written_paths:
@@ -742,10 +756,12 @@ def main(argv: list[str] | None = None) -> int:
             and not args.quiet
         ):
             print(
-                f"[hankpdf] warning: --output-format {resolved_format} "
-                f"overrides the .{o_ext} extension; output will be "
-                f"written as {resolved_format} regardless of the "
-                "filename suffix",
+                _warn(
+                    "W-OUTPUT-FORMAT-EXTENSION-OVERRIDE",
+                    f"--output-format {resolved_format} overrides the "
+                    f".{o_ext} extension; output will be written as "
+                    f"{resolved_format} regardless of the filename suffix",
+                ),
                 file=sys.stderr,
             )
 
@@ -856,7 +872,11 @@ def main(argv: list[str] | None = None) -> int:
         # Stdout: can't split; always write the merged bytes.
         if args.max_output_mb is not None and len(output_bytes) > args.max_output_mb * 1024 * 1024:
             print(
-                "warning: --max-output-mb is ignored when -o - (stdout); wrote merged output",
+                _warn(
+                    "W-MAX-OUTPUT-MB-STDOUT",
+                    "--max-output-mb is ignored when -o - (stdout); "
+                    "wrote merged output",
+                ),
                 file=sys.stderr,
             )
         sys.stdout.buffer.write(output_bytes)
@@ -875,11 +895,14 @@ def main(argv: list[str] | None = None) -> int:
                 # — same condition the multi-chunk branch warns about.
                 if len(chunks[0]) > max_bytes and not args.quiet:
                     print(
-                        "[hankpdf] warning: output exceeds --max-output-mb "
-                        f"cap ({len(chunks[0]) / (1024 * 1024):.2f} MB > "
-                        f"{args.max_output_mb:.3f} MB). Single-page PDFs "
-                        "cannot be split further; the oversize output was "
-                        "retained.",
+                        _warn(
+                            "W-SINGLE-CHUNK-OVERSIZE",
+                            f"output exceeds --max-output-mb cap "
+                            f"({len(chunks[0]) / (1024 * 1024):.2f} MB > "
+                            f"{args.max_output_mb:.3f} MB). Single-page "
+                            "PDFs cannot be split further; the oversize "
+                            "output was retained.",
+                        ),
                         file=sys.stderr,
                     )
             else:
@@ -920,8 +943,11 @@ def main(argv: list[str] | None = None) -> int:
                     # tell the operator explicitly rather than leaving a
                     # raw OSError traceback.
                     print(
-                        f"[hankpdf] error: chunk write failed after "
-                        f"{len(written_paths)}/{len(chunks)} chunks: {exc}",
+                        _warn_error(
+                            "W-CHUNK-WRITE-PARTIAL-FAILURE",
+                            f"chunk write failed after "
+                            f"{len(written_paths)}/{len(chunks)} chunks: {exc}",
+                        ),
                         file=sys.stderr,
                     )
                     if written_paths:
@@ -941,18 +967,24 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     if oversize:
                         print(
-                            f"[hankpdf] warning: {len(oversize)} chunk(s) exceed "
-                            "the cap because they contain a single oversize page: "
-                            f"{[p.name for p in oversize]}",
+                            _warn(
+                                "W-CHUNKS-EXCEED-CAP",
+                                f"{len(oversize)} chunk(s) exceed the cap "
+                                "because they contain a single oversize "
+                                f"page: {[p.name for p in oversize]}",
+                            ),
                             file=sys.stderr,
                         )
                     if stale:
                         stale_names = sorted(p.name for p in stale)
                         print(
-                            f"[hankpdf] warning: {len(stale)} stale chunk "
-                            f"file(s) from a previous run remain in {parent}: "
-                            f"{stale_names}. Remove them manually if they no "
-                            "longer belong to this output.",
+                            _warn(
+                                "W-STALE-CHUNK-FILES",
+                                f"{len(stale)} stale chunk file(s) from a "
+                                f"previous run remain in {parent}: "
+                                f"{stale_names}. Remove them manually if "
+                                "they no longer belong to this output.",
+                            ),
                             file=sys.stderr,
                         )
 
@@ -965,15 +997,21 @@ def main(argv: list[str] | None = None) -> int:
         v_status = report.verifier.status
         if v_status == "skipped":
             print(
-                "[hankpdf] warning: content-preservation verifier was "
-                "SKIPPED (default). Output was NOT content-checked "
-                "against input. Use --verify to enable.",
+                _warn(
+                    "W-VERIFIER-SKIPPED",
+                    "content-preservation verifier was SKIPPED (default). "
+                    "Output was NOT content-checked against input. "
+                    "Use --verify to enable.",
+                ),
                 file=sys.stderr,
             )
         elif v_status == "fail":
             print(
-                "[hankpdf] warning: content-preservation verifier FAILED "
-                f"on {len(report.verifier.failing_pages)} page(s)",
+                _warn(
+                    "W-VERIFIER-FAILED",
+                    "content-preservation verifier FAILED on "
+                    f"{len(report.verifier.failing_pages)} page(s)",
+                ),
                 file=sys.stderr,
             )
 
