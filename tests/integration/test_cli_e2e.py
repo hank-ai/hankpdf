@@ -48,7 +48,8 @@ def _make_pdf(tmp_path, text: str = "HELLO WORLD") -> object:  # type: ignore[no
 def test_cli_end_to_end_happy_path(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
     in_path = _make_pdf(tmp_path, text="SEARCHABLE TEXT")
     out_path = tmp_path / "out.pdf"
-    rc = main([str(in_path), "-o", str(out_path)])
+    # --ocr: searchable text layer is opt-in (defaults off for speed).
+    rc = main([str(in_path), "-o", str(out_path), "--ocr"])
     assert rc == 0
     assert out_path.exists()
     assert out_path.stat().st_size > 0

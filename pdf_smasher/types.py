@@ -40,8 +40,11 @@ class CompressOptions:
     legal_codec_profile: str | None = None
     target_pdf_a: bool = False
 
-    # OCR behavior
-    ocr: bool = True
+    # OCR behavior. Off by default — OCR roughly doubles wall time (verifier
+    # runs Tesseract on input + output rasters regardless, but writing an
+    # embedded text layer to the output is opt-in). Pass --ocr / ocr=True to
+    # produce a searchable output.
+    ocr: bool = False
     ocr_language: str = "eng"
 
     # Safety / behavior gates
@@ -127,7 +130,9 @@ class ProgressEvent:
     current: int = 0  # 1-indexed page number during per-page phases
     total: int = 0  # total page count
     strategy: str | None = None  # for page_start / page_done
-    ratio: float | None = None  # for page_done (per-page ratio estimate)
+    ratio: float | None = None  # for page_done: true per-page file ratio
+    input_bytes: int | None = None  # for page_done: this page's size in the input PDF
+    output_bytes: int | None = None  # for page_done: this page's size in the output PDF
     verifier_passed: bool | None = None  # for page_done
 
 

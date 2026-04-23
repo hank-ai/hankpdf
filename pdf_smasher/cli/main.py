@@ -92,8 +92,8 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # OCR
-    p.add_argument("--ocr", dest="ocr", action="store_true", default=True)
+    # OCR — off by default. --ocr embeds a searchable text layer (adds ~5s/pg).
+    p.add_argument("--ocr", dest="ocr", action="store_true", default=False)
     p.add_argument("--no-ocr", dest="ocr", action="store_false")
     p.add_argument("--ocr-language", default="eng")
 
@@ -320,18 +320,20 @@ def main(argv: list[str] | None = None) -> int:
             _bar.set_postfix_str(f"rasterizing p{event.current}")
         elif event.phase == "page_done" and _bar is not None:
             tag = "pass" if event.verifier_passed else "FAIL"
-            _bar.set_postfix_str(
-                f"{event.strategy} {event.ratio:.1f}x {tag}"
-                if event.ratio is not None
-                else event.strategy or "",
+            ratio_str = f"{event.ratio:.2f}x" if event.ratio else "?x"
+            byte_str = (
+                f"{event.input_bytes // 1024}→{event.output_bytes // 1024}KB"
+                if event.input_bytes and event.output_bytes
+                else ""
             )
+            _bar.set_postfix_str(f"{event.strategy} {byte_str} {ratio_str} {tag}")
             _bar.update(1)
             # On failure, tqdm.write a permanent line above the bar so the
             # user can see *which* page failed without losing the bar.
             if event.verifier_passed is False:
                 _bar.write(
                     f"  ⚠ page {event.current}/{event.total} "
-                    f"({event.strategy}, ratio {event.ratio:.1f}x): verifier FAIL",
+                    f"({event.strategy}, {byte_str} {ratio_str}): verifier FAIL",
                 )
         elif event.phase == "merge_start":
             if _bar is not None:

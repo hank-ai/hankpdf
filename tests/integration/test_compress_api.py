@@ -86,7 +86,8 @@ def test_compress_report_fields_populated() -> None:
 @pytest.mark.integration
 def test_compress_preserves_text_searchability() -> None:
     pdf_in = _make_fake_scan(["SEARCHABLE"])
-    pdf_out, _ = compress(pdf_in)
+    # ocr=True: embedding a searchable text layer is opt-in (defaults off).
+    pdf_out, _ = compress(pdf_in, options=CompressOptions(ocr=True))
     pdf = pdfium.PdfDocument(pdf_out)
     try:
         tp = pdf[0].get_textpage()

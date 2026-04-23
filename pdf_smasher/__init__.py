@@ -195,6 +195,8 @@ def compress(
         total: int = 0,
         strategy: str | None = None,
         ratio: float | None = None,
+        input_bytes: int | None = None,
+        output_bytes: int | None = None,
         verifier_passed: bool | None = None,
     ) -> None:
         if progress_callback is not None:
@@ -206,6 +208,8 @@ def compress(
                     total=total,
                     strategy=strategy,
                     ratio=ratio,
+                    input_bytes=input_bytes,
+                    output_bytes=output_bytes,
                     verifier_passed=verifier_passed,
                 ),
             )
@@ -315,6 +319,23 @@ def compress(
             page_sizes.append((float(w), float(h)))
     finally:
         pdf_dims.close()
+
+    # Measure per-page input bytes by splitting the source PDF. This is
+    # an extra pikepdf pass but gives us honest per-page compression
+    # ratios (real input_bytes/output_bytes per page, not the pixel-count
+    # anomaly signal we use internally). Only measure selected pages to
+    # save work when --pages is used.
+    input_page_bytes: dict[int, int] = {}
+    with pikepdf.open(io.BytesIO(input_data)) as _src_split:
+        for i in _selected_indices:
+            _single = pikepdf.new()
+            try:
+                _single.pages.append(_src_split.pages[i])
+                _buf = io.BytesIO()
+                _single.save(_buf, linearize=False)
+                input_page_bytes[i] = len(_buf.getvalue())
+            finally:
+                _single.close()
 
     lev_ceiling = 0.02 if is_safe else 0.05
     ssim_floor = 0.92
@@ -514,15 +535,20 @@ def compress(
                 del raster, output_raster, input_ocr_text, output_ocr_text
                 page_pdfs.append(composed)
                 strategy_counts[strategy.name.lower()] += 1
+                _in_bytes = input_page_bytes.get(i, 0)
+                _out_bytes = len(composed)
+                _true_ratio = _in_bytes / max(1, _out_bytes) if _in_bytes else 0.0
                 _emit(
                     "page_done",
                     f"page {i + 1}/{tri.pages} done: strategy={strategy.name.lower()}, "
-                    f"ratio={per_page_ratio:.1f}x, "
+                    f"{_in_bytes:,}→{_out_bytes:,} bytes ({_true_ratio:.2f}x), "
                     f"verifier={'pass' if per_page_verdict.passed else 'fail'}",
                     current=_pos,
                     total=len(_selected_indices),
                     strategy=strategy.name.lower(),
-                    ratio=per_page_ratio,
+                    ratio=_true_ratio,
+                    input_bytes=_in_bytes,
+                    output_bytes=_out_bytes,
                     verifier_passed=per_page_verdict.passed,
                 )
 
