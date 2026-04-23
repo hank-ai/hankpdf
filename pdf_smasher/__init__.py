@@ -154,6 +154,10 @@ class _PageResult:
     input_bytes: int
     output_bytes: int
     ratio: float
+    # Wall-clock time INSIDE the worker. Compare sum(worker_wall_ms) vs total
+    # parent wall to diagnose parallelism: if parallel, sum >> wall; if
+    # serial/contention, sum ≈ wall.
+    worker_wall_ms: int = 0
 
 
 def _mrc_compose(
@@ -232,6 +236,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         verify_single_page,
     )
 
+    _worker_t0 = time.monotonic()
     i = winput.page_index
     total = winput.total_pages
     width_pt, height_pt = winput.page_size
@@ -406,6 +411,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         input_bytes=in_bytes,
         output_bytes=out_bytes,
         ratio=true_ratio,
+        worker_wall_ms=int((time.monotonic() - _worker_t0) * 1000),
     )
 
 
@@ -630,17 +636,20 @@ def compress(
     # regardless of completion order (matters when parallel).
     page_pdfs_by_index: dict[int, bytes] = {}
 
+    _worker_wall_ms_total: list[int] = []
+
     def _merge_result(pos: int, result: _PageResult) -> None:
         """Accumulate a worker result into parent state + emit page_done."""
         page_pdfs_by_index[result.page_index] = result.composed_bytes
         warnings_list.extend(result.per_page_warnings)
         verifier_agg.merge(result.page_index, result.verdict)
         strategy_counts[result.strategy_name] += 1
+        _worker_wall_ms_total.append(result.worker_wall_ms)
         _emit(
             "page_done",
             f"page {result.page_index + 1}/{tri.pages} done: strategy={result.strategy_name}, "
             f"{result.input_bytes:,}→{result.output_bytes:,} bytes "
-            f"({result.ratio:.2f}x), "
+            f"({result.ratio:.2f}x), worker={result.worker_wall_ms}ms, "
             f"verifier={'pass' if result.verdict.passed else 'fail'}",
             current=pos,
             total=len(_selected_indices),
@@ -789,6 +798,22 @@ def compress(
                 msg = _page_error_context(w.page_index, e)
                 raise CompressError(msg) from e
             _merge_result(_pos, result)
+
+    # Parallelism diagnostic. If workers truly parallelize:
+    #   sum(worker_wall_ms)  >>  pages_phase_wall_ms
+    # If workers are serialized (thermal throttle, contention, single-core):
+    #   sum(worker_wall_ms)  ≈  pages_phase_wall_ms
+    if _worker_wall_ms_total:
+        _total_worker_ms = sum(_worker_wall_ms_total)
+        _pages_phase_ms = int((time.monotonic() - t0) * 1000)
+        _efficiency = _total_worker_ms / max(1, _pages_phase_ms)
+        _emit(
+            "triage",
+            f"parallelism: sum(worker)={_total_worker_ms}ms, wall={_pages_phase_ms}ms, "
+            f"efficiency={_efficiency:.2f}x "
+            f"(ideal={len(_worker_wall_ms_total)}x if fully parallel, "
+            f"1.0x = no parallelism)",
+        )
 
     # Merge pages in original order (matters when parallel completes out of order).
     page_pdfs: list[bytes] = [page_pdfs_by_index[i] for i in sorted(_selected_indices)]
