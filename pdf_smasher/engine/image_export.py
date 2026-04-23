@@ -43,6 +43,12 @@ _WEBP_METHOD_DEFAULT = 4
 # per pixel this is the maximum unsigned 32-bit allocation we allow.
 _MAX_BOMB_PIXELS = 2 * 1024 * 1024 * 1024 // 3
 
+# Library-level DPI cap. The CLI enforces this via _positive_dpi argparse
+# type, but library callers (programmatic use) were previously unbounded —
+# dpi=99999 on a letter page is a 600k-pixel-wide raster. Keep in sync with
+# cli.main._MAX_IMAGE_DPI (which is imported from here).
+_MAX_IMAGE_DPI_LIB = 1200
+
 
 def iter_pages_as_images(
     pdf_bytes: bytes,
@@ -71,10 +77,10 @@ def iter_pages_as_images(
     Raises
     ------
     ValueError
-        If ``image_format`` is not recognized. This is raised at call
-        time (before the generator object is returned), so callers that
-        pass a bad format see the error immediately, not only once they
-        try to iterate.
+        If ``image_format`` is not recognized or ``dpi`` exceeds the
+        library cap ``_MAX_IMAGE_DPI_LIB``. Raised at call time (before
+        the generator is returned), so callers that pass bad values see
+        the error immediately, not only once they iterate.
     DecompressionBombError
         If a page's pixel budget would exceed the bomb cap. Raised
         BEFORE pdfium allocates, so huge pages never touch RAM.
@@ -85,6 +91,16 @@ def iter_pages_as_images(
     """
     if image_format not in _SUPPORTED_FORMATS:
         msg = f"image_format must be one of {_SUPPORTED_FORMATS}; got {image_format!r}"
+        raise ValueError(msg)
+    if dpi < 1:
+        msg = f"dpi must be >= 1 (got {dpi})"
+        raise ValueError(msg)
+    if dpi > _MAX_IMAGE_DPI_LIB:
+        msg = (
+            f"dpi {dpi} exceeds the library cap of {_MAX_IMAGE_DPI_LIB}. "
+            "Higher values can exceed addressable memory on realistic "
+            "page sizes."
+        )
         raise ValueError(msg)
 
     return _iter_pages_impl(

@@ -31,9 +31,12 @@ from pdf_smasher import (
     triage,
 )
 from pdf_smasher.engine.chunking import split_pdf_by_size
-from pdf_smasher.engine.image_export import iter_pages_as_images
+from pdf_smasher.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
 
-_MAX_IMAGE_DPI = 1200  # 300 archival + 4x headroom; above this = OOM risk
+# Keep CLI cap in lockstep with the library cap (which is the real
+# enforcer). The CLI layer just fails fast with a nicer argparse
+# message instead of raising ValueError deep inside the generator.
+_MAX_IMAGE_DPI = _MAX_IMAGE_DPI_LIB
 _MAX_PAGES_RANGE = 1_000_000  # cap --pages "lo-hi" span to prevent DoS via
 # set(range(1, 10**11)) materialization — see DCR Wave 1.
 

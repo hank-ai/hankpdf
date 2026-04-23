@@ -322,3 +322,21 @@ def test_pre_allocation_pixel_budget_check() -> None:
                 _simulate_huge_page_for_test=True,
             )
         )
+
+
+def test_iter_pages_rejects_excessive_dpi_at_library_level() -> None:
+    """Library callers must not bypass the --image-dpi cap.
+
+    The CLI enforces --image-dpi <= 1200 at argparse time, but library
+    callers of iter_pages_as_images previously got no cap at all.
+    """
+    pdf_bytes = _make_pdf(1)
+    with pytest.raises(ValueError, match=r"dpi|cap"):
+        list(
+            iter_pages_as_images(
+                pdf_bytes,
+                page_indices=[0],
+                image_format="jpeg",
+                dpi=5000,  # above the 1200 cap
+            )
+        )
