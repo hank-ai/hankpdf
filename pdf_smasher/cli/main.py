@@ -32,6 +32,7 @@ from pdf_smasher import (
 )
 from pdf_smasher.engine.chunking import split_pdf_by_size
 from pdf_smasher.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
+from pdf_smasher.utils.text import format_page_list_short
 
 # Keep CLI cap in lockstep with the library cap (which is the real
 # enforcer). The CLI layer just fails fast with a nicer argparse
@@ -482,7 +483,8 @@ def _run_image_export(
         out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]
         if out_of_range:
             print(
-                f"error: --pages requested {sorted(out_of_range)} but input has {tri.pages} pages",
+                f"error: --pages requested {format_page_list_short(out_of_range)} "
+                f"but input has {tri.pages} pages",
                 file=sys.stderr,
             )
             return EXIT_USAGE

@@ -42,6 +42,7 @@ from pdf_smasher.types import (
     TriageReport,
     VerifierResult,
 )
+from pdf_smasher.utils.text import format_page_list_short
 
 __all__ = [
     "CertifiedSignatureError",
@@ -650,7 +651,10 @@ def compress(
             raise CompressError(msg)
         out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]
         if out_of_range:
-            msg = f"only_pages requested {sorted(out_of_range)} but input has {tri.pages} pages"
+            msg = (
+                f"only_pages requested {format_page_list_short(out_of_range)} "
+                f"but input has {tri.pages} pages"
+            )
             raise CompressError(msg)
         # Convert to 0-indexed set for internal use, keep sorted order for output.
         _selected_indices = sorted(p - 1 for p in only_pages)
