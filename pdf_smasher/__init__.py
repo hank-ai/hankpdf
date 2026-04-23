@@ -181,6 +181,50 @@ def _format_verifier_failing_pages(ids: tuple[int, ...], limit: int = 10) -> str
     return f"{','.join(str(n) for n in head)}+{remaining}"
 
 
+def _build_passthrough_report(
+    input_data: bytes,
+    pages: int,
+    wall_ms: int,
+    reason: str,
+    warning_code: str,
+) -> CompressReport:
+    """Construct a CompressReport for a passthrough return (input unchanged).
+
+    Used by :func:`compress` when one of the ``CompressOptions`` thresholds
+    (min_input_mb, min_ratio) short-circuits the pipeline — the output
+    equals the input, verifier is marked "skipped" (nothing to compare),
+    and a kebab-case warning code names the specific gate that tripped.
+    """
+    import hashlib
+
+    sha = hashlib.sha256(input_data).hexdigest()
+    return CompressReport(
+        status="passed_through",
+        exit_code=2,  # EXIT_NOOP_PASSTHROUGH per cli.main
+        input_bytes=len(input_data),
+        output_bytes=len(input_data),
+        ratio=1.0,
+        pages=pages,
+        wall_time_ms=wall_ms,
+        engine="mrc",
+        engine_version=__engine_version__,
+        verifier=VerifierResult(
+            status="skipped",
+            ocr_levenshtein=0.0,
+            ssim_global=0.0,
+            ssim_min_tile=0.0,
+            digit_multiset_match=False,
+            structural_match=False,
+            color_preserved=False,
+        ),
+        input_sha256=sha,
+        output_sha256=sha,  # same bytes → same hash
+        canonical_input_sha256=None,
+        warnings=(warning_code,),
+        reason=reason,
+    )
+
+
 def _enforce_input_policy(
     tri: TriageReport,
     options: CompressOptions,
@@ -713,6 +757,26 @@ def compress(
     )
 
     _enforce_input_policy(tri, options, input_data)
+
+    # --- Passthrough: min_input_mb floor ---
+    # If the input is below the configured minimum size, return it
+    # unchanged. The MRC pipeline's per-page overhead (~2-3 s/page even
+    # in --mode fast) isn't worth the ratio gain on small files; batch
+    # operators set this to skip anything already below their quota.
+    # Must fire BEFORE the expensive pdfium open / page-split phase.
+    input_mb = len(input_data) / (1024 * 1024)
+    if options.min_input_mb > 0 and input_mb < options.min_input_mb:
+        wall_ms = int((time.monotonic() - t0) * 1000)
+        reason = (
+            f"input {input_mb:.3f} MB below min_input_mb={options.min_input_mb} MB"
+        )
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=wall_ms,
+            reason=reason,
+            warning_code="passthrough-min-input-mb",
+        )
 
     # --- Per-page recompress ---
     source_dpi = 200 if options.mode == "fast" else 300
