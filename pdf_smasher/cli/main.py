@@ -38,6 +38,25 @@ _MAX_PAGES_RANGE = 1_000_000  # cap --pages "lo-hi" span to prevent DoS via
 # set(range(1, 10**11)) materialization — see DCR Wave 1.
 
 
+def _positive_float(raw: str) -> float:
+    """argparse type for flags that must be > 0 (like --max-output-mb).
+
+    Without this, `--max-output-mb 0` passes argparse, propagates through
+    the full compress pipeline, and only crashes at the very end when
+    split_pdf_by_size rejects max_bytes <= 0. Failing fast at parse time
+    keeps the error local to the CLI flag the user got wrong.
+    """
+    try:
+        f = float(raw)
+    except ValueError as e:
+        msg = f"invalid float: {raw!r}"
+        raise argparse.ArgumentTypeError(msg) from e
+    if f <= 0:
+        msg = f"--max-output-mb must be > 0 (got {f})"
+        raise argparse.ArgumentTypeError(msg)
+    return f
+
+
 def _positive_dpi(raw: str) -> int:
     """argparse type for --image-dpi. Reject unreasonably large or
     non-positive values that would trigger a memory-exhaustion DoS in
@@ -139,7 +158,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--max-input-mb", type=float, default=2000.0)
     p.add_argument(
         "--max-output-mb",
-        type=float,
+        type=_positive_float,
         default=None,
         help=(
             "Cap the output PDF size. If the compressed output exceeds this "

@@ -76,3 +76,30 @@ def test_chunked_output_warns_on_stale_siblings(tmp_path, capsys) -> None:  # ty
     assert "stale" in err.lower(), (
         f"expected 'stale' in stderr warning; got: {err!r}"
     )
+
+
+@pytest.mark.integration
+def test_max_output_mb_zero_rejected_at_parse_time(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """--max-output-mb 0 is nonsense. argparse must reject at parse time
+    via the _positive_float type validator (exits SystemExit(2)) rather
+    than crashing at the end of a full pipeline run when
+    split_pdf_by_size tries to build chunks for max_bytes=0.
+    """
+    in_path = _make_big_pdf(tmp_path, n_pages=1)
+    out_path = tmp_path / "out.pdf"
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(in_path), "-o", str(out_path), "--max-output-mb", "0"])
+    assert exc_info.value.code == 2, (
+        f"expected SystemExit(2) from argparse, got {exc_info.value.code}"
+    )
+    err = capsys.readouterr().err
+    assert "--max-output-mb" in err
+
+
+@pytest.mark.integration
+def test_max_output_mb_negative_rejected(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    in_path = _make_big_pdf(tmp_path, n_pages=1)
+    out_path = tmp_path / "out.pdf"
+    with pytest.raises(SystemExit) as exc_info:
+        main([str(in_path), "-o", str(out_path), "--max-output-mb", "-5"])
+    assert exc_info.value.code == 2
