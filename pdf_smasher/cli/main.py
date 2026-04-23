@@ -25,6 +25,7 @@ from pdf_smasher import (
     OversizeError,
     SignedPDFError,
     __version__,
+    _enforce_input_policy,
     compress,
     triage,
 )
@@ -381,6 +382,23 @@ def _run_image_export(
     except CompressError as e:
         print(f"refused: {e}", file=sys.stderr)
         return EXIT_CORRUPT
+
+    # Enforce the same safety gates as compress(). Encrypted/signed/oversize
+    # PDFs must be refused regardless of output format.
+    try:
+        _enforce_input_policy(tri, _build_options(args), input_bytes)
+    except EncryptedPDFError as e:
+        print(f"refused: encrypted without password ({e})", file=sys.stderr)
+        return EXIT_ENCRYPTED
+    except CertifiedSignatureError as e:
+        print(f"refused: certifying signature ({e})", file=sys.stderr)
+        return EXIT_CERTIFIED_SIG
+    except SignedPDFError as e:
+        print(f"refused: signed PDF ({e})", file=sys.stderr)
+        return EXIT_SIGNED
+    except OversizeError as e:
+        print(f"refused: oversize ({e})", file=sys.stderr)
+        return EXIT_OVERSIZE
 
     if only_pages is not None:
         out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]

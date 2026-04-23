@@ -60,6 +60,7 @@ __all__ = [
     "TriageReport",
     "VerifierResult",
     "__version__",
+    "_enforce_input_policy",
     "compress",
     "compress_stream",
     "triage",
@@ -161,6 +162,40 @@ class _PageResult:
     # parent wall to diagnose parallelism: if parallel, sum >> wall; if
     # serial/contention, sum ≈ wall.
     worker_wall_ms: int = 0
+
+
+def _enforce_input_policy(
+    tri: TriageReport,
+    options: CompressOptions,
+    input_data: bytes,
+) -> None:
+    """Apply every safety gate that compress() enforces on the input.
+
+    Raises the appropriate exception from the CompressError hierarchy if
+    a gate is tripped. Both compress() and the CLI's image-export path
+    must route through this so users get the same refusal behavior
+    regardless of the chosen output format.
+    """
+    if tri.classification == "require-password" and options.password is None:
+        msg = "input is encrypted; supply CompressOptions.password"
+        raise EncryptedPDFError(msg)
+
+    if tri.is_certified_signature and not options.allow_certified_invalidation:
+        msg = "input carries a certifying signature; --allow-certified-invalidation required"
+        raise CertifiedSignatureError(msg)
+
+    if tri.is_signed and not options.allow_signed_invalidation:
+        msg = "input is signed; --allow-signed-invalidation required"
+        raise SignedPDFError(msg)
+
+    if options.max_pages is not None and tri.pages > options.max_pages:
+        msg = f"input has {tri.pages} pages; max_pages={options.max_pages}"
+        raise OversizeError(msg)
+
+    input_mb = len(input_data) / (1024 * 1024)
+    if input_mb > options.max_input_mb:
+        msg = f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb}"
+        raise OversizeError(msg)
 
 
 def _mrc_compose(
@@ -639,26 +674,7 @@ def compress(
         total=len(_selected_indices),
     )
 
-    if tri.classification == "require-password" and options.password is None:
-        msg = "input is encrypted; supply CompressOptions.password"
-        raise EncryptedPDFError(msg)
-
-    if tri.is_certified_signature and not options.allow_certified_invalidation:
-        msg = "input carries a certifying signature; --allow-certified-invalidation required"
-        raise CertifiedSignatureError(msg)
-
-    if tri.is_signed and not options.allow_signed_invalidation:
-        msg = "input is signed; --allow-signed-invalidation required"
-        raise SignedPDFError(msg)
-
-    if options.max_pages is not None and tri.pages > options.max_pages:
-        msg = f"input has {tri.pages} pages; max_pages={options.max_pages}"
-        raise OversizeError(msg)
-
-    input_mb = len(input_data) / (1024 * 1024)
-    if input_mb > options.max_input_mb:
-        msg = f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb}"
-        raise OversizeError(msg)
+    _enforce_input_policy(tri, options, input_data)
 
     # --- Per-page recompress ---
     source_dpi = 200 if options.mode == "fast" else 300

@@ -44,6 +44,37 @@ def _make_pdf(tmp_path, n_pages: int = 2):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.integration
+def test_image_export_refuses_encrypted_pdf(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Image-export must enforce the same gates as compress(): an encrypted
+    PDF without a password must be refused with EXIT_ENCRYPTED (10).
+    Regression gate: DCR Wave 1 found image-export bypassed this check."""
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    in_path = tmp_path / "enc.pdf"
+    pdf.save(in_path, encryption=pikepdf.Encryption(user="secret", owner="o"))
+    out_path = tmp_path / "out.jpg"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 10, f"expected EXIT_ENCRYPTED=10, got {rc}"
+    assert not out_path.exists()
+
+
+@pytest.mark.integration
+def test_image_export_refuses_signed_pdf(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Signed PDFs must be refused in image-export too (EXIT_SIGNED=11)."""
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(612, 792))
+    pdf.Root["/AcroForm"] = pikepdf.Dictionary(
+        SigFlags=3, Fields=pikepdf.Array([]),
+    )
+    in_path = tmp_path / "signed.pdf"
+    pdf.save(in_path)
+    out_path = tmp_path / "out.jpg"
+    rc = main([str(in_path), "-o", str(out_path)])
+    assert rc == 11, f"expected EXIT_SIGNED=11, got {rc}"
+    assert not out_path.exists()
+
+
+@pytest.mark.integration
 def test_image_export_empty_pages_spec_exits_usage_error(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
     """Empty --pages string must return EXIT_USAGE (40), not silently exit 0.
     Regression gate: DCR Wave 1 flagged that env-var-expansion producing an
