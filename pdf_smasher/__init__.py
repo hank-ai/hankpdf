@@ -814,9 +814,7 @@ def compress(
             chosen_method = "forkserver" if "forkserver" in available else "spawn"
             ctx = _mp.get_context(chosen_method)
             if chosen_method == "forkserver":
-                import contextlib as _contextlib
-
-                with _contextlib.suppress(ValueError, RuntimeError):
+                try:
                     ctx.set_forkserver_preload(
                         [
                             "numpy",
@@ -839,10 +837,16 @@ def compress(
                             "pdf_smasher.engine.background",
                         ]
                     )
-                # set_forkserver_preload can raise ValueError/RuntimeError
-                # if a listed module instantiates mp objects at import time.
-                # If so, suppress the exception and skip preloading —
-                # workers still work, first run is a bit slower.
+                except (ValueError, RuntimeError) as _e:
+                    # set_forkserver_preload can raise ValueError/RuntimeError
+                    # if a listed module instantiates mp objects at import time.
+                    # Workers still function, but each re-imports the heavy
+                    # module chain (numpy/cv2/pikepdf ~ 2-3 s each) — a
+                    # significant silent regression. Surface it as a warning
+                    # so users/ops can grep for it.
+                    warnings_list.append(
+                        f"forkserver-preload-failed-{type(_e).__name__}",
+                    )
             _ex_kwargs["mp_context"] = ctx
             label = f"process/{chosen_method}"
         _emit(
