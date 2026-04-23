@@ -46,7 +46,10 @@ def test_cli_no_banner_when_verifier_passed(tmp_path, capsys) -> None:
     _make_blank_pdf(in_path)
     out_path = tmp_path / "out.pdf"
 
-    rc = main([str(in_path), "-o", str(out_path), "--verify"])
+    # Disable the min_ratio gate so blank-PDF test fixtures (which
+    # realize <1.5x compression) don't passthrough and end up with
+    # verifier.status="skipped" unexpectedly.
+    rc = main([str(in_path), "-o", str(out_path), "--verify", "--min-ratio", "0"])
     assert rc == 0
     err = capsys.readouterr().err
     # No SKIP banner for a passing verifier.

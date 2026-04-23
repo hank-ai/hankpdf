@@ -42,6 +42,7 @@ def test_chunked_output_uses_zero_padded_1_indexed_names(tmp_path) -> None:  # t
         "-o", str(out_path),
         "--max-output-mb", "0.005",
         "--accept-drift",
+        "--min-ratio", "0",  # blank-PDF test fixtures compress <1.5x
     ])
     assert rc == 0, f"expected EXIT_OK=0, got {rc}"
     chunks = sorted(tmp_path.glob("smol_*.pdf"))
@@ -70,6 +71,7 @@ def test_chunked_output_warns_on_stale_siblings(tmp_path, capsys) -> None:  # ty
         "-o", str(out_path),
         "--max-output-mb", "0.005",
         "--accept-drift",
+        "--min-ratio", "0",  # blank-PDF test fixtures compress <1.5x
     ])
     assert rc == 0
     err = capsys.readouterr().err
@@ -132,6 +134,7 @@ def test_chunk_pad_width_scales_beyond_999(tmp_path, monkeypatch) -> None:  # ty
         "-o", str(out_path),
         "--max-output-mb", "0.1",
         "--accept-drift",
+        "--min-ratio", "0",
     ])
     assert rc == 0
     # Expect 4-digit padded names (len(str(1200))==4): smol_0001.pdf ... smol_1200.pdf
@@ -157,6 +160,7 @@ def test_single_chunk_oversize_warns(tmp_path, capsys) -> None:  # type: ignore[
         "-o", str(out_path),
         "--max-output-mb", "0.001",
         "--accept-drift",
+        "--min-ratio", "0",
     ])
     assert rc == 0, f"expected EXIT_OK=0, got {rc}"
     err = capsys.readouterr().err

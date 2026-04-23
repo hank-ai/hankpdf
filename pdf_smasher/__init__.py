@@ -1068,6 +1068,26 @@ def compress(
         ratio=len(input_data) / max(1, len(output_bytes)),
     )
 
+    # --- Passthrough: min_ratio floor ---
+    # If realized compression ratio is below options.min_ratio, return
+    # the ORIGINAL input — a user who set min_ratio=1.5 doesn't want an
+    # output bigger than the input. Must fire BEFORE the verifier so we
+    # don't waste wall time re-OCRing a shard we're about to discard.
+    realized_ratio = len(input_data) / max(1, len(output_bytes))
+    if options.min_ratio > 0 and realized_ratio < options.min_ratio:
+        wall_ms = int((time.monotonic() - t0) * 1000)
+        reason = (
+            f"realized ratio {realized_ratio:.2f}x below "
+            f"min_ratio={options.min_ratio}x; returning original input"
+        )
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=wall_ms,
+            reason=reason,
+            warning_code="passthrough-ratio-floor",
+        )
+
     verifier_result = (
         verifier_agg.skipped_result() if options.skip_verify else verifier_agg.result()
     )

@@ -64,6 +64,7 @@ def test_chunk_write_failure_leaves_no_partial_final_file(
         str(in_path), "-o", str(out_path),
         "--max-output-mb", "0.005",
         "--accept-drift",
+        "--min-ratio", "0",
     ])
     # We forced an OSError → CLI returns EXIT_ENGINE_ERROR.
     assert rc != 0, f"expected non-zero rc on synthetic OSError; got {rc}"

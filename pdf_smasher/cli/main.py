@@ -214,9 +214,30 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-embedded-files", action="store_true")
     p.add_argument("--password-file", type=Path, help="Read password from file")
 
-    # Limits
+    # Limits + passthrough floors
     p.add_argument("--max-pages", type=int)
     p.add_argument("--max-input-mb", type=float, default=2000.0)
+    p.add_argument(
+        "--min-input-mb",
+        type=float,
+        default=0.0,
+        help=(
+            "Skip compression (return input unchanged) when the input is "
+            "smaller than this many MB. Default 0 (gate disabled). Emits a "
+            "'passthrough-min-input-mb' warning in the report."
+        ),
+    )
+    p.add_argument(
+        "--min-ratio",
+        type=float,
+        default=1.5,
+        help=(
+            "If realized compression ratio is below this, return the input "
+            "unchanged rather than a larger output. Default 1.5 (matches "
+            "CompressOptions default). Set to 0 to disable. Emits a "
+            "'passthrough-ratio-floor' warning in the report."
+        ),
+    )
     p.add_argument(
         "--max-output-mb",
         type=_positive_float,
@@ -440,6 +461,8 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         password=_read_password(args),
         max_pages=args.max_pages,
         max_input_mb=args.max_input_mb,
+        min_input_mb=args.min_input_mb,
+        min_ratio=args.min_ratio,
     )
 
 

@@ -72,6 +72,7 @@ def test_w_chunks_exceed_cap(tmp_path, capsys) -> None:  # type: ignore[no-untyp
         str(in_path), "-o", str(out_path),
         "--max-output-mb", "0.005",
         "--accept-drift",
+        "--min-ratio", "0",
     ])
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err
@@ -94,6 +95,7 @@ def test_w_stale_chunk_files(tmp_path, capsys) -> None:  # type: ignore[no-untyp
         str(in_path), "-o", str(out_path),
         "--max-output-mb", "0.005",
         "--accept-drift",
+        "--min-ratio", "0",
     ])
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err

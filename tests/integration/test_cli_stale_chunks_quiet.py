@@ -43,6 +43,7 @@ def test_stale_chunks_warning_not_silenced_by_quiet(
         str(in_path), "-o", str(out_path),
         "--max-output-mb", "0.005",
         "--accept-drift",
+        "--min-ratio", "0",
         "--quiet",
     ])
     assert rc == 0, f"rc={rc}"
