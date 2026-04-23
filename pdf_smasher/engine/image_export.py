@@ -17,6 +17,7 @@ Pillow itself is MIT-CMU.
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 from typing import Literal
 
 from pdf_smasher.engine.rasterize import rasterize_page
@@ -48,6 +49,8 @@ def render_pages_as_images(
     webp_quality: int = 80,
     webp_lossless: bool = False,
     webp_method: int = _WEBP_METHOD_DEFAULT,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+    _force_rasterize_error_for_test: bool = False,
 ) -> list[bytes]:
     """Rasterize the requested pages and return one encoded image per page.
 
@@ -93,6 +96,14 @@ def render_pages_as_images(
         If ``image_format`` is not recognized.
     IndexError / ValueError
         If any ``page_indices`` entry is out of range for the source PDF.
+
+    progress_callback receives (phase, current, total) triples:
+        - ('page_start', i, total) at the top of each iteration.
+        - ('page_done',  i, total) after each page is encoded.
+
+    Exceptions raised during rasterize or encode are wrapped to include
+    "page {i + 1}/{total}" in the message so logs tell you which page
+    failed during which stage.
     """
     if image_format not in _SUPPORTED_FORMATS:
         msg = f"image_format must be one of {_SUPPORTED_FORMATS}; got {image_format!r}"
@@ -100,48 +111,60 @@ def render_pages_as_images(
     if not page_indices:
         return []
 
+    total = len(page_indices)
     out: list[bytes] = []
-    for page_index in page_indices:
-        raster = rasterize_page(pdf_bytes, page_index=page_index, dpi=dpi)
-        # Defense-in-depth: even with the CLI's --image-dpi cap, a PDF
-        # with extreme MediaBox dimensions (UserUnit multipliers etc.)
-        # could still produce a huge raster. Refuse > ~2 GB RGB buffers.
-        _max_px = 2 * 1024 * 1024 * 1024 // 3  # 2 GiB / 3 bytes per pixel
-        if raster.width * raster.height > _max_px:
-            msg = (
-                f"page {page_index + 1} rasterized to "
-                f"{raster.width}x{raster.height} px — exceeds the "
-                f"decompression-bomb cap ({_max_px / (1024 * 1024):.0f} MB "
-                "of raw pixels). Lower --image-dpi or --pages to proceed."
-            )
-            raise ValueError(msg)
-        buf = io.BytesIO()
-        rgb = raster.convert("RGB")
-        if image_format == "jpeg":
-            # optimize=True uses two-pass Huffman; runs out of buffer
-            # space on large high-quality images ("Suspension not allowed
-            # here"). Skip it - the 2-5% size saving isn't worth the
-            # reliability hit for users who want full-DPI page exports.
-            rgb.save(
-                buf,
-                format="JPEG",
-                quality=jpeg_quality,
-                subsampling=jpeg_subsampling,
-            )
-        elif image_format == "png":
-            rgb.save(
-                buf,
-                format="PNG",
-                compress_level=png_compress_level,
-                optimize=(png_compress_level == _PNG_OPTIMIZE_LEVEL),
-            )
-        else:  # webp
-            rgb.save(
-                buf,
-                format="WEBP",
-                quality=webp_quality,
-                lossless=webp_lossless,
-                method=webp_method,
-            )
-        out.append(buf.getvalue())
+    for pos, page_index in enumerate(page_indices, start=1):
+        if progress_callback is not None:
+            progress_callback("page_start", pos, total)
+        try:
+            if _force_rasterize_error_for_test:
+                _forced = "forced test error"
+                raise RuntimeError(_forced)
+            raster = rasterize_page(pdf_bytes, page_index=page_index, dpi=dpi)
+            # Defense-in-depth: even with the CLI's --image-dpi cap, a PDF
+            # with extreme MediaBox dimensions (UserUnit multipliers etc.)
+            # could still produce a huge raster. Refuse > ~2 GB RGB buffers.
+            _max_px = 2 * 1024 * 1024 * 1024 // 3  # 2 GiB / 3 bytes per pixel
+            if raster.width * raster.height > _max_px:
+                msg = (
+                    f"page {page_index + 1} rasterized to "
+                    f"{raster.width}x{raster.height} px — exceeds the "
+                    f"decompression-bomb cap ({_max_px / (1024 * 1024):.0f} MB "
+                    "of raw pixels). Lower --image-dpi or --pages to proceed."
+                )
+                raise ValueError(msg)
+            buf = io.BytesIO()
+            rgb = raster.convert("RGB")
+            if image_format == "jpeg":
+                # optimize=True uses two-pass Huffman; runs out of buffer
+                # space on large high-quality images ("Suspension not allowed
+                # here"). Skip it - the 2-5% size saving isn't worth the
+                # reliability hit for users who want full-DPI page exports.
+                rgb.save(
+                    buf,
+                    format="JPEG",
+                    quality=jpeg_quality,
+                    subsampling=jpeg_subsampling,
+                )
+            elif image_format == "png":
+                rgb.save(
+                    buf,
+                    format="PNG",
+                    compress_level=png_compress_level,
+                    optimize=(png_compress_level == _PNG_OPTIMIZE_LEVEL),
+                )
+            else:  # webp
+                rgb.save(
+                    buf,
+                    format="WEBP",
+                    quality=webp_quality,
+                    lossless=webp_lossless,
+                    method=webp_method,
+                )
+            out.append(buf.getvalue())
+        except Exception as exc:
+            wrapped = f"image export failed on page {page_index + 1}/{total}: {exc}"
+            raise RuntimeError(wrapped) from exc
+        if progress_callback is not None:
+            progress_callback("page_done", pos, total)
     return out

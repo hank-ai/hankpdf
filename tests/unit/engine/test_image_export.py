@@ -155,7 +155,10 @@ def test_png_compress_level_controls_file_size() -> None:
 
 def test_rejects_out_of_range_page_index() -> None:
     pdf_bytes = _make_pdf(2)
-    with pytest.raises((IndexError, ValueError)):
+    # Per-page errors are now wrapped in RuntimeError with "page N/total"
+    # context (Task 7); the underlying IndexError/ValueError is chained
+    # via __cause__.
+    with pytest.raises(RuntimeError, match="page 6"):
         render_pages_as_images(
             pdf_bytes,
             page_indices=[5],
@@ -247,3 +250,38 @@ def test_webp_is_smaller_than_jpeg_at_matching_settings() -> None:
     assert len(webp) <= len(jpeg), (
         f"webp ({len(webp):,}) should be <= jpeg ({len(jpeg):,}) at q=75"
     )
+
+
+def test_render_pages_emits_progress_events() -> None:
+    """render_pages_as_images accepts an optional progress_callback and
+    fires one event per completed page."""
+    pdf_bytes = _make_pdf(3)
+    events: list[tuple[int, int]] = []
+
+    def _cb(phase: str, current: int, total: int) -> None:
+        if phase == "page_done":
+            events.append((current, total))
+
+    render_pages_as_images(
+        pdf_bytes,
+        page_indices=[0, 1, 2],
+        image_format="jpeg",
+        dpi=72,
+        progress_callback=_cb,
+    )
+    # 3 page_done events, 1-indexed current, total=3.
+    assert events == [(1, 3), (2, 3), (3, 3)], f"got {events}"
+
+
+def test_render_pages_per_page_error_context() -> None:
+    """When rasterize_page fails on page N, the raised exception must
+    contain 'page {N+1}' so logs tell the user which page."""
+    pdf_bytes = _make_pdf(5)
+    with pytest.raises(Exception, match="page 3"):
+        render_pages_as_images(
+            pdf_bytes,
+            page_indices=[2],  # 0-indexed -> displayed as 1-indexed page 3
+            image_format="jpeg",
+            dpi=72,
+            _force_rasterize_error_for_test=True,  # new test hook
+        )
