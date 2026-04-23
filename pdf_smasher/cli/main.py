@@ -1076,19 +1076,26 @@ def main(argv: list[str] | None = None) -> int:
                             ),
                             file=sys.stderr,
                         )
-                    if stale:
-                        stale_names = sorted(p.name for p in stale)
-                        print(
-                            _warn(
-                                "W-STALE-CHUNK-FILES",
-                                f"{len(stale)} stale chunk file(s) from a "
-                                f"previous run remain in {parent}: "
-                                f"{stale_names}. Remove them manually if "
-                                "they no longer belong to this output.",
-                                input_name=_label,
-                            ),
-                            file=sys.stderr,
-                        )
+                # W-STALE-CHUNK-FILES deliberately OUTSIDE the `not args.quiet`
+                # guard. Stale chunks are a correctness hazard: downstream
+                # batch jobs glob `{base}_*.pdf` and silently ingest chunks
+                # from a prior run whose index is higher than the current
+                # chunk count. Cron jobs typically run with --quiet, so a
+                # quiet-suppressed stale warning would hide exactly the case
+                # it matters for. SPEC.md §8.5.1 documents this exception.
+                if stale:
+                    stale_names = sorted(p.name for p in stale)
+                    print(
+                        _warn(
+                            "W-STALE-CHUNK-FILES",
+                            f"{len(stale)} stale chunk file(s) from a "
+                            f"previous run remain in {parent}: "
+                            f"{stale_names}. Remove them manually if "
+                            "they no longer belong to this output.",
+                            input_name=_label,
+                        ),
+                        file=sys.stderr,
+                    )
 
     # Verifier-status banner. Default skip_verify=True is a UX trap:
     # users see a clean text report and assume the output was content-
