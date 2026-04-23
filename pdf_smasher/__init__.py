@@ -101,6 +101,23 @@ def _resolve_worker_count(options: CompressOptions, n_pages: int) -> int:
     return min(auto, n_pages)
 
 
+def _init_worker() -> None:
+    """ProcessPoolExecutor initializer. Pins each worker to single-threaded
+    native libraries so N workers use exactly N cores, not N * cpu_count cores.
+
+    Without this, Tesseract's OpenMP (and numpy BLAS + OpenCV) each try to
+    use every core for themselves. Running multiple Tesseract subprocesses
+    in parallel workers then creates N*cpu_count threads competing for
+    cpu_count cores — context-switch thrash can fully eat the parallel
+    speedup (sometimes making parallel slower than serial on the same box).
+    """
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+
 from dataclasses import dataclass as _dc  # noqa: E402 — adjacent to other module-level aliases
 
 
@@ -667,7 +684,7 @@ def compress(
         # In the parallel path we DO NOT emit per-page page_start events —
         # workers all start simultaneously so the "rasterizing pN" label
         # doesn't mean anything. Only page_done fires (from completion order).
-        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+        with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker) as ex:
             future_to_winput: dict[Any, _WorkerInput] = {
                 ex.submit(_process_single_page, w): w for w in winputs
             }
