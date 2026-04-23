@@ -133,7 +133,6 @@ class _WorkerInput:
 
     input_page_pdf: bytes  # 1-page PDF extracted from source
     page_index: int  # 0-indexed position in original PDF
-    total_pages: int  # for human-readable log messages
     page_size: tuple[float, float]  # (width_pt, height_pt)
     source_dpi: int
     bg_target_dpi: int
@@ -276,7 +275,6 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
 
     _worker_t0 = time.monotonic()
     i = winput.page_index
-    total = winput.total_pages
     width_pt, height_pt = winput.page_size
     options = winput.options
     is_safe = winput.is_safe
@@ -515,10 +513,6 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     in_bytes = len(winput.input_page_pdf)
     out_bytes = len(composed)
     true_ratio = in_bytes / max(1, out_bytes)
-
-    # Use `total` (captured above) for the log string only — this proves
-    # the local variable isn't accidentally unused when reading the code.
-    del total
 
     return _PageResult(
         page_index=i,
@@ -766,7 +760,6 @@ def compress(
         _WorkerInput(
             input_page_pdf=single_page_pdfs[i],
             page_index=i,
-            total_pages=tri.pages,
             page_size=page_sizes[i],
             source_dpi=source_dpi,
             bg_target_dpi=bg_target_dpi,
