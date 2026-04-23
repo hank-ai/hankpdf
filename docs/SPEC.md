@@ -624,6 +624,14 @@ The CLI chunk writer prints the following to **stderr** when `--max-output-mb` i
 - **Python API**: `compress()` signature stable within major version; internal modules may change freely.
 - **Sidecar manifest schema**: versioned via `schema_version` field. Readers accept current and previous version.
 
+### 11.1 CompressReport schema migration notes
+
+- **v1 → v2** (DCR Wave 3, 2026-04-23):
+  - `VerifierResult.status` gained the `"skipped"` literal (was only `"pass"`/`"fail"`). Readers that key on `verifier.status` must add a `"skipped"` branch; treat it as "no verification performed, caller should not assume pass."
+  - `CompressReport.warnings` tuple now uses kebab-case codes (e.g., `verifier-skipped`, `bg-codec-jpeg2000-demoted-fast-mode`) for every job-wide warning. Page-local warnings retain the `page-{N}-…` convention.
+  - `CompressReport.strategy_distribution` is now populated (was `{}` in v1). Keys: `text_only`, `photo_only`, `mixed`, `already_optimized`.
+  - No breaking field removals or renames — additive only.
+
 ## 12. Testing interface
 
 Test determinism guarantees:

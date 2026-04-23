@@ -173,5 +173,14 @@ class CompressReport:
     warnings: tuple[str, ...] = ()
     strips: tuple[str, ...] = ()
     reason: str | None = None
-    schema_version: int = field(default=1)
+    # Schema v2 since Wave 3 (2026-04-23). Readers that key on
+    # VerifierResult.status, CompressReport.warnings, or
+    # CompressReport.strategy_distribution must accept the broader surface
+    # described in SPEC.md §11. v2 additions:
+    #   - VerifierResult.status adds the "skipped" literal (was only
+    #     "pass"/"fail").
+    #   - CompressReport.warnings now uses kebab-case codes; verifier-skipped
+    #     appears for every skip_verify run.
+    #   - CompressReport.strategy_distribution is populated (was {} in v1).
+    schema_version: int = field(default=2)
     strategy_distribution: Mapping[str, int] = field(default_factory=dict)
