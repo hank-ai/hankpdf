@@ -177,6 +177,53 @@ def test_output_format_override_corrects_extension(tmp_path) -> None:  # type: i
 
 
 @pytest.mark.integration
+def test_image_export_pad_width_scales_past_999(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Regression: DCR Wave 2 flagged the hard-coded {:03d} pad in the
+    multi-page image-export branch. 1200-page jobs must produce
+    out_0001.jpg ... out_1200.jpg (4-digit pad), not a mix of 3- and
+    4-digit names that sort-lex wrong."""
+    import pdf_smasher.cli.main as cli_main
+
+    in_path = _make_pdf(tmp_path, n_pages=2)
+    out_path = tmp_path / "out.jpg"
+
+    # Fake triage with 1200 pages, and a tiny-blob iter that mimics
+    # iter_pages_as_images without actually rasterizing.
+    class _FakeTri:
+        pages = 1200
+        is_encrypted = False
+        is_signed = False
+        is_certified_signature = False
+        is_oversize = False
+
+    def fake_triage(_pdf_bytes):  # type: ignore[no-untyped-def]
+        return _FakeTri
+
+    def fake_enforce(_tri, _opts, _in_bytes):  # type: ignore[no-untyped-def]
+        return None
+
+    def fake_iter(*_args, page_indices, **_kwargs):  # type: ignore[no-untyped-def]
+        # Emit a valid JPEG SOI-marker so downstream writes succeed.
+        for _ in page_indices:
+            yield b"\xff\xd8\xff\xe0FAKEJPG"
+
+    monkeypatch.setattr(cli_main, "triage", fake_triage)
+    monkeypatch.setattr(cli_main, "_enforce_input_policy", fake_enforce)
+    monkeypatch.setattr(cli_main, "iter_pages_as_images", fake_iter)
+
+    rc = main([str(in_path), "-o", str(out_path), "--quiet"])
+    assert rc == 0
+    # Expect 4-digit padded names.
+    first = tmp_path / "out_0001.jpg"
+    last = tmp_path / "out_1200.jpg"
+    assert first.exists(), (
+        f"expected 4-digit-padded names for 1200-page job; got "
+        f"{sorted(p.name for p in tmp_path.iterdir())[:5]}"
+    )
+    assert last.exists()
+
+
+@pytest.mark.integration
 def test_image_export_partial_failure_emits_summary(tmp_path, capsys, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """When page N fails mid-stream, CLI must: exit a specific code
     (not 1, not raw traceback), emit a 'wrote K of N' stderr summary,

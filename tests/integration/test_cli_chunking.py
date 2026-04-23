@@ -106,6 +106,42 @@ def test_max_output_mb_negative_rejected(tmp_path) -> None:  # type: ignore[no-u
 
 
 @pytest.mark.integration
+def test_chunk_pad_width_scales_beyond_999(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Regression: DCR Wave 2 flagged the hard-coded {:03d} pad width
+    as sort-breaking past 999 chunks. Pad must scale to len(str(total)).
+
+    We monkeypatch split_pdf_by_size to return 1200 tiny chunks so we
+    don't have to actually build a 1200-page PDF.
+    """
+    import pdf_smasher.cli.main as cli_main
+
+    in_path = _make_big_pdf(tmp_path, n_pages=2)
+    out_path = tmp_path / "smol.pdf"
+
+    fake_chunks = [b"%PDF-1.7\n%fake\n"] * 1200
+
+    def fake_split(pdf_bytes, *, max_bytes):  # type: ignore[no-untyped-def]
+        return fake_chunks
+
+    monkeypatch.setattr(cli_main, "split_pdf_by_size", fake_split)
+    # Avoid interfering with chunking.split_pdf_by_size's other callers;
+    # cli_main holds the direct reference used in main().
+
+    rc = main([
+        str(in_path),
+        "-o", str(out_path),
+        "--max-output-mb", "0.1",
+        "--accept-drift",
+    ])
+    assert rc == 0
+    # Expect 4-digit padded names (len(str(1200))==4): smol_0001.pdf ... smol_1200.pdf
+    first = tmp_path / "smol_0001.pdf"
+    last = tmp_path / "smol_1200.pdf"
+    assert first.exists(), f"expected zero-padded 4-digit names; listing: {sorted(p.name for p in tmp_path.iterdir())[:5]}"
+    assert last.exists()
+
+
+@pytest.mark.integration
 def test_empty_pages_spec_on_pdf_returns_usage_exit(tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
     """Empty --pages in PDF output mode must return EXIT_USAGE=40,
     matching the image-export path. Previously this reached compress()

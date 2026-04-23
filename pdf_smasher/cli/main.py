@@ -589,9 +589,15 @@ def _run_image_export(
         else:
             total_bytes = 0
             written_paths: list[Path] = []
+            # Scale pad width so 1200-page exports don't mix 3- and 4-digit
+            # filenames (which sort-lex wrong: out_100 < out_99). The width
+            # tracks both count AND the largest page number we might print,
+            # since --pages can select a sparse range.
+            largest_num = max(page_indices) + 1 if page_indices else 1
+            pad_w = max(3, len(str(n)), len(str(largest_num)))
             try:
                 for page_idx, blob in zip(page_indices, pages_iter, strict=True):
-                    target = parent / f"{base}_{page_idx + 1:03d}{final_ext}"
+                    target = parent / f"{base}_{page_idx + 1:0{pad_w}d}{final_ext}"
                     target.write_bytes(blob)
                     written_paths.append(target)
                     total_bytes += len(blob)
@@ -851,13 +857,19 @@ def main(argv: list[str] | None = None) -> int:
                 ext = args.output.suffix
                 parent = args.output.parent
 
+                # Pad width scales with chunk count so 1200-chunk jobs
+                # produce {base}_0001{ext} ... {base}_1200{ext} rather
+                # than a mix of 3- and 4-digit names that sort-lex wrong.
+                chunk_pad_w = max(3, len(str(len(chunks))))
+
                 # Detect stale chunks from prior runs that will not be
                 # overwritten because our new chunk count is smaller.
-                # Matches {base}_NNN{ext} with NNN > len(chunks). Pattern
-                # pinned to exactly 3 digits so we don't false-match legit
-                # non-chunk siblings like `smol_final.pdf`.
+                # Matches {base}_NN+{ext} with numeric index > len(chunks).
+                # Allow 3+ digits dynamically so a previous 1200-chunk
+                # run's _0150 file is still detected as stale by a
+                # subsequent 50-chunk run.
                 chunk_re = re.compile(
-                    rf"^{re.escape(base)}_(\d{{3}}){re.escape(ext)}$",
+                    rf"^{re.escape(base)}_(\d{{3,}}){re.escape(ext)}$",
                 )
                 stale: list[Path] = []
                 if parent.exists():
@@ -869,7 +881,7 @@ def main(argv: list[str] | None = None) -> int:
                 written_paths: list[Path] = []
                 try:
                     for idx, chunk in enumerate(chunks, start=1):
-                        p = parent / f"{base}_{idx:03d}{ext}"
+                        p = parent / f"{base}_{idx:0{chunk_pad_w}d}{ext}"
                         p.write_bytes(chunk)
                         written_paths.append(p)
                 except OSError as exc:
