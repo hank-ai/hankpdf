@@ -205,8 +205,18 @@ def _build_passthrough_report(
     (min_input_mb, min_ratio) short-circuits the pipeline — the output
     equals the input, verifier is marked "skipped" (nothing to compare),
     and a kebab-case warning code names the specific gate that tripped.
+
+    Delegates to ``_VerifierAggregator().skipped_result()`` so there's a
+    single source of truth for the fail-closed sentinel policy. Without
+    this, the hand-rolled VerifierResult here and the one returned by
+    ``skipped_result()`` can drift (ocr_levenshtein=0.0 vs 1.0 — one is
+    fail-open, one fail-closed).
     """
     import hashlib
+
+    # Local import to avoid circular import at module load: engine.verifier
+    # imports from pdf_smasher.types, and this module re-exports from types.
+    from pdf_smasher.engine.verifier import _VerifierAggregator
 
     sha = hashlib.sha256(input_data).hexdigest()
     return CompressReport(
@@ -219,15 +229,7 @@ def _build_passthrough_report(
         wall_time_ms=wall_ms,
         engine="mrc",
         engine_version=__engine_version__,
-        verifier=VerifierResult(
-            status="skipped",
-            ocr_levenshtein=0.0,
-            ssim_global=0.0,
-            ssim_min_tile=0.0,
-            digit_multiset_match=False,
-            structural_match=False,
-            color_preserved=False,
-        ),
+        verifier=_VerifierAggregator().skipped_result(),
         input_sha256=sha,
         output_sha256=sha,  # same bytes → same hash
         canonical_input_sha256=None,

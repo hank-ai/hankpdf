@@ -278,6 +278,39 @@ def test_verifier_fail_warning_code_is_normalized() -> None:
     assert "+10" in full_code
 
 
+def test_passthrough_min_input_mb_uses_fail_closed_sentinels() -> None:
+    """Passthrough must use the same fail-closed sentinels as skip_verify
+    so downstream gates can't mistake passthrough for clean verified."""
+    # Tiny input, below a high floor -> passthrough fires.
+    tiny_pdf = _make_fake_scan(["HELLO"])
+    _, report = compress(tiny_pdf, options=CompressOptions(min_input_mb=10.0))
+    assert report.status == "passed_through"
+    assert report.verifier.status == "skipped"
+    # Fail-closed sentinels must match skipped_result():
+    assert report.verifier.ocr_levenshtein == 1.0  # max drift, NOT 0
+    assert report.verifier.ssim_global == 0.0
+    assert report.verifier.ssim_min_tile == 0.0
+    assert report.verifier.digit_multiset_match is False
+    assert report.verifier.color_preserved is False
+    assert report.verifier.structural_match is False
+    assert report.verifier.failing_pages == ()
+
+
+def test_passthrough_min_ratio_uses_fail_closed_sentinels() -> None:
+    """Same for min_ratio passthrough."""
+    tiny_pdf = _make_fake_scan(["HELLO"])
+    _, report = compress(tiny_pdf, options=CompressOptions(min_ratio=1000.0))
+    assert report.status == "passed_through"
+    assert report.verifier.status == "skipped"
+    assert report.verifier.ocr_levenshtein == 1.0
+    assert report.verifier.ssim_global == 0.0
+    assert report.verifier.ssim_min_tile == 0.0
+    assert report.verifier.digit_multiset_match is False
+    assert report.verifier.structural_match is False
+    assert report.verifier.color_preserved is False
+    assert report.verifier.failing_pages == ()
+
+
 def test_progress_event_verifier_passed_is_none_when_skipped() -> None:
     """Regression: when skip_verify=True the worker synthesizes a
     trivially-passing verdict, which used to bubble up to the progress
