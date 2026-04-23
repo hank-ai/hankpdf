@@ -108,6 +108,4 @@ def test_every_chunk_under_max_when_possible() -> None:
     max_bytes = 200_000
     chunks = split_pdf_by_size(pdf_bytes, max_bytes=max_bytes)
     for i, chunk in enumerate(chunks):
-        assert len(chunk) <= max_bytes, (
-            f"chunk {i} size {len(chunk):,} exceeds cap {max_bytes:,}"
-        )
+        assert len(chunk) <= max_bytes, f"chunk {i} size {len(chunk):,} exceeds cap {max_bytes:,}"

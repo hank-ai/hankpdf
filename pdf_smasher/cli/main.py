@@ -26,6 +26,7 @@ from pdf_smasher import (
     SignedPDFError,
     __version__,
     compress,
+    triage,
 )
 
 # Exit codes per SPEC.md §2.2. Kept in sync with the CompressError class tree.
@@ -175,6 +176,42 @@ def _parser() -> argparse.ArgumentParser:
     # Reporting
     p.add_argument("--report", choices=["text", "json", "jsonl", "none"], default="text")
     p.add_argument("--quiet", action="store_true")
+
+    # Image export mode (JPEG / PNG per page — skips the MRC pipeline).
+    p.add_argument(
+        "--output-format",
+        choices=["pdf", "jpeg", "png"],
+        default=None,
+        help=(
+            "Output format. Default: inferred from -o extension (.pdf, .jpg/"
+            ".jpeg, .png) or 'pdf' if unknown. Selecting jpeg/png switches "
+            "to image-export mode — each selected page is rendered and "
+            "encoded as a standalone image file (no MRC compression, no "
+            "verifier, no OCR). Use --pages to select a subset."
+        ),
+    )
+    p.add_argument(
+        "--image-dpi",
+        type=int,
+        default=150,
+        help="DPI for --output-format jpeg/png. Default: 150. 300 for archival.",
+    )
+    p.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=75,
+        help="JPEG quality 0-100 (ignored for --output-format png). Default: 75.",
+    )
+    p.add_argument(
+        "--png-compress-level",
+        type=int,
+        default=6,
+        choices=range(10),
+        help=(
+            "PNG zlib compression level 0-9 (ignored for --output-format jpeg). "
+            "0=no compression, 9=max. Default: 6 (Pillow standard)."
+        ),
+    )
     return p
 
 
@@ -309,6 +346,96 @@ def _format_report(report, fmt: str) -> str:  # type: ignore[no-untyped-def]
     )
 
 
+def _run_image_export(
+    args: argparse.Namespace,
+    input_bytes: bytes,
+    only_pages: set[int] | None,
+    image_format: str,
+) -> int:
+    """Image-export path: skip the MRC/compress pipeline, render each
+    requested page as JPEG/PNG. Invoked from main() when the user picks
+    jpeg/png via --output-format or an image extension on -o.
+    """
+    from pdf_smasher.image_export import render_pages_as_images
+
+    # Determine total page count via a triage.
+    try:
+        tri = triage(input_bytes)
+    except CompressError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return EXIT_CORRUPT
+
+    if only_pages is not None:
+        out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]
+        if out_of_range:
+            print(
+                f"error: --pages requested {sorted(out_of_range)} but input has {tri.pages} pages",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        page_indices = sorted(p - 1 for p in only_pages)
+    else:
+        page_indices = list(range(tri.pages))
+
+    images = render_pages_as_images(
+        input_bytes,
+        page_indices=page_indices,
+        image_format=image_format,  # type: ignore[arg-type]
+        dpi=args.image_dpi,
+        jpeg_quality=args.jpeg_quality,
+        png_compress_level=args.png_compress_level,
+    )
+
+    if str(args.output) == "-":
+        if len(images) != 1:
+            print(
+                f"error: -o - (stdout) supports exactly one image; "
+                f"got {len(images)} (use --pages to select a single page)",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        sys.stdout.buffer.write(images[0])
+        return EXIT_OK
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    out_ext = {"jpeg": ".jpg", "png": ".png"}[image_format]
+    base = args.output.stem
+    parent = args.output.parent
+    # If output ends in .jpg/.jpeg/.png we keep that extension; else append
+    # the canonical one. Single-image outputs keep the user's exact path.
+    requested_ext = args.output.suffix.lower()
+    final_ext = requested_ext if requested_ext.lstrip(".") in {"jpg", "jpeg", "png"} else out_ext
+    if len(images) == 1:
+        # Single page → write exactly to -o (with ext normalization).
+        if requested_ext.lstrip(".") not in {"jpg", "jpeg", "png"}:
+            target = parent / f"{base}{final_ext}"
+        else:
+            target = args.output
+        target.write_bytes(images[0])
+        if not args.quiet:
+            print(
+                f"wrote {target} ({len(images[0]):,} bytes, {image_format} @ {args.image_dpi} DPI)",
+                file=sys.stderr,
+            )
+    else:
+        for page_idx, blob in zip(page_indices, images, strict=True):
+            target = parent / f"{base}_{page_idx + 1:03d}{final_ext}"
+            target.write_bytes(blob)
+            if not args.quiet:
+                print(
+                    f"wrote {target.name} ({len(blob):,} bytes, page {page_idx + 1})",
+                    file=sys.stderr,
+                )
+        if not args.quiet:
+            total = sum(len(b) for b in images)
+            print(
+                f"[hankpdf] exported {len(images)} {image_format} pages "
+                f"({total:,} total bytes, {args.image_dpi} DPI)",
+                file=sys.stderr,
+            )
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
 
@@ -339,6 +466,18 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"error: --pages {e}", file=sys.stderr)
             return EXIT_USAGE
+
+    # Resolve output format. --output-format wins; otherwise infer from
+    # the output file extension; default to pdf.
+    if args.output_format is not None:
+        resolved_format = args.output_format
+    else:
+        ext = args.output.suffix.lower().lstrip(".") if args.output else ""
+        resolved_format = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png"}.get(ext, "pdf")
+
+    # Image-export mode bypasses the MRC pipeline entirely.
+    if resolved_format in {"jpeg", "png"}:
+        return _run_image_export(args, input_bytes, only_pages, resolved_format)
 
     # Progress: tqdm bar for the per-page phase + plain stderr lines for
     # the triage/merge/verify milestones. All output goes to stderr so that
@@ -435,8 +574,7 @@ def main(argv: list[str] | None = None) -> int:
         # Stdout: can't split; always write the merged bytes.
         if args.max_output_mb is not None and len(output_bytes) > args.max_output_mb * 1024 * 1024:
             print(
-                "warning: --max-output-mb is ignored when -o - (stdout); "
-                "wrote merged output",
+                "warning: --max-output-mb is ignored when -o - (stdout); wrote merged output",
                 file=sys.stderr,
             )
         sys.stdout.buffer.write(output_bytes)
