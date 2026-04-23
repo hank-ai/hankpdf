@@ -17,7 +17,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import IO, Any, Literal
 
 import pikepdf
@@ -676,15 +676,25 @@ def compress(
         return f"compression failed on page {page_index + 1}/{tri.pages}: {exc}"
 
     if use_pool:
+        # Pick executor by env knob. Default = threads (zero spawn cost; our
+        # CPU-heavy work is in tesseract+jbig2 subprocesses and native numpy /
+        # OpenCV / Pillow ops that all release the GIL). Set HANKPDF_POOL=process
+        # for a multiprocessing pool if your workload is pure-Python-bound.
+        _pool_kind = os.environ.get("HANKPDF_POOL", "thread").lower()
+        _init_worker()  # pin OMP/BLAS to 1 for the whole process tree
+        executor_cls = ProcessPoolExecutor if _pool_kind == "process" else ThreadPoolExecutor
         _emit(
             "triage",
-            f"parallel dispatch: {n_workers} workers x {len(winputs)} pages",
+            f"parallel dispatch: {n_workers} {_pool_kind} workers x {len(winputs)} pages",
             total=len(winputs),
         )
         # In the parallel path we DO NOT emit per-page page_start events —
         # workers all start simultaneously so the "rasterizing pN" label
         # doesn't mean anything. Only page_done fires (from completion order).
-        with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker) as ex:
+        _ex_kwargs: dict[str, Any] = {"max_workers": n_workers}
+        if _pool_kind == "process":
+            _ex_kwargs["initializer"] = _init_worker
+        with executor_cls(**_ex_kwargs) as ex:
             future_to_winput: dict[Any, _WorkerInput] = {
                 ex.submit(_process_single_page, w): w for w in winputs
             }

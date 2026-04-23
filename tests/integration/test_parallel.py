@@ -1,8 +1,9 @@
 """Parallel-path equivalence: parallel output must match serial byte-for-byte.
 
 Proves:
-- parallel dispatch produces byte-identical output to the serial path
-- output page order matches input page order regardless of worker completion order
+- parallel dispatch (threads by default, processes via HANKPDF_POOL) produces
+  byte-identical output to the serial path
+- output page order matches input page order regardless of worker completion
 - --max-workers=1 disables the pool entirely
 """
 
@@ -77,6 +78,27 @@ def test_parallel_and_serial_produce_equivalent_output() -> None:
     assert serial_bytes == parallel_bytes, (
         f"parallel output diverged from serial: "
         f"serial={len(serial_bytes):,} bytes, parallel={len(parallel_bytes):,} bytes"
+    )
+
+
+@pytest.mark.integration
+def test_process_pool_path_also_equivalent(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """HANKPDF_POOL=process routes through ProcessPoolExecutor; output must
+    still be byte-identical to the serial and thread-pool paths.
+    """
+    pdf_in = _make_multi_page_pdf(n_pages=5)
+    serial_bytes, _ = compress(
+        pdf_in, options=CompressOptions(mode="fast", max_workers=1),
+    )
+    monkeypatch.setenv("HANKPDF_POOL", "process")
+    proc_bytes, proc_report = compress(
+        pdf_in, options=CompressOptions(mode="fast", max_workers=0),
+    )
+    assert proc_report.status == "ok"
+    assert proc_report.pages == 5
+    assert proc_bytes == serial_bytes, (
+        f"process-pool output diverged from serial: "
+        f"serial={len(serial_bytes):,} bytes, proc={len(proc_bytes):,} bytes"
     )
 
 
