@@ -104,6 +104,43 @@ jobs:
           make -j"$(nproc)"
           ls -la src/jbig2.exe
 
+      - name: Record MSYS2 package versions + enforce Leptonica floor
+        run: |
+          set -euo pipefail
+          DIST_ROOT="$(cygpath -u "${GITHUB_WORKSPACE}")/dist"
+          BUNDLE_DIR="${DIST_ROOT}/${BUNDLE_NAME}"
+          mkdir -p "${BUNDLE_DIR}"
+          # Capture exact versions of each linked lib. Shipped inside the
+          # bundle so an on-call can paste `versions.txt` into a bug
+          # report. Also enforces the leptonica_min_version floor from
+          # versions.json — pacman's lack of native version pins means
+          # this check is our last line of defense against an MSYS2
+          # refresh that drops a lib below the floor.
+          pacman -Q \
+              mingw-w64-x86_64-leptonica \
+              mingw-w64-x86_64-libtiff \
+              mingw-w64-x86_64-libpng \
+              mingw-w64-x86_64-libjpeg-turbo \
+              mingw-w64-x86_64-libwebp \
+              mingw-w64-x86_64-gcc \
+              | tee "${BUNDLE_DIR}/versions.txt"
+
+          LEP_VER="$(pacman -Q mingw-w64-x86_64-leptonica | awk '{print $2}' | cut -d- -f1)"
+          FLOOR="${LEPTONICA_MIN_VERSION:-}"
+          if [ -z "${FLOOR}" ]; then
+              echo "::error::LEPTONICA_MIN_VERSION not set (versions.json read step did not run?)"
+              exit 1
+          fi
+          # Semver-ish comparison via sort -V. sort -V sorts "1.85.0" <
+          # "1.85.1" correctly; we want FLOOR <= LEP_VER. If the min
+          # equals the max of (FLOOR, LEP_VER), LEP_VER is at or above
+          # the floor.
+          if [ "$(printf '%s\n%s' "${LEP_VER}" "${FLOOR}" | sort -V | head -n1)" != "${FLOOR}" ]; then
+              echo "::error::Leptonica ${LEP_VER} below floor ${FLOOR} (see .github/versions.json)"
+              exit 1
+          fi
+          echo "Leptonica ${LEP_VER} satisfies floor ${FLOOR}"
+
       - name: Assemble distribution bundle
         env:
           BUNDLE: ${{ env.BUNDLE_NAME }}
@@ -113,7 +150,7 @@ jobs:
           DIST_ROOT="$(cygpath -u "${GITHUB_WORKSPACE}")/dist"
           BUNDLE_DIR="${DIST_ROOT}/${BUNDLE}"
 
-          mkdir -p "${BUNDLE_DIR}"
+          # versions.txt was written by the previous step; keep it.
           cp /tmp/src/src/jbig2.exe "${BUNDLE_DIR}/"
           cp /tmp/src/LICENSE "${BUNDLE_DIR}/LICENSE" 2>/dev/null || \
               cp /tmp/src/COPYING "${BUNDLE_DIR}/LICENSE" 2>/dev/null || \
