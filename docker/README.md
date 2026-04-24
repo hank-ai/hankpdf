@@ -43,9 +43,26 @@ osxfs/virtiofs/WSL, so `-u` is unnecessary there.
 
 ## Tags
 
-- `:latest` — most recent commit on `main`
-- `:vX.Y.Z` — released versions
-- `:sha-<short>` — specific commit
+**Mutability matters — pick the right tag for your use case:**
+
+| Tag | Mutable? | Points at | Use for |
+|---|---|---|---|
+| `:latest` | **MUTABLE** | newest `main` merge | local dev, quick tries |
+| `:main` | **MUTABLE** | newest `main` merge | local dev, CI of downstream projects |
+| `:vX.Y.Z` | **IMMUTABLE** | that exact release | production, signed batch jobs |
+| `:vX.Y` | **MUTABLE** | newest patch within the minor | acceptable for production if you're okay with auto-patching |
+| `:sha-<short>` | **IMMUTABLE** | that exact commit | production, reproducible research, bisecting |
+| `@sha256:<digest>` | **IMMUTABLE** | those exact bytes | highest assurance — even a mutable-tag flip can't change what you pull |
+
+**MUTABLE tags can be repointed at different bytes over time.** A
+production batch job pinned to `:latest` will silently pick up a new
+image next time Docker pulls, which may behave differently from the
+one you tested. Pin to an IMMUTABLE tag (or a digest) for any run you
+need to reproduce later.
+
+See [SECURITY.md](../SECURITY.md#release-integrity) for the cosign +
+SLSA verification recipes that confirm the digest you pulled really
+did come from the build workflow you expected.
 
 ## Verifying the image
 
