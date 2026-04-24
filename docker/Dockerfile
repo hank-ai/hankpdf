@@ -80,13 +80,30 @@ RUN JBIG2ENC_COMMIT="$(python3 -c 'import json; print(json.load(open("/tmp/versi
 # digest, update BOTH FROM lines in lockstep.
 FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033 AS runtime
 
+# Build metadata passed from the docker workflow. Defaults keep local
+# `docker build` working without requiring every build-arg on the CLI;
+# CI always sets them from the job context.
 ARG HANKPDF_VERSION=0.0.0
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
+ARG BASE_IMAGE_DIGEST=sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033
 
 LABEL org.opencontainers.image.source="https://github.com/hank-ai/hankpdf"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${HANKPDF_VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.title="HankPDF"
 LABEL org.opencontainers.image.description="Aggressive, safety-first PDF shrinker for scanned documents"
+
+# Surface the metadata at runtime too — `hankpdf --version` and
+# `--doctor` read /etc/hankpdf/build-info.json (Group C). ENV vars
+# also get set so shell scripts can `echo $HANKPDF_VERSION` without
+# needing jq. The file is world-readable (no secrets).
+ENV HANKPDF_VERSION=${HANKPDF_VERSION} \
+    HANKPDF_GIT_SHA=${GIT_SHA} \
+    HANKPDF_BUILD_DATE=${BUILD_DATE} \
+    HANKPDF_BASE_IMAGE_DIGEST=${BASE_IMAGE_DIGEST}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -125,6 +142,42 @@ RUN qpdf --version | head -1 | grep -qE '^qpdf version (1[2-9]|11\.(6\.[3-9]|6\.
 
 # Copy the vendored jbig2 binary from the builder stage.
 COPY --from=builder /usr/local/bin/jbig2 /usr/local/bin/jbig2
+
+# Copy versions.json into the runtime stage so build-info.json can
+# reference the pinned jbig2enc commit at its canonical source (and
+# `hankpdf --doctor` can echo it).
+COPY .github/versions.json /etc/hankpdf/versions.json
+
+# Write /etc/hankpdf/build-info.json with the canonical runtime
+# identity. `hankpdf --version` and `--doctor` both read this file
+# and include it in every CompressReport so an on-call can tie an
+# output back to the exact image that produced it (Group C).
+#
+# The file ends up in the final image layer immediately before USER
+# hankpdf, so the hankpdf user can read it (world-readable by default).
+# qpdf / tesseract / python versions are probed at write time so a
+# future apt refresh that changes them is reflected here without a
+# Dockerfile edit.
+RUN set -eu; \
+    QPDF_VER="$(qpdf --version | head -n1 | awk '{print $3}')"; \
+    TESS_VER="$(tesseract --version 2>&1 | head -n1 | awk '{print $2}')"; \
+    PY_VER="$(python3 --version | awk '{print $2}')"; \
+    LEP_VER="$(dpkg-query -W -f '${Version}' libleptonica-dev 2>/dev/null || echo unknown)"; \
+    JBIG2_COMMIT="$(python3 -c 'import json; print(json.load(open("/etc/hankpdf/versions.json"))["jbig2enc_commit"])')"; \
+    mkdir -p /etc/hankpdf; \
+    printf '%s\n' '{' \
+        "  \"version\": \"${HANKPDF_VERSION}\"," \
+        "  \"git_sha\": \"${GIT_SHA}\"," \
+        "  \"build_date\": \"${BUILD_DATE}\"," \
+        "  \"base_image_digest\": \"${BASE_IMAGE_DIGEST}\"," \
+        "  \"jbig2enc_commit\": \"${JBIG2_COMMIT}\"," \
+        "  \"qpdf_version\": \"${QPDF_VER}\"," \
+        "  \"tesseract_version\": \"${TESS_VER}\"," \
+        "  \"leptonica_version\": \"${LEP_VER}\"," \
+        "  \"python_version\": \"${PY_VER}\"," \
+        "  \"os_platform\": \"debian-trixie\"" \
+        '}' > /etc/hankpdf/build-info.json; \
+    cat /etc/hankpdf/build-info.json
 
 # Non-root runtime user.
 RUN groupadd --gid 1000 hankpdf \
