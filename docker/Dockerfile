@@ -77,11 +77,23 @@ COPY --from=builder /usr/local/bin/jbig2 /usr/local/bin/jbig2
 RUN groupadd --gid 1000 hankpdf \
     && useradd --uid 1000 --gid 1000 --create-home --shell /sbin/nologin hankpdf
 
-# Install HankPDF.
+# Install HankPDF with uv + frozen lockfile.
+#
+# `pip install /app` floats every transitive (wheel index picks the newest
+# compatible build each image build) — a supply-chain hole the same shape
+# as floating action tags. `uv sync --frozen` refuses to run if uv.lock is
+# out of sync with pyproject.toml, so the image ships EXACTLY what CI
+# tested. --no-dev drops pytest/ruff/mypy from the runtime image.
+#
+# uv itself is pulled via `pip install uv`; we pin the uv version so this
+# is a single reproducibility surface (bumped by Dependabot pip ecosystem).
 WORKDIR /app
-COPY pyproject.toml README.md LICENSE NOTICE /app/
+COPY pyproject.toml uv.lock README.md LICENSE NOTICE /app/
 COPY pdf_smasher /app/pdf_smasher
-RUN pip install --no-cache-dir /app
+RUN pip install --no-cache-dir "uv==0.9.9" \
+    && uv sync --frozen --no-dev --no-editable \
+    && rm -rf /root/.cache/uv
+ENV PATH="/app/.venv/bin:${PATH}"
 
 USER hankpdf
 WORKDIR /data
