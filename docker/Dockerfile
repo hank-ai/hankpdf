@@ -34,9 +34,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # jbig2enc is unmaintained upstream; pin to a specific commit for
-# reproducible builds. Verified latest main SHA as of 2026-04-23.
-ARG JBIG2ENC_COMMIT=e3fcf0210efa4f644e458a51616d86098d47d8da
-RUN git clone https://github.com/agl/jbig2enc.git /src/jbig2enc \
+# reproducible builds. Source of truth: .github/versions.json
+# (jbig2enc_commit). Both the Docker image and the Windows build read
+# from the same JSON so a bump is a single line; ci.yml's
+# versions-single-source job fails the build if this SHA ever appears
+# outside .github/versions.json (grep-and-fail).
+#
+# The file is copied into the builder stage and parsed with a tiny
+# python one-liner (python is already present since the base image is
+# python:3.14-slim-*, so no extra tool is needed).
+COPY .github/versions.json /tmp/versions.json
+RUN JBIG2ENC_COMMIT="$(python3 -c 'import json; print(json.load(open("/tmp/versions.json"))["jbig2enc_commit"])')" \
+    && case "${JBIG2ENC_COMMIT}" in \
+        [0-9a-f]*) ;; \
+        *) echo "FATAL: invalid jbig2enc commit SHA" >&2; exit 1 ;; \
+    esac \
+    && git clone https://github.com/agl/jbig2enc.git /src/jbig2enc \
     && cd /src/jbig2enc \
     && git checkout "${JBIG2ENC_COMMIT}" \
     && ./autogen.sh \

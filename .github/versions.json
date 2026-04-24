@@ -1,0 +1,6 @@
+{
+  "_comment": "Single source of truth for native-dep versions across the repo. docker/Dockerfile and .github/workflows/windows-jbig2enc.yml both read from this file so there is exactly one line to update when bumping. ci.yml enforces that no other file mentions the jbig2enc commit SHA via a grep-and-fail check.",
+  "jbig2enc_commit": "e3fcf0210efa4f644e458a51616d86098d47d8da",
+  "leptonica_min_version": "1.85.0",
+  "qpdf_min_version": "11.6.3"
+}

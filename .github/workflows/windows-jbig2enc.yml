@@ -27,9 +27,11 @@ permissions:
   contents: write  # required by softprops/action-gh-release on tag push
 
 env:
-  # Must match the pinned commit in docker/Dockerfile so the Linux container
-  # and the Windows binary are built from the same jbig2enc source.
-  JBIG2ENC_COMMIT: e3fcf0210efa4f644e458a51616d86098d47d8da
+  # BUNDLE_NAME is the release zip's base name. JBIG2ENC_COMMIT is no longer
+  # set here — see the "Read pinned versions" step below, which pulls from
+  # .github/versions.json (single source of truth shared with the Docker
+  # build). CI's workflow-audit job fails if the commit SHA ever appears
+  # outside versions.json.
   BUNDLE_NAME: jbig2-windows-x64
 
 jobs:
@@ -41,10 +43,30 @@ jobs:
         shell: msys2 {0}
     steps:
       - name: Checkout (workflow file only)
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Read pinned versions from .github/versions.json
+        shell: pwsh
+        run: |
+          # Use pwsh + ConvertFrom-Json (stdlib on GitHub's windows-2022
+          # runner) so we don't need jq. Exports JBIG2ENC_COMMIT into the
+          # job env via $GITHUB_ENV. If versions.json ever drifts this
+          # step fails fast before MSYS2 bootstrap.
+          $versions = Get-Content -Raw .github/versions.json | ConvertFrom-Json
+          if (-not $versions.jbig2enc_commit) {
+              Write-Error "versions.json missing jbig2enc_commit"
+              exit 1
+          }
+          if ($versions.jbig2enc_commit -notmatch '^[a-f0-9]{40}$') {
+              Write-Error "versions.json jbig2enc_commit is not a 40-hex SHA"
+              exit 1
+          }
+          "JBIG2ENC_COMMIT=$($versions.jbig2enc_commit)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LEPTONICA_MIN_VERSION=$($versions.leptonica_min_version)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "Pinned jbig2enc commit: $($versions.jbig2enc_commit)"
 
       - name: Set up MSYS2 / MinGW64
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c  # v2
         with:
           msystem: MINGW64
           update: true

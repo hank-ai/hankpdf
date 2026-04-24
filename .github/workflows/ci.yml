@@ -41,6 +41,41 @@ jobs:
       - name: Mypy
         run: uv run mypy pdf_smasher
 
+  versions-single-source:
+    # Enforce that .github/versions.json is the ONLY place the jbig2enc
+    # commit SHA appears. If someone copy-pastes the SHA into docker/
+    # Dockerfile or a workflow, this job fails so the single-source-of-
+    # truth invariant from A5 stays intact.
+    name: versions.json is the only source of truth
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Enforce single source of truth for JBIG2ENC_COMMIT
+        env:
+          VERSIONS_FILE: .github/versions.json
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y jq; fi
+          SHA=$(jq -r '.jbig2enc_commit' "$VERSIONS_FILE")
+          if [[ ! "$SHA" =~ ^[a-f0-9]{40}$ ]]; then
+              echo "::error::versions.json jbig2enc_commit is not a 40-hex SHA: $SHA"
+              exit 1
+          fi
+          # Grep the SHA everywhere EXCEPT versions.json. Exclude .git
+          # and the worktrees dir so local dev runs don't trip on their
+          # own commit history.
+          MATCHES=$(grep -r --line-number --fixed-strings "$SHA" . \
+              --exclude-dir=.git \
+              --exclude-dir=.worktrees \
+              --exclude="versions.json" \
+              | grep -v "$VERSIONS_FILE" || true)
+          if [ -n "$MATCHES" ]; then
+              echo "::error::JBIG2ENC_COMMIT SHA '$SHA' appears outside $VERSIONS_FILE:"
+              echo "$MATCHES"
+              exit 1
+          fi
+          echo "OK: $SHA only appears in $VERSIONS_FILE"
+
   test:
     name: Test (Python 3.14, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
