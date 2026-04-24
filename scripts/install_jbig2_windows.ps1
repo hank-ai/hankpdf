@@ -126,11 +126,38 @@ function Resolve-ReleaseAsset {
     }
 
     Write-Ok "Found $AssetName in release $($release.tag_name)"
-    return [PSCustomObject]@{
-        Tag         = $release.tag_name
-        DownloadUrl = $asset.browser_download_url
-        Size        = $asset.size
+
+    # Also locate the SHA-256 sidecar. This is required — without it we
+    # have no way to verify the zip we downloaded is the one CI produced.
+    # If the release is missing the sidecar, refuse the install rather
+    # than silently skip the check (degrades-open is worse than degrades-
+    # closed for supply-chain).
+    $sidecarName = "$AssetName.sha256"
+    $sidecar = $release.assets | Where-Object { $_.name -eq $sidecarName } | Select-Object -First 1
+    if (-not $sidecar) {
+        throw "Release $($release.tag_name) is missing '$sidecarName'. Refusing to install without a SHA-256 sidecar (supply-chain hygiene). Re-run the Windows release workflow with A7 or newer, or pass -Version to pin to a release that has one."
     }
+
+    return [PSCustomObject]@{
+        Tag             = $release.tag_name
+        DownloadUrl     = $asset.browser_download_url
+        Size            = $asset.size
+        SidecarUrl      = $sidecar.browser_download_url
+    }
+}
+
+function Get-ExpectedSha256 {
+    param([string]$SidecarUrl)
+
+    # Sidecar is GNU sha256sum format: "<64 hex chars>  <filename>". We
+    # only trust the hex; the filename is informational. Strip whitespace
+    # and lowercase for case-insensitive comparison against Get-FileHash.
+    $content = (Invoke-WebRequest -Uri $SidecarUrl -UseBasicParsing -Headers @{ 'User-Agent' = $UserAgent }).Content
+    $firstToken = ($content -split '\s+', 2)[0].Trim().ToLowerInvariant()
+    if ($firstToken -notmatch '^[a-f0-9]{64}$') {
+        throw "Sidecar did not contain a 64-hex-char SHA-256 digest. Got: $firstToken"
+    }
+    return $firstToken
 }
 
 function Add-ToUserPath {
@@ -183,6 +210,19 @@ try {
             throw "Downloaded file is empty: $zipPath"
         }
         Write-Ok "Downloaded $($fi.Length) bytes"
+
+        # 2a. Verify SHA-256 against the sidecar published alongside the
+        #     zip. Any mismatch means either (a) the download was
+        #     corrupted/MITM'd, or (b) the release was tampered with
+        #     post-publish. Fail hard — do NOT install. The user's
+        #     existing install (if any) is untouched.
+        Write-Step "Verifying SHA-256 against release sidecar"
+        $expected = Get-ExpectedSha256 -SidecarUrl $info.SidecarUrl
+        $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "[E-SHA256-MISMATCH] SHA-256 mismatch on $AssetName. Expected $expected, got $actual. Refusing to install a download that doesn't match the release sidecar; your existing install (if any) is unchanged."
+        }
+        Write-Ok "SHA-256 verified: $actual"
 
         # 3. Ensure destination exists and extract.
         if (-not (Test-Path -Path $Destination)) {
