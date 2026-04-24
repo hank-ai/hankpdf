@@ -31,11 +31,13 @@ Hostile PDF → pdfium or qpdf or Tesseract or jbig2enc → RCE → escape to us
 ```
 
 **Mitigations:**
-- All engine work runs in a **child subprocess** bounded by `RLIMIT_AS` (memory), `RLIMIT_CPU` (per-page), and a wall-clock watchdog. Crash / RCE is scoped to the child.
-- **Decompression-bomb guard**: `PIL.Image.MAX_IMAGE_PIXELS` set explicitly; exceed → `DecompressionBombError` with exit 16.
-- **JBIG2 decoder hardening**: we never re-decode existing `/JBIG2Decode` streams outside the sandbox (ForcedEntry / CVE-2021-30860 attack class).
+- **Wall-clock and per-page watchdogs** (implemented): `per_page_timeout_seconds` is enforced via `future.result(timeout=…)` (serial) and `as_completed(timeout=…)` (parallel); `total_timeout_seconds` is checked at phase boundaries via `_check_total_timeout`. Raises typed `PerPageTimeoutError` / `TotalTimeoutError` / `OcrTimeoutError` (exit codes `[E-TIMEOUT-PER-PAGE]`, `[E-TIMEOUT-TOTAL]`, `[E-OCR-TIMEOUT]`).
+- **Subprocess resource caps via RLIMIT** (planned — `pdf_smasher/sandbox/` is a Phase-0 scaffold; `subprocess_runner.py` and `platform_caps.py` not yet written): `RLIMIT_AS` memory cap and `RLIMIT_CPU` per-page CPU cap are listed in the ROADMAP (Phase 4) but are **not implemented in this build**. See `docs/ROADMAP.md` §Phase 4.
+- **DoS caps** (implemented): `--image-dpi ≤ 1200`, `--pages` cardinality ≤ 1 M, `--max-workers ≤ 256`, sub-byte `--max-output-mb` rejected at parse time, timeout flags validated > 0.
+- **Decompression-bomb guard** (implemented): `PIL.Image.MAX_IMAGE_PIXELS` set at import in `pdf_smasher/_pillow_hardening.py` to `MAX_BOMB_PIXELS` (~715 Mpx); Pillow's `DecompressionBombError` is translated to our typed exception and routes to exit `[E-INPUT-DECOMPRESSION-BOMB]` (exit 16). A pre-allocation pixel-budget check in `pdf_smasher/engine/image_export.py` computes `target_w × target_h` from page geometry *before* rasterization — not after.
+- **JBIG2 decoder hardening** (implemented): we never re-decode existing `/JBIG2Decode` streams outside the sandbox (ForcedEntry / CVE-2021-30860 attack class).
 - **Ghostscript excluded** from the stack: historically the worst CVE offender plus AGPL-problematic.
-- **Docker image** adds defense-in-depth: non-root user, read-only rootfs, baked seccomp profile, no network by default.
+- **Docker image** (partial): non-root user is implemented (`docker/Dockerfile`). Read-only rootfs and baked seccomp profile are listed for Phase 6 in `docker/README.md` but **not yet applied** — the image is still a Phase-0 skeleton. See `docs/ROADMAP.md` §T4.7.
 
 ### 2. Hostile PDF → silent content drift
 
@@ -44,15 +46,15 @@ Hostile PDF → compresses successfully → output has subtly wrong content → 
 ```
 
 **Mitigations:**
-- **Content-preservation verifier** runs on every page: OCR Levenshtein diff ≤ 2%, reading-order-insensitive bag-of-lines Levenshtein, global SSIM ≥ 0.92, tile-level min SSIM ≥ 0.85, **digit-multiset exact match** on numeric tokens, structural audit (page count, annots, forms).
+- **Content-preservation verifier** (implemented, opt-in): OCR Levenshtein diff ≤ 2%, reading-order-insensitive bag-of-lines Levenshtein, global SSIM ≥ 0.92, tile-level min SSIM ≥ 0.85, **digit-multiset exact match** on numeric tokens, structural audit (page count, annots, forms). The verifier is **off by default** (`skip_verify=True`). Pass `--verify` to enable. When skipped, the CLI emits a `[W-VERIFIER-SKIPPED]` banner on stderr so users know verification did not run; the report carries `status="skipped"` and a `verifier-skipped` warning code. To treat skipped verification as a hard failure in automation, check for exit code `[E-VERIFIER-FAIL]` or assert `report.verifier.status != "skipped"`.
 - **Safe mode** tightens thresholds and escalates to human review on any tile SSIM < 0.96.
-- **Signed PDFs**: refuse by default. Explicit opt-in required. Certifying signatures (`/Perms /DocMDP`) need a second, stricter flag.
+- **Signed PDFs**: refuse by default (`[E-INPUT-SIGNED]`). Explicit opt-in required. Certifying signatures (`/Perms /DocMDP`) need a second, stricter flag (`[E-INPUT-CERTIFIED-SIGNED]`).
 
 ### 3. Hostile PDF → JBIG2 6↔8 substitution (Xerox bug class)
 
 **Mitigations:**
 - JBIG2 generic region coding only. Symbol mode and refinement flag (`-r`) are **absent from the wrapper**, not merely defaulted off.
-- `--legal-mode` / `legal_codec_profile=True` forces CCITT G4 instead of JBIG2 for users who require BSI / NARA compliance.
+- `--legal-mode` / `legal_codec_profile="ccitt-g4"` forces CCITT G4 instead of JBIG2 for users who require BSI / NARA compliance. **Note**: `legal_codec_profile` raises `NotImplementedError` in the current build — this is a planned feature (Phase 3). The `--legal-mode` CLI flag is accepted but the engine guard will reject it. See `docs/ROADMAP.md`.
 
 ### 4. Password leakage
 
@@ -61,9 +63,9 @@ User passes password → ends up in ps output, core dump, or log
 ```
 
 **Mitigations:**
-- Passwords never on argv. `--password-file PATH` or `HANKPDF_PASSWORD` env var only.
+- Passwords never on argv (verified): `--password-file PATH` or `HANKPDF_PASSWORD` env var only. No `--password <string>` flag exists in the CLI.
 - Password buffer zeroed on process exit.
-- `PR_SET_DUMPABLE=0` on Linux child to prevent core-dump leakage.
+- `PR_SET_DUMPABLE=0` on Linux child to prevent core-dump leakage (planned — no implementation found in this build; sandbox subprocess not yet written).
 
 ### 5. Content leakage via logs
 
@@ -122,3 +124,5 @@ This doc gets reviewed:
 - On any new CVE in our dep chain.
 - On any change to the engine pipeline that adds a new attack surface.
 - Annually as a clean sweep.
+
+**Last reviewed**: 2026-04-23 — updated to reflect the `feat/dcr-wave-1-remediation` branch (55-commit DCR-driven remediation). Key changes: decompression-bomb guard and watchdog timeouts are now implemented; RLIMIT_AS/RLIMIT_CPU subprocess caps, read-only rootfs/seccomp Docker hardening, `PR_SET_DUMPABLE`, and CCITT G4 legal mode remain planned. Verifier opt-in default (`--verify`) and `[W-VERIFIER-SKIPPED]` banner documented.

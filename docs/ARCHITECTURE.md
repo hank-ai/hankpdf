@@ -58,6 +58,8 @@ The exclusion of Ghostscript is the central licensing decision. It was the defau
 - A process-global `threading.Lock` wraps every pypdfium2 call inside a single process (pdfium is not safe even across different documents).
 - Input PDFs are split via qpdf `--split-pages` to per-page work units, shipped to workers, rejoined via qpdf `--empty --pages` (structural splice, no re-encode).
 
+**OCR pool lifetime and cleanup.** Within `_process_single_page`, a `ThreadPoolExecutor` for OCR calls is constructed conditionally (only when parallelism is needed) and managed inside a `contextlib.ExitStack`. On the happy path the stack is closed normally; on any exception path the `ExitStack.__exit__` call includes `cancel_futures=True`, preventing wedged Tesseract subprocesses from keeping the pool alive after an error or timeout. Pytesseract itself receives a `timeout=` argument (sourced from `per_page_timeout_seconds` in `CompressOptions`) so an unresponsive Tesseract subprocess is killed rather than waiting indefinitely for the pool to drain.
+
 **Revisit for v1.1:** when `cp314t` wheels are available for pypdfium2, pikepdf (+ lxml), opencv, and when pdfium declares thread-safety (unlikely near-term per upstream statements). Realistic earliest: Q3 2026.
 
 **Stack notes:**
@@ -70,9 +72,9 @@ Alternatives considered and rejected:
 - **Python 3.12** — two-year-old, no reason to start a new project there.
 - **Node/TypeScript** — no credible OCR, no credible JBIG2, no credible PDF-manipulation ecosystem.
 
-## 4. Pipeline: Triage → Sanitize → Recompress
+## 4. Pipeline: Triage → Input-Policy Gate → Sanitize → Recompress (or Image Export)
 
-Every PDF — regardless of origin — flows through three phases in this order. The phases are independently testable and independently sandboxable.
+Every PDF — regardless of origin — flows through the phases below in order. The phases are independently testable and independently sandboxable.
 
 ### 4.1 Triage
 
@@ -87,7 +89,18 @@ Operations:
 - Page-level metadata: count, `/MediaBox`, `/Rotate`, OCGs, tagging (`/StructTreeRoot`, `/MarkInfo`)
 - PDF/A conformance detection (XMP `pdfaid:part`)
 
-Output: a `TriageReport` structure consumed by Sanitize. Classifies into one of: `proceed`, `refuse`, `pass-through`, `require-password`.
+Output: a `TriageReport` structure consumed by the input-policy gate and Sanitize. Classifies into one of: `proceed`, `refuse`, `pass-through`, `require-password`.
+
+### 4.1a Input-policy gate
+
+Immediately after Triage and before any destructive operation, `_enforce_input_policy(tri, options, input_data)` in `pdf_smasher/__init__.py` is the single decision point for all early-exit conditions. This avoids scattered refusal logic and ensures both `compress()` and the CLI image-export path enforce the same rules.
+
+Conditions that cause immediate exit here:
+- Encrypted (user-password, certificate, or owner-restriction) — raises `EncryptedPdfError`
+- Digitally signed without explicit opt-in — raises `SignedPdfError`
+- Certified PDF (`/DocMDP` present) — raises `CertifiedPdfError`
+- Input exceeds the configured size ceiling — raises `InputTooLargeError`
+- Input is below `min_input_mb` — returns with `status="passed_through"` (see §4.5 on passthrough semantics)
 
 ### 4.2 Sanitize
 
@@ -102,7 +115,11 @@ Operations:
 
 Output: a "clean" in-memory `pikepdf.Pdf` object ready for page-level work.
 
-### 4.3 Recompress
+### 4.3 Recompress (or image-export alternate exit)
+
+If `--output-format jpeg|png|webp` is specified, the pipeline exits Sanitize and **bypasses the MRC pipeline entirely**. Pages are rasterized via pdfium and encoded to the requested image format by Pillow (libjpeg-turbo for JPEG, libpng+zlib for PNG, libwebp for WebP). The streaming generator `iter_pages_as_images` yields encoded page bytes one at a time; the eager wrapper `render_pages_as_images` materializes all pages into a list. Both live in `pdf_smasher/engine/image_export.py`. The input-policy gate (§4.1a) still applies before this path; the MRC verifier does not.
+
+For the standard PDF-in, PDF-out case:
 
 Goals: achieve the target compression ratio while preserving content and searchability. The algorithm follows ITU-T T.44 (Mixed Raster Content) and draws on the DjVu foreground/background decomposition literature (Léon Bottou et al., AT&T Labs, 1998–2001). See [KNOWLEDGE.md §2](KNOWLEDGE.md) for the full technical reference.
 
@@ -151,6 +168,33 @@ From published benchmarks on this exact algorithm:
 
 Ratio comes primarily from aggressive background downsampling + color→mono detection, not from any single codec. JBIG2 contributes 20–50% of the mono gain; the rest is downsampling.
 
+### 4.4 Passthrough floors
+
+After Recompress, `compress()` checks two passthrough conditions before returning the compressed result:
+
+- **`min_input_mb`**: if the raw input is smaller than this floor, no compression is attempted at all; the input bytes are returned unchanged with `status="passed_through"`. Checked in the input-policy gate (§4.1a), not post-compression.
+- **`min_ratio`**: if the achieved compression ratio falls below this floor (default `1.5×`), the input bytes are returned unchanged with `status="passed_through"`. This avoids delivering a "compressed" output that is actually larger or only marginally smaller than the original.
+
+Both conditions are declared in `CompressOptions`. Callers can detect passthrough via `CompressReport.status`.
+
+### 4.5 Chunked output
+
+When `--max-output-mb` is set, the output is split into multiple files rather than one potentially large PDF. The greedy per-page packer in `pdf_smasher/engine/chunking.py` accumulates pages into a chunk until adding the next page would exceed the byte budget, then flushes and starts a new chunk.
+
+Output filenames follow the pattern `{base}_{NNN}{ext}` where `NNN` is 1-indexed and zero-padded to the number of digits needed for the total chunk count (e.g. `report_01.pdf`, `report_02.pdf`). This applies to both the MRC path and the image-export path.
+
+### 4.6 Three-layer timeout model
+
+All timeout durations are configured via `CompressOptions` and applied consistently across both serial and parallel page processing:
+
+| Layer | Mechanism | Exception raised |
+|---|---|---|
+| **Per-OCR-call** | pytesseract `timeout=` kwarg (sourced from `per_page_timeout_seconds`) | `OcrTimeoutError` |
+| **Per-page watchdog** | `future.result(timeout=per_page_timeout_seconds)` in serial mode; `as_completed(timeout=...)` in parallel mode | `PerPageTimeoutError` |
+| **Total wall-clock watchdog** | `_check_total_timeout` called at phase boundaries (after Triage, after each page, after Recompress) | `TotalTimeoutError` |
+
+All three exception types are subclasses of `CompressError`, so callers that catch the base class handle all timeout cases. The per-OCR timeout prevents wedged Tesseract subprocesses from stalling the thread pool indefinitely; when a `PerPageTimeoutError` or `TotalTimeoutError` fires during parallel processing, the `ExitStack`-managed `ThreadPoolExecutor` is torn down with `cancel_futures=True` so no zombie futures outlive the exception handler (see §5 on ExitStack OCR pool lifetime).
+
 ## 5. Content-preservation verifier (mandatory gate)
 
 After Recompress, before returning the output, every page is verified against the input. Any page failing triggers `ContentDriftError` — the whole job aborts, nothing is silently shipped.
@@ -171,11 +215,13 @@ Checks (all must pass):
 
 **Safe mode** tightens thresholds (raw Levenshtein ≤ 2%, tile SSIM ≥ 0.88) and enables the stricter digit-multiset exact-match gate by default. On any tile SSIM below the safe threshold on a MIXED page, instead of returning a pass, the engine returns `ContentDriftError` with exit 21 — the caller (user or script) decides whether to accept the original or retry at different settings. Intended for content classes where stricter preservation matters (clinical records, legal documents, anything where a silent digit swap is unacceptable).
 
+**Verifier honesty / skipped path.** `VerifierResult.status` is not a boolean pass/fail — it is an enum including `"skipped"`. When `skip_verify=True` is passed (e.g. via `--skip-verify` on the CLI), `_VerifierAggregator.skipped_result()` emits a fail-closed sentinel: `ssim=0`, `lev=1`, `structural_match=False`. This ensures any downstream consumer treating verifier metrics as a quality signal will see a conservative (pessimistic) result, not a falsely clean one. The CLI prints a stderr banner when the verifier was skipped or failed, and the `ProgressEvent` for the verifier step carries `verifier="skipped"` so live tqdm progress bars do not contradict the final report.
+
 **Pre-verifier content extraction**: the verifier runs OCR regardless of whether the user requested OCR in the output, because OCR diff is the primary signal. The OCR pass is disposable.
 
 **Invalid UTF-8 handling**: Tesseract occasionally emits invalid UTF-8 bytes; decode with `errors='replace'` both sides to maintain symmetry and avoid exceptions.
 
-**Decompression-bomb guard** (runs before any SSIM): `PIL.Image.MAX_IMAGE_PIXELS` set explicitly; decode wrapped in try/except → `DecompressionBombError` from our exception hierarchy; structured counter `rejected:decompression_bomb`.
+**Decompression-bomb guard** (runs before any SSIM): `PIL.Image.MAX_IMAGE_PIXELS` is set at import time by `pdf_smasher/_pillow_hardening.py`. The cap value is declared once in `pdf_smasher/_limits.py` (`MAX_BOMB_PIXELS`) and shared between Pillow's import-time cap and image-export's pre-allocation pixel budget check, so the two limits cannot diverge. Decode is wrapped in try/except; Pillow's `DecompressionBombError` is translated to our typed `DecompressionBombError` subclass so the CLI can route to its dedicated exit code (`EXIT_DECOMPRESSION_BOMB=16`). Structured counter: `rejected:decompression_bomb`.
 
 ## 6. Weird-PDF handling matrix
 
@@ -217,6 +263,8 @@ Engine work runs in a child subprocess so a malformed/hostile PDF can't kill the
 - **Windows**: Job Objects with memory and CPU limits and break-away-from-job disabled (via `pywin32` or equivalent).
 - **No network is opened by the engine** — the user's host firewall is the outer backstop; we don't need network isolation because we never try.
 
+The per-page and total wall-clock timeout layers (§4.6) complement the OS-level resource caps: `RLIMIT_CPU` is a coarse safety net for runaway processes; the Python-level timeouts provide deterministic, exception-carrying interruption that the engine can recover from gracefully.
+
 ### 8.2 Docker image — defense-in-depth for shared-runner users
 
 When HankPDF runs in our published Docker image, the image ships with:
@@ -256,6 +304,10 @@ Users who want to wrap HankPDF inside their own ingestion pipeline, desktop app,
 
 The single engine is exposed through a unified `compress(bytes, CompressOptions) -> (bytes, CompressReport)` interface. CLI flags and Python API calls all produce the same `CompressOptions` struct. See [SPEC.md §1.1](SPEC.md).
 
+`compress()` also accepts an optional `progress_callback: Callable[[ProgressEvent], None]` argument. The CLI wires this to tqdm progress bars for both the MRC and image-export paths. `ProgressEvent` carries a `verifier` field that distinguishes `"skipped"` when `skip_verify=True` is set, so the live bar never reports false verifier progress (see §5 on verifier honesty).
+
+`CompressReport.schema_version` is currently **2**. A migration note for consumers reading v1 reports is in SPEC §11.1.
+
 Configuration precedence: command-line flag > environment variable > config file > built-in default.
 
 ## 11. Security posture
@@ -264,8 +316,9 @@ HankPDF runs on the user's machine. We are not a Business Associate, HIPAA cover
 
 - **No network calls.** Engine makes zero outbound network requests during compression. The only network activity involved with HankPDF at all is whatever the user does with the output (we don't initiate any).
 - **No persistent storage outside user-requested output.** Input is read, output is written to the path the user specified, sidecar manifest (optional) sits next to output. `TemporaryDirectory()` context manager cleans intermediate files even on SIGKILL.
+- **Atomic output writes.** Every user-facing output file (compressed PDF, image-export frames, chunked outputs) is written via `pdf_smasher/utils/atomic.py::_atomic_write_bytes`, which writes to a `.partial` sibling first and then calls `Path.replace()`. On POSIX, `rename(2)` is atomic, so a partially-written output file is never observable to the user — interrupted runs do not corrupt the destination path.
 - **Passwords**: never on argv (subprocess argv is `ps`-visible). Passed via `--password-file` or `HANKPDF_PASSWORD` env var. Held in a bytes buffer, zeroed on exit. `PR_SET_DUMPABLE=0` on Linux to block password leak via core dumps.
-- **Logs** stay on the user's machine. Filenames hashed when logged; OCR text never logged; error context uses structured enum codes, not free-text content. No log pushes to any server.
+- **Logs** stay on the user's machine. Every `[hankpdf]` stderr line carries a stable `[W-*]` (warning) or `[E-*]` (error) code from `pdf_smasher/cli/warning_codes.py`, plus a SHA-redacted input filename prefix. Ten warning codes and thirteen error codes are documented in SPEC §8.5.1. Stable codes let scripts and log aggregators key on codes rather than free-text messages; the SHA prefix lets users correlate warnings to inputs without exposing the raw filename. OCR text is never logged.
 - **Sandboxing** of the engine subprocess (see §8) protects the user's machine from hostile PDFs — not us from their content. If a malformed PDF would crash or RCE a parser, the sandbox contains it.
 - **CVE hygiene**: tight dependency pins (qpdf ≥11.6.3, OpenJPEG ≥2.5.4, pdfium tracked weekly). See [KNOWLEDGE.md §7](KNOWLEDGE.md).
 - **Release artifact integrity**: PyPI upload via trusted publishing (GitHub OIDC, no long-lived tokens); GHCR image via GitHub OIDC; GitHub Releases with SHA-256 checksums in release notes. Users can verify downloaded artifacts against published checksums. No separate code-signing infrastructure because we don't ship platform-native binaries.
@@ -280,7 +333,7 @@ To keep scope honest:
 - **Not an OCR service.** We do OCR as a means to an end (searchability + verifier). Customers who want OCR-as-a-product should use Tesseract directly or commercial alternatives.
 - **Not a PDF/A conversion tool.** We aim for PDF/A-2u output where input permits, but we don't offer PDF/A-3, PDF/A-1b mode switches, or explicit archive-grade profiles.
 - **Not a MIME/OOXML compressor.** Only PDF input.
-- **Not image format conversion.** We don't accept TIFFs, JPEGs, or image folders. Wrap them in a PDF first.
+- **Not an image ingestion tool.** We don't accept TIFFs, JPEGs, or image folders as *input*. Wrap them in a PDF first. (PDF-to-image *output* is supported via `--output-format jpeg|png|webp`.)
 
 ## 13. Decisions and open questions
 
@@ -297,3 +350,9 @@ To keep scope honest:
 - **Repo visibility**: private for now. Go public when ready.
 - **License**: Apache-2.0. Permissive (others may use, modify, redistribute) but requires attribution and NOTICE preservation — matches the "ok for others to use but must list us as author" requirement.
 - **DCO vs CLA**: moot while private. Revisit at the point of going public.
+- **Three-layer timeout model implemented** (§4.6). Per-OCR, per-page, and total wall-clock timeouts are all live; each raises a distinct typed exception. This replaces earlier designs that only had OS-level `RLIMIT_CPU` as a backstop.
+- **Passthrough floors implemented** (§4.4). `min_input_mb` and `min_ratio` are both in `CompressOptions` and enforced in production. Default `min_ratio=1.5`.
+- **Input-policy gate centralized** (§4.1a). All early-exit refusal logic consolidated into `_enforce_input_policy`; the gate is called identically from `compress()` and the CLI image-export path, eliminating dual-maintenance risk.
+- **Atomic writes everywhere** (§11). All output paths use `_atomic_write_bytes`; no half-written files observable to user or downstream scripts.
+- **Stable warning/error codes on all stderr output** (§11). Ten `[W-*]` and thirteen `[E-*]` codes in `pdf_smasher/cli/warning_codes.py`; scripts can key on codes rather than parsing message text.
+- **Pillow decompression-bomb cap centralized in `_limits.py`**. `MAX_BOMB_PIXELS` is the single source shared between `_pillow_hardening.py` and image-export's pre-allocation budget. The two limits cannot diverge silently.

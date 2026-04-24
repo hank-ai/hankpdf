@@ -35,7 +35,7 @@ A task is done when every checkbox in it is ticked AND the phase's acceptance cr
 **T0.2 — License and contributing files**
 - [ ] `LICENSE` = Apache-2.0 at repo root.
 - [ ] `NOTICE` listing copyright (our author line) + every third-party attribution required by the bundled stack.
-- [ ] `CONTRIBUTING.md` with dev setup, test, and PR conventions (internal-only while private; kept current so it's ready on open-sourcing).
+- [x] `CONTRIBUTING.md` with dev setup, test, and PR conventions (internal-only while private; kept current so it's ready on open-sourcing). *(commit-type allowlist expanded in Wave-1 DCR)*
 - [ ] `SECURITY.md` — how to report vulnerabilities, disclosure policy, signing key fingerprints once known.
 - [ ] `CODE_OF_CONDUCT.md` — deferred until public (not needed while repo is private).
 
@@ -103,7 +103,7 @@ Replaces the retired free-threaded smoke-test. Every invocation starts with a fl
 - [ ] **qpdf version floor ≥ 11.6.3** — 11.0.0–11.6.2 had a silent character-drop bug in `\d` octal escapes inside binary strings (qpdf #1050 / Launchpad #2039804). Corrupts `/ID`, XMP metadata in encrypted files, bookmark names, form-field values, even encryption keys. Fail to start if violated.
 - [ ] **pdfium binary revision recorded at startup** — pypdfium2 bundles a pinned chromium revision; log it + assert it matches the lockfile value (prevents silent drift between `pip install`s).
 - [ ] **OpenJPEG ≥ 2.5.4** — CVE-2025-54874 OOB heap write in ≤2.5.3.
-- [ ] **Pillow `MAX_IMAGE_PIXELS` explicitly set** — not left at library default; size chosen relative to our `max_input_mb` budget. Assert at module import.
+- [x] **Pillow `MAX_IMAGE_PIXELS` explicitly set** — not left at library default; size chosen relative to our `max_input_mb` budget. Assert at module import. *(set at import in Wave-1 DCR; was documented but not actually applied)*
 - [ ] **`sys._is_gil_enabled()` == True** at process start — if we claim standard GIL build and it reports disabled, fail loud; if it silently flipped due to a dep re-enable, we want to know.
 - [ ] **Tesseract language pack present and pinned by SHA-256** — distro defaults silently swap `tessdata_fast` vs `tessdata` vs `tessdata_best` between versions.
 - [ ] **jbig2enc vendored + build-sha recorded** — agl/jbig2enc is unmaintained upstream; we vendor a specific commit, build in CI, and record the commit hash in `--doctor` output.
@@ -218,12 +218,13 @@ Replaces the retired free-threaded smoke-test. Every invocation starts with a fl
 - [ ] Re-linearize if input was linearized.
 - [ ] Stitch pages with qpdf `--empty --pages`.
 
-**T2.6 — Verifier module**
-- [ ] OCR Levenshtein per page.
-- [ ] Global SSIM + tile-level SSIM (50×50).
-- [ ] Numeric-token confidence delta.
-- [ ] Structural audit (page count, annots, forms, sigs, attachments).
-- [ ] Threshold config per `mode` (fast / standard / medical).
+**T2.6 — Verifier module** *(core shipped in Phase-2b / Wave-1 DCR)*
+- [x] OCR Levenshtein per page. *(reading-order-insensitive bag-of-lines variant shipped)*
+- [x] Global SSIM + tile-level SSIM (50×50).
+- [x] Numeric-token confidence delta → replaced with digit-multiset exact-match (see T2.15).
+- [x] Structural audit (page count, annots, forms, sigs, attachments).
+- [x] `VerifierResult.status` widened to include `"skipped"` with fail-closed sentinel metrics.
+- [ ] Threshold config per `mode` (fast / standard / medical). *(thresholds exist; per-mode tuning not yet complete)*
 - [ ] Unit tests: assert pass on legitimate output, fail on tampered output.
 
 **T2.7 — Provenance / sidecar manifest**
@@ -235,15 +236,16 @@ Replaces the retired free-threaded smoke-test. Every invocation starts with a fl
 - [ ] Unit test: two byte-different, content-identical PDFs canonicalize to the same hash.
 - [ ] Unit test: two content-different PDFs canonicalize to different hashes.
 
-**T2.9 — Sandboxing wrappers**
-- [ ] Process-level: isolate Recompress in a subprocess with `RLIMIT_AS`, `RLIMIT_CPU`, wall-clock timeout.
+**T2.9 — Sandboxing wrappers** *(timeout model shipped in Wave-1 DCR)*
+- [x] Three-layer timeout model implemented: `per_page_timeout_seconds`, `total_timeout_seconds`, and OCR timeout. *(Wave-1 DCR)*
+- [ ] Process-level resource caps: `RLIMIT_AS`, `RLIMIT_CPU` in the engine subprocess. *(timeouts are in place; hard RLIMIT caps remain for T4.1)*
 - [ ] Graceful SIGKILL on resource-cap exceed → `MaliciousPDFError`.
 - [ ] Unit tests with synthetic "bomb" fixtures.
 - [ ] For Docker image: seccomp profile + non-root user + read-only rootfs (T4.7). Host-level sandbox is the user's responsibility.
 
-**T2.10 — Performance pass**
+**T2.10 — Performance pass** *(parallelism shipped in Phase-2b)*
 - [ ] Profile with `py-spy` or `scalene`; identify top hotspots.
-- [ ] Ensure rasterization, mask generation, JBIG2 encode, OpenJPEG encode are subprocess-parallelizable (multiprocessing, not threading — pdfium is not thread-safe).
+- [x] Parallel page processing via `ProcessPoolExecutor` with `forkserver` start method. DoS cap on `--max-workers` enforced. *(Phase-2b)*
 - [ ] Document expected per-page wall time at default settings.
 
 **T2.11 — Per-page strategy selector**
@@ -274,19 +276,34 @@ Replaces the retired free-threaded smoke-test. Every invocation starts with a fl
 - [ ] Strip `/SigFlags` bit 1 only when signature is intentionally invalidated (avoid "broken signature!" viewer warnings on PDFs where we opted in).
 - [ ] Tests against a corpus of signed fixtures.
 
-**T2.15 — Verifier hardening per latest research**
-- [ ] Replace numeric-confidence gate with digit-multiset exact-match (regex `\d+(?:[.,]\d+)?(?:\s*(?:mg|mcg|mL|IU|ng|g|kg|lb|oz|%))?`).
-- [ ] Implement reading-order-insensitive Levenshtein (bag-of-lines best-match).
+**T2.15 — Verifier hardening per latest research** *(core items shipped in Wave-1 DCR)*
+- [x] Replace numeric-confidence gate with digit-multiset exact-match. *(Wave-1 DCR)*
+- [x] Implement reading-order-insensitive Levenshtein (bag-of-lines best-match). *(Wave-1 DCR)*
 - [ ] Pre-OCR small-print detector: histogram connected-component x-height; if p50 <12 px → upscale 2× (OpenCV INTER_CUBIC) OR route to full-JPEG safe mode.
 - [ ] Handwriting-region detector independent of Tesseract (OpenCV CC + stroke-width variance) — seed mask regions Tesseract won't return.
-- [ ] Invalid-UTF-8 resilience: decode with `errors='replace'` both sides.
-- [ ] Decompression-bomb guard: `PIL.Image.MAX_IMAGE_PIXELS` set + try/except → `DecompressionBombError` (exit 16).
+- [x] Invalid-UTF-8 resilience: decode with `errors='replace'` both sides. *(Wave-1 DCR)*
+- [x] Decompression-bomb guard: `PIL.Image.MAX_IMAGE_PIXELS` set at import + pre-allocation guard before decompression. *(Wave-1 DCR; also satisfies T0.9 Pillow check)*
 - [ ] Stamp/watermark symmetry: if we detect low-saturation overlays, apply same despeckle to both input and output OCR passes (symmetric noise).
 - [ ] Cross-host drift measurement: run verifier on macOS + Linux CI; record tolerance budget.
+
+**T2.16 — Phase-2b features + Wave-1–4 DCR remediation** *(all shipped; PR #3 / branch feat/dcr-wave-1-remediation)*
+
+These items were implemented as part of the Phase-2b build-out and the four-wave DCR remediation pass.
+
+- [x] Image-export mode (`--output-format jpeg|png|webp`) via `iter_pages_as_images` streaming generator.
+- [x] Auto-chunked output (`--max-output-mb`); zero-padded 1-indexed chunk/image filenames with pad width scaled past 999.
+- [x] Input-policy gate (`_enforce_input_policy`) applied uniformly to MRC and image-export paths.
+- [x] DoS caps enforced on `--image-dpi`, `--pages` range + total cardinality, `--max-output-mb`, `--max-workers`.
+- [x] Atomic `.partial` + rename writes (no partial output visible to callers on failure or interrupt).
+- [x] Passthrough floors (`min_input_mb`, `min_ratio` default 1.5) to avoid expanding already-small or already-compressed files.
+- [x] Stable `[W-*]` warning and `[E-*]` error codes on every stderr line.
+- [x] Sidecar manifest schema bumped to v2; migration note added to SPEC §11.1.
 
 ---
 
 ## Phase 3 — Python API and CLI
+
+**Starting condition**: Phase-2b engine core (parallel processing, verifier, image-export, chunked output, DCR Wave-1–4 remediation) is complete as of PR #3.
 
 **Goal**: ship the engine behind a stable CLI and importable Python package. This is the first "something real to ship" phase.
 
