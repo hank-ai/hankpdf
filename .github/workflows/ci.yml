@@ -51,8 +51,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # zizmor's GH-advisory integration needs read-only API access
-      # when scanning uses: refs; the default GITHUB_TOKEN covers it.
+      # zizmor uploads its SARIF report to GitHub Code Scanning so
+      # findings show up in the Security tab; that API needs
+      # security-events: write. The default GITHUB_TOKEN covers it
+      # but the job's own permissions block must grant the scope.
+      security-events: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: zizmor

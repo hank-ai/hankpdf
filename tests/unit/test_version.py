@@ -43,7 +43,9 @@ def test_build_info_parses_present_file(tmp_path, monkeypatch) -> None:
         "git_sha": "abcdef1234567",
         "build_date": "2026-04-23T12:00:00Z",
         "base_image_digest": "sha256:deadbeef",
-        "jbig2enc_commit": "e3fcf0210efa4f644e458a51616d86098d47d8da",
+        # Synthetic 40-char hex — keep OFF the real pinned SHA so this fixture
+        # can't shadow versions.json as a secondary source of truth.
+        "jbig2enc_commit": "0" * 40,
         "qpdf_version": "12.2.0",
         "tesseract_version": "5.5.0",
         "leptonica_version": "1.84.1",
