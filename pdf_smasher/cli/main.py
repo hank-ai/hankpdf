@@ -28,7 +28,6 @@ from pdf_smasher import (
     PerPageTimeoutError,
     SignedPDFError,
     TotalTimeoutError,
-    __version__,
     _enforce_input_policy,
     compress,
     triage,
@@ -536,11 +535,28 @@ def _doctor_report() -> str:
     import shutil
     import subprocess
 
+    from pdf_smasher._version import build_info, version_line
+
     lines = [
-        f"hankpdf {__version__}",
-        f"python {platform.python_version()}",
+        version_line(),
         f"platform {platform.platform()}",
     ]
+    _info = build_info()
+    if _info is not None:
+        lines.append("build info (from /etc/hankpdf/build-info.json):")
+        for key in (
+            "git_sha",
+            "build_date",
+            "base_image_digest",
+            "jbig2enc_commit",
+            "qpdf_version",
+            "tesseract_version",
+            "leptonica_version",
+            "python_version",
+            "os_platform",
+        ):
+            val = _info.get(key, "?")
+            lines.append(f"  {key:20s} {val}")
     for tool in ("tesseract", "qpdf", "jbig2"):
         path = shutil.which(tool)
         if path:
@@ -862,7 +878,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
 
     if args.version:
-        print(f"hankpdf {__version__}")
+        # version_line() embeds git_sha + build_date + image digest when
+        # running from a Docker image that wrote /etc/hankpdf/build-info.json
+        # at build time (B3). Dev installs just print version + python.
+        from pdf_smasher._version import version_line
+
+        print(version_line())
         return EXIT_OK
 
     if args.doctor:
