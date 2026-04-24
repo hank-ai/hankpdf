@@ -177,6 +177,9 @@ winget install Python.Python.3.14
 choco install tesseract qpdf -y
 irm https://astral.sh/uv/install.ps1 | iex
 
+# Install jbig2.exe for full MRC compression (optional; CCITT G4 fallback works without it)
+irm https://raw.githubusercontent.com/hank-ai/hankpdf/main/scripts/install_jbig2_windows.ps1 | iex
+
 git clone git@github.com:hank-ai/hankpdf.git
 cd hankpdf
 uv sync --all-extras
@@ -184,7 +187,17 @@ uv run hankpdf --version
 uv run pytest -q
 ```
 
-Native Windows **lacks jbig2enc** (no prebuilt binary yet). The MRC pipeline still compresses via CCITT G4 fallback — typically 10-20% larger output than Linux/macOS, but every other feature works and tests pass.
+The jbig2 installer pulls a prebuilt `jbig2.exe` (plus its runtime
+DLLs) from the hankpdf GitHub Releases, extracts it to
+`%LOCALAPPDATA%\hankpdf\bin`, and registers that directory on your
+user PATH. No administrator required. Open a new terminal after the
+installer runs so the PATH update is picked up. Source and build
+recipe live in `scripts/install_jbig2_windows.ps1` and
+`.github/workflows/windows-jbig2enc.yml`.
+
+Without the jbig2 installer, the MRC pipeline falls back to CCITT G4
+for the text layer — outputs are typically 10-20% larger than with
+jbig2enc, but every other feature works identically and all tests pass.
 
 ### Put `hankpdf` on your PATH
 
