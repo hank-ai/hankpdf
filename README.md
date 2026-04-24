@@ -4,7 +4,7 @@ Aggressive, safety-first PDF shrinker for scanned documents. Takes a PDF in, pro
 
 _Repo / package name: `pdf-smasher`. Product brand: **HankPDF**._
 
-**Status:** Architecture and planning phase. No code yet. Docs under `docs/` are the source of truth.
+**Status:** Working CLI + library. 327 tests passing on Linux / macOS / Windows CI. Not yet published to PyPI or GHCR — install from the repo (see **Setup** below).
 
 ## What it does
 
@@ -74,6 +74,116 @@ hankpdf in.pdf -o out.pdf --min-input-mb 5  # also passthrough if input < 5 MB
 `--min-input-mb` is a sibling gate for inputs so small that the MRC
 per-page overhead (~2-3 s/page) isn't worth the ratio gain; it emits
 warning code `passthrough-min-input-mb`.
+
+## Setup
+
+### Hand this repo to Claude Code / Codex / any coding agent
+
+If you're not a developer, the fastest path is to clone the repo, open it in an agent-capable editor (Claude Code, Cursor, Copilot, etc.), and paste this prompt:
+
+> Read `README.md` and `docs/INSTALL.md`. Detect my operating system. Install every native dependency HankPDF needs (Python 3.14, uv, Tesseract, qpdf, jbig2enc), clone any missing binaries, run `uv sync --all-extras`, then run `uv run pytest -q` and report the result. If any step needs my input (sudo password, GitHub auth, WSL activation), stop and tell me.
+
+The agent reads the OS-specific blocks below, runs the commands, reports test output. You'll be up in ~5-15 minutes depending on network and whether jbig2enc needs building from source.
+
+### Manual setup — macOS
+
+```bash
+# 1. Python 3.14 + uv
+brew install python@3.14
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Native deps (tesseract + qpdf via brew; jbig2enc from source)
+brew install tesseract qpdf
+git clone --depth=1 https://github.com/agl/jbig2enc.git /tmp/jbig2enc
+cd /tmp/jbig2enc && ./autogen.sh && ./configure && make && sudo make install
+
+# 3. HankPDF
+git clone git@github.com:hank-ai/hankpdf.git
+cd hankpdf
+uv sync --all-extras
+uv run hankpdf --version       # smoke test
+uv run pytest -q               # full test suite (~1 min)
+```
+
+### Manual setup — Linux (Debian / Ubuntu)
+
+```bash
+# 1. Python 3.14 (deadsnakes PPA on Ubuntu <25.04)
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install -y python3.14 python3.14-venv python3.14-dev
+
+# 2. uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+
+# 3. Native deps
+sudo apt install -y tesseract-ocr libtesseract-dev qpdf jbig2enc-tools
+
+# 4. HankPDF
+git clone git@github.com:hank-ai/hankpdf.git
+cd hankpdf
+uv sync --all-extras
+uv run hankpdf --version
+uv run pytest -q
+```
+
+(Fedora/RHEL: swap `apt install` for `dnf install -y tesseract qpdf leptonica-devel`; jbig2enc still needs building from source per `docs/INSTALL.md`.)
+
+### Manual setup — Windows
+
+Two paths. **Pick WSL2 unless you have a reason not to.**
+
+**Option A — WSL2 (recommended):** run the Linux instructions above inside WSL Ubuntu. From PowerShell (admin):
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Reboot, then follow the Linux block inside the Ubuntu shell. Your Windows files are at `/mnt/c/Users/<YourUser>/...`.
+
+**Option B — Native Windows (PowerShell):**
+
+```powershell
+winget install Python.Python.3.14
+choco install tesseract qpdf -y
+irm https://astral.sh/uv/install.ps1 | iex
+
+git clone git@github.com:hank-ai/hankpdf.git
+cd hankpdf
+uv sync --all-extras
+uv run hankpdf --version
+uv run pytest -q
+```
+
+Native Windows **lacks jbig2enc** (no prebuilt binary yet). The MRC pipeline still compresses via CCITT G4 fallback — typically 10-20% larger output than Linux/macOS, but every other feature works and tests pass.
+
+### Put `hankpdf` on your PATH
+
+After `uv sync` succeeds, you can either keep prefixing with `uv run hankpdf`, or install the console script system-wide:
+
+```bash
+uv tool install --from . pdf-smasher
+hankpdf --version
+```
+
+### Running tests
+
+```bash
+uv run pytest -q                          # all 327 tests (~1 min)
+uv run pytest tests/unit -v               # unit only (~10 s)
+uv run pytest -m integration -v           # integration only
+uv run pytest --cov=pdf_smasher           # with coverage
+uv run ruff check pdf_smasher tests       # lint
+uv run mypy pdf_smasher                   # type check
+```
+
+### Troubleshooting
+
+- `hankpdf --version` — prints Python version, hankpdf version, and every native dep's version + path. If one is missing, that's your install problem.
+- `uv run python -c "import pdf_smasher; print('OK')"` — import smoke test.
+- OCR unit tests auto-skip when `tesseract` isn't on PATH. The rest of the suite should pass regardless.
+- Still stuck? Open an issue with `hankpdf --version` output attached.
 
 ## Documentation
 
