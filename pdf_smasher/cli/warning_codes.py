@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, Literal
 
+from pdf_smasher.audit import get_correlation_id
 from pdf_smasher.utils.log import redact_filename
 
 # The full Literal set — if you add a code, add it here too. The Literal
@@ -60,6 +61,24 @@ WARN_PREFIX: Final = "[hankpdf] warning"
 ERROR_PREFIX: Final = "[hankpdf] error"
 
 
+def _corr_suffix() -> str:
+    """Return the correlation-id tag for stderr lines, or ''.
+
+    Wave 5 / C2: every stderr line includes ``corr=<short-id>`` so an on-
+    call can tie a batch log slice back to the structured
+    :class:`~pdf_smasher.types.CompressReport` (which carries the full id).
+    When the audit module hasn't set an id yet (library callers skipping
+    the CLI entirely), this returns an empty string — the lines still
+    work, they just can't be joined post-hoc.
+    """
+    cid = get_correlation_id()
+    if cid is None:
+        return ""
+    # Short form (first 8 hex chars) for stderr readability; full UUID
+    # lives in report.correlation_id for lossless joins.
+    return f" corr={cid[:8]}"
+
+
 def emit(
     code: CliWarningCode,
     message: str,
@@ -83,9 +102,10 @@ def emit(
     filename prefix is omitted (programmatic stdin inputs, --doctor).
     """
     tagged = f"[{code}]: {message}"
+    corr = _corr_suffix()
     if input_name is None:
-        return f"{WARN_PREFIX} {tagged}"
-    return f"[hankpdf] {redact_filename(input_name)}: warning {tagged}"
+        return f"{WARN_PREFIX}{corr} {tagged}"
+    return f"[hankpdf]{corr} {redact_filename(input_name)}: warning {tagged}"
 
 
 def emit_error(
@@ -102,9 +122,10 @@ def emit_error(
     a job was partially completed) and ``E-*`` refusal/timeout codes.
     """
     tagged = f"[{code}]: {message}"
+    corr = _corr_suffix()
     if input_name is None:
-        return f"{ERROR_PREFIX} {tagged}"
-    return f"[hankpdf] {redact_filename(input_name)}: error {tagged}"
+        return f"{ERROR_PREFIX}{corr} {tagged}"
+    return f"[hankpdf]{corr} {redact_filename(input_name)}: error {tagged}"
 
 
 def emit_refusal(
@@ -131,7 +152,12 @@ def line_prefix(input_name: str | Path | None) -> str:
     ``[hankpdf] wrote 12 chunks …``.
 
     Returns ``"[hankpdf]"`` when ``input_name`` is None (stdin, --doctor).
+
+    Wave 5 / C2: the correlation-id tag is appended when the audit module
+    has recorded one for this process so generic summary lines can also
+    be joined back to a :class:`CompressReport`.
     """
+    corr = _corr_suffix()
     if input_name is None:
-        return "[hankpdf]"
-    return f"[hankpdf] {redact_filename(input_name)}:"
+        return f"[hankpdf]{corr}"
+    return f"[hankpdf]{corr} {redact_filename(input_name)}:"

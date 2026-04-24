@@ -877,6 +877,18 @@ def _run_image_export(
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
 
+    # Generate a correlation id for this invocation and register it with
+    # the audit module so every warning_codes stderr line gets stamped.
+    # Wave 5 / C2: on-call can grep a batch log for `corr=<id>` and tie
+    # the log slice back to the structured CompressReport whose
+    # `correlation_id` matches.
+    import uuid as _uuid
+
+    from pdf_smasher.audit import set_correlation_id
+
+    _run_correlation_id = _uuid.uuid4().hex
+    set_correlation_id(_run_correlation_id)
+
     if args.version:
         # version_line() embeds git_sha + build_date + image digest when
         # running from a Docker image that wrote /etc/hankpdf/build-info.json
@@ -1036,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
                 options=options,
                 progress_callback=_progress,
                 only_pages=only_pages,
+                correlation_id=_run_correlation_id,
             )
         except EncryptedPDFError as e:
             print(

@@ -670,6 +670,12 @@ Exit codes disambiguate the refusal class for scripts that key on `$?`; the `E-*
 
 ### 11.1 CompressReport schema migration notes
 
+- **v2 → v3** (DCR Wave 5, 2026-04-23):
+  - `CompressReport.build_info` added (`BuildInfo | None`). Non-null when the process can resolve either an installed dist's `PKG-INFO` or the `/etc/hankpdf/build-info.json` shipped inside the Docker image. Carries `version`, `git_sha`, `build_date`, `base_image_digest`, `jbig2enc_commit`, `qpdf_version`, `tesseract_version`, `leptonica_version`, `python_version`, `os_platform`. Readers can tie a report back to the exact binary + native-dep versions that produced it; on-call uses it to diagnose "does this output predate the qpdf #1050 fix?"
+  - `CompressReport.correlation_id` added (str, UUID4 hex). Auto-generated per-report via `default_factory`. CLI stamps every stderr line with a short form (`corr=<first-8-chars>`) so an on-call can grep a batch log slice and join it to a specific report. Library callers can pass their own id via `compress(..., correlation_id=...)`.
+  - `schema_version` bumped from 2 to 3.
+  - No breaking field removals or renames — additive only.
+
 - **v1 → v2** (DCR Wave 3, 2026-04-23):
   - `VerifierResult.status` gained the `"skipped"` literal (was only `"pass"`/`"fail"`). Readers that key on `verifier.status` must add a `"skipped"` branch; treat it as "no verification performed, caller should not assume pass."
   - `CompressReport.warnings` tuple now uses kebab-case codes (e.g., `verifier-skipped`, `bg-codec-jpeg2000-demoted-fast-mode`) for every job-wide warning. Page-local warnings retain the `page-{N}-…` convention.
