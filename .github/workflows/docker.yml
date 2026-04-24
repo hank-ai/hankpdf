@@ -114,7 +114,12 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
-          docker run --rm -v "${WORKSPACE}/tests/fixtures:/data" \
+          # Run as the runner's uid/gid so the container can write to the
+          # mounted /data dir (the image defaults to uid 1000; the runner
+          # is a different uid so the bind mount would otherwise be unwritable).
+          docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -v "${WORKSPACE}/tests/fixtures:/data" \
               "ghcr.io/hank-ai/hankpdf:sha-${SHORT_SHA}" \
               /data/smoke.pdf -o /data/smoke_out.pdf
           test -s tests/fixtures/smoke_out.pdf
