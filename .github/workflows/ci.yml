@@ -64,11 +64,11 @@ jobs:
       - name: Install zizmor
         run: pipx install zizmor==1.24.1
       - name: zizmor
-        # Default persona blocks on high-severity findings only; medium
-        # and lower run but don't fail CI. Pedantic catches stylistic
-        # concerns too (every `uses: softprops/...` gets flagged as
-        # "could be a gh script step") which aren't worth blocking on.
-        run: zizmor .github/workflows/
+        # --min-severity=medium skips stylistic informational findings
+        # (e.g. "use gh CLI instead of action X") while still failing
+        # on medium+ security smells: script injection, missing
+        # persist-credentials, overly broad permissions, etc.
+        run: zizmor --min-severity=medium .github/workflows/
       - name: actionlint
         uses: reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d  # v1.72.0
 
