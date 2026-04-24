@@ -191,7 +191,15 @@ jobs:
                   fi
               done
 
-          # Write README.txt (static; no untrusted interpolation).
+          # Write README.txt — embeds the exact versions shipped in
+          # this bundle (E9). On-call pastes this into a bug report
+          # and the maintainer sees at a glance which deps were
+          # present. The only interpolation is JBIG2ENC_COMMIT (a
+          # trusted env var set from .github/versions.json) and the
+          # pacman/runner lookups.
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          IMAGE_OS="${ImageOS:-unknown}"
+          IMAGE_VERSION="${ImageVersion:-unknown}"
           cat >"${BUNDLE_DIR}/README.txt" <<EOF
           jbig2.exe built for HankPDF.
 
@@ -199,14 +207,23 @@ jobs:
           scripts/install_jbig2_windows.ps1 from the hankpdf repo to
           auto-install and register the directory on your user PATH.
 
+          =====================================================
+          Build identity (paste into bug reports)
+          =====================================================
+          jbig2enc commit: ${JBIG2ENC_COMMIT}
+          Build date:      ${BUILD_DATE}
+          Runner image:    ${IMAGE_OS} / ${IMAGE_VERSION}
+          Toolchain:       MSYS2 / MinGW-w64 (GCC), windows-2022
+
+          Linked / bundled package versions (from pacman -Q):
+          $(pacman -Q mingw-w64-x86_64-leptonica | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-libtiff | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-libpng | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-libjpeg-turbo | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-libwebp | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-gcc | sed 's/^/  /')
+
           Source: https://github.com/agl/jbig2enc
-          Commit: ${JBIG2ENC_COMMIT}
-
-          Build toolchain: MSYS2 / MinGW-w64 (GCC) on windows-2022 runner.
-          Linked against Leptonica, libtiff, libpng, libjpeg-turbo, libwebp,
-          zlib, and MinGW C/C++ runtimes - every non-system DLL the binary
-          depends on is included alongside jbig2.exe in this bundle.
-
           License: Apache-2.0 (see LICENSE).
           EOF
 
