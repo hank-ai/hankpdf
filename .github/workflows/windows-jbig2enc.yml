@@ -218,6 +218,54 @@ jobs:
           fi
           echo "jbig2.exe runs and emits usage text - DLL bundle is complete."
 
+      - name: Smoke test bundle from scratch dir (stripped PATH)
+        shell: pwsh
+        run: |
+          # Validates that the bundle's DLLs resolve from the sibling-dir,
+          # the way end users will actually run it — not from /mingw64/bin
+          # where the linker found them at build time. A missing DLL in
+          # the copy step would pass the prior in-place smoke test
+          # (because ldd's libs are still on the linker path) but break
+          # in the real install location.
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:GITHUB_WORKSPACE "dist/$env:BUNDLE_NAME"
+          $scratch = Join-Path $env:TEMP ("jbig2-scratch-" + [Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $scratch | Out-Null
+          Copy-Item -Path "$src\*" -Destination $scratch -Recurse
+
+          # Wipe PATH to a minimal system set so /mingw64/bin cannot
+          # satisfy any DLL load. If the bundle is complete, jbig2.exe
+          # finds its DLLs in the scratch dir itself.
+          $sysPaths = @(
+              "$env:WINDIR\System32",
+              "$env:WINDIR",
+              "$env:WINDIR\System32\Wbem",
+              "$env:WINDIR\System32\WindowsPowerShell\v1.0"
+          ) -join ';'
+
+          Push-Location $scratch
+          try {
+              # NOTE: Start-Process would spawn a new shell inheriting
+              # its own PATH. We need to actually invoke jbig2.exe from
+              # this pwsh process with PATH locally overridden.
+              $origPath = $env:PATH
+              try {
+                  $env:PATH = $sysPaths
+                  $result = & .\jbig2.exe 2>&1
+                  Write-Host "jbig2.exe output:"
+                  Write-Host "$result"
+              } finally {
+                  $env:PATH = $origPath
+              }
+              if (-not $result) {
+                  throw "jbig2.exe produced no output from scratch dir; bundle is missing a DLL"
+              }
+              Write-Host "OK: jbig2.exe loads all DLLs from the bundle dir"
+          } finally {
+              Pop-Location
+              Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+          }
+
       - name: Zip bundle + compute SHA-256 sidecar
         env:
           BUNDLE: ${{ env.BUNDLE_NAME }}
