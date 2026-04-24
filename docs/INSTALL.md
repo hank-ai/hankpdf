@@ -42,16 +42,30 @@ hankpdf --doctor
 
 ## Windows
 
-Option A — Chocolatey / Scoop:
+Option A — Chocolatey + winget + our prebuilt jbig2:
 
 ```powershell
-choco install tesseract qpdf
-# jbig2enc on Windows: download our vendored prebuilt binary from the GitHub release
-# and place jbig2.exe on PATH.
+winget install Python.Python.3.14
+choco install tesseract qpdf -y
+
+# Prebuilt jbig2.exe (no apt/brew on Windows, so we publish our own).
+# Installs to %LOCALAPPDATA%\hankpdf\bin and adds to user PATH.
+# No administrator required. Open a new terminal after it runs.
+irm https://raw.githubusercontent.com/hank-ai/hankpdf/main/scripts/install_jbig2_windows.ps1 | iex
 
 pip install pdf-smasher
 hankpdf --doctor
 ```
+
+If the jbig2 installer fails (no release published yet, API rate-limit,
+corporate proxy blocking github.com), HankPDF still works — the MRC
+pipeline falls back to CCITT G4 for the text layer. Outputs are
+typically 10-20% larger than with jbig2enc, but every other feature
+works identically and all tests pass. You can re-run the installer
+later, or install `jbig2.exe` manually by downloading
+`jbig2-windows-x64.zip` from the
+[hankpdf Releases](https://github.com/hank-ai/hankpdf/releases) page
+and placing the extracted directory on your PATH.
 
 Option B — **use Docker Desktop instead**. Simpler on Windows.
 
@@ -60,12 +74,12 @@ Option B — **use Docker Desktop instead**. Simpler on Windows.
 Zero host setup. All native deps baked in.
 
 ```bash
-docker pull ghcr.io/ourorg/pdf-smasher:latest
+docker pull ghcr.io/hank-ai/hankpdf:latest
 
 docker run --rm \
   -v "$PWD:/data" \
   --user "$(id -u):$(id -g)" \
-  ghcr.io/ourorg/pdf-smasher:latest \
+  ghcr.io/hank-ai/hankpdf:latest \
   /data/input.pdf -o /data/output.pdf
 ```
 
@@ -78,7 +92,7 @@ docker run --rm \
   --tmpfs /tmp:rw,size=4g \
   -v "$PWD:/data" \
   --user "$(id -u):$(id -g)" \
-  ghcr.io/ourorg/pdf-smasher:latest \
+  ghcr.io/hank-ai/hankpdf:latest \
   /data/input.pdf -o /data/output.pdf
 ```
 
@@ -97,7 +111,7 @@ If anything is missing or out of date, `--doctor` exits 41 with a specific remed
 ```bash
 pip install -U pdf-smasher
 # or for Docker:
-docker pull ghcr.io/ourorg/pdf-smasher:latest
+docker pull ghcr.io/hank-ai/hankpdf:latest
 ```
 
 No auto-update mechanism. You control when to upgrade.

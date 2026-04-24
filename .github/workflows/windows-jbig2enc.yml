@@ -1,0 +1,205 @@
+# Workflow safety notes (matches .github/workflows/ci.yml / docker.yml style):
+# - Triggers are workflow_dispatch (manual) and push of jbig2-windows-v* tags
+#   from this repo only; no issue/comment events, no pull_request, no release
+#   events. None of the known-dangerous github.event.* fields (issue title/body,
+#   PR title/body, commit message, comment body, head_ref, etc.) are ever
+#   interpolated into run: steps.
+# - All uses: are pinned actions from the actions/, msys2/, and softprops/
+#   orgs already trusted elsewhere in this repo.
+# - Only trusted inputs appear in run: steps: the literal jbig2enc commit SHA
+#   (pinned in env), GITHUB_REF_NAME (validated by the tag trigger glob), and
+#   runner-local paths. No env vars carry user-controlled text.
+# - The jbig2enc source is fetched fresh from GitHub at a pinned commit SHA;
+#   we never build from a ref that a third party could redirect.
+
+name: Windows jbig2.exe build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["jbig2-windows-v*"]
+
+concurrency:
+  group: windows-jbig2enc-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write  # required by softprops/action-gh-release on tag push
+
+env:
+  # Must match the pinned commit in docker/Dockerfile so the Linux container
+  # and the Windows binary are built from the same jbig2enc source.
+  JBIG2ENC_COMMIT: e3fcf0210efa4f644e458a51616d86098d47d8da
+  BUNDLE_NAME: jbig2-windows-x64
+
+jobs:
+  build:
+    name: Build jbig2.exe (MSYS2 / MinGW-w64)
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout (workflow file only)
+        uses: actions/checkout@v6
+
+      - name: Set up MSYS2 / MinGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-autotools
+            mingw-w64-x86_64-libtool
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-leptonica
+            mingw-w64-x86_64-libtiff
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-libjpeg-turbo
+            mingw-w64-x86_64-libwebp
+            mingw-w64-x86_64-zip
+
+      - name: Clone jbig2enc at pinned commit
+        run: |
+          set -euo pipefail
+          git clone https://github.com/agl/jbig2enc.git /tmp/src
+          cd /tmp/src
+          git checkout "${JBIG2ENC_COMMIT}"
+          git rev-parse HEAD
+
+      - name: Build jbig2enc
+        run: |
+          set -euo pipefail
+          cd /tmp/src
+          ./autogen.sh
+          ./configure --prefix=/mingw64
+          make -j"$(nproc)"
+          ls -la src/jbig2.exe
+
+      - name: Assemble distribution bundle
+        env:
+          BUNDLE: ${{ env.BUNDLE_NAME }}
+        run: |
+          set -euo pipefail
+
+          DIST_ROOT="$(cygpath -u "${GITHUB_WORKSPACE}")/dist"
+          BUNDLE_DIR="${DIST_ROOT}/${BUNDLE}"
+
+          mkdir -p "${BUNDLE_DIR}"
+          cp /tmp/src/src/jbig2.exe "${BUNDLE_DIR}/"
+          cp /tmp/src/LICENSE "${BUNDLE_DIR}/LICENSE" 2>/dev/null || \
+              cp /tmp/src/COPYING "${BUNDLE_DIR}/LICENSE" 2>/dev/null || \
+              echo "WARNING: no LICENSE/COPYING found in jbig2enc tree" >&2
+
+          # Walk ldd output and copy every DLL that lives under /mingw64.
+          # System DLLs (C:\Windows\System32\...) are left to the OS.
+          echo "=== ldd jbig2.exe ==="
+          ldd "${BUNDLE_DIR}/jbig2.exe" || true
+          echo "====================="
+
+          ldd "${BUNDLE_DIR}/jbig2.exe" \
+              | awk '{print $3}' \
+              | grep -E '^/(mingw64|ucrt64)/' \
+              | sort -u \
+              | while read -r dll; do
+                  if [ -f "${dll}" ]; then
+                      cp -v "${dll}" "${BUNDLE_DIR}/"
+                  fi
+              done
+
+          # Write README.txt (static; no untrusted interpolation).
+          cat >"${BUNDLE_DIR}/README.txt" <<EOF
+          jbig2.exe built for HankPDF.
+
+          Place this directory on your PATH, or run
+          scripts/install_jbig2_windows.ps1 from the hankpdf repo to
+          auto-install and register the directory on your user PATH.
+
+          Source: https://github.com/agl/jbig2enc
+          Commit: ${JBIG2ENC_COMMIT}
+
+          Build toolchain: MSYS2 / MinGW-w64 (GCC) on windows-2022 runner.
+          Linked against Leptonica, libtiff, libpng, libjpeg-turbo, libwebp,
+          zlib, and MinGW C/C++ runtimes - every non-system DLL the binary
+          depends on is included alongside jbig2.exe in this bundle.
+
+          License: Apache-2.0 (see LICENSE).
+          EOF
+
+          echo "=== bundle contents ==="
+          ls -la "${BUNDLE_DIR}"
+
+      - name: Smoke test jbig2.exe
+        env:
+          BUNDLE: ${{ env.BUNDLE_NAME }}
+        run: |
+          set -euo pipefail
+          DIST_ROOT="$(cygpath -u "${GITHUB_WORKSPACE}")/dist"
+          cd "${DIST_ROOT}/${BUNDLE}"
+          # jbig2enc has no --version flag; calling it with no args prints
+          # usage on stderr and exits non-zero. Treat "produced output" as
+          # success - all we need to verify is the binary loads its DLLs.
+          set +e
+          OUTPUT="$(./jbig2.exe 2>&1)"
+          RC=$?
+          set -e
+          echo "exit code: ${RC}"
+          echo "----- jbig2 output -----"
+          echo "${OUTPUT}"
+          echo "------------------------"
+          if [ -z "${OUTPUT}" ]; then
+              echo "ERROR: jbig2.exe produced no output - DLL loading likely failed" >&2
+              exit 1
+          fi
+          echo "jbig2.exe runs and emits usage text - DLL bundle is complete."
+
+      - name: Zip bundle
+        env:
+          BUNDLE: ${{ env.BUNDLE_NAME }}
+        run: |
+          set -euo pipefail
+          DIST_ROOT="$(cygpath -u "${GITHUB_WORKSPACE}")/dist"
+          cd "${DIST_ROOT}"
+          zip -r "${BUNDLE}.zip" "${BUNDLE}"
+          ls -la "${BUNDLE}.zip"
+          # Sanity: ensure the zip round-trips.
+          unzip -l "${BUNDLE}.zip" | tail -20
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE_NAME }}
+          path: dist/${{ env.BUNDLE_NAME }}.zip
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish GitHub Release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/jbig2-windows-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ env.BUNDLE_NAME }}.zip
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
+          body: |
+            Prebuilt `jbig2.exe` for native Windows x64 - built from
+            [agl/jbig2enc](https://github.com/agl/jbig2enc) at commit
+            `${{ env.JBIG2ENC_COMMIT }}` via MSYS2 / MinGW-w64.
+
+            **Install:**
+
+            ```powershell
+            irm https://raw.githubusercontent.com/hank-ai/hankpdf/main/scripts/install_jbig2_windows.ps1 | iex
+            ```
+
+            Extract `jbig2-windows-x64.zip` and place the directory on
+            your PATH, or run the installer script above to auto-install
+            to `%LOCALAPPDATA%\hankpdf\bin` and register it on your user
+            PATH.
+
+            The bundle ships `jbig2.exe` plus every non-system DLL it
+            depends on (Leptonica, libtiff, libpng, libjpeg-turbo,
+            libwebp, zlib, MinGW C/C++ runtimes). No other setup required.

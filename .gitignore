@@ -39,6 +39,11 @@ htmlcov/
 tests/corpus/_cache/
 tests/corpus/_generated/
 
+# Smoke-test fixtures (generated at CI build time by scripts/make_smoke_fixture.py)
+tests/fixtures/smoke.pdf
+tests/fixtures/smoke_out.pdf
+tests/fixtures/smoke_*.pdf
+
 # Local dev detritus
 *.pdf.bak
 scratch/
