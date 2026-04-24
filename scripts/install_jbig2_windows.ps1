@@ -49,12 +49,30 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# --- TLS / network hardening (E3) ------------------------------------
+#
+# PS 5.1's default SecurityProtocol is SSL3 + TLS 1.0, both of which
+# GitHub has disabled. Force TLS 1.2, and also TLS 1.3 where the .NET
+# framework on the box supports it (PS 7+ / .NET 4.8+). If we don't
+# do this, `Invoke-WebRequest` fails with an opaque "underlying
+# connection was closed" that users read as "the internet is broken".
+[Net.ServicePointManager]::SecurityProtocol =
+    [Net.ServicePointManager]::SecurityProtocol -bor
+    [Net.SecurityProtocolType]::Tls12
+if ([Net.SecurityProtocolType]::Tls13 -as [Net.SecurityProtocolType]) {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor
+        [Net.SecurityProtocolType]::Tls13
+}
+
 # --- constants --------------------------------------------------------
 
 $Repo      = 'hank-ai/hankpdf'
 $AssetName = 'jbig2-windows-x64.zip'
 $ApiBase   = 'https://api.github.com'
 $UserAgent = 'hankpdf-install-jbig2/1.0 (+https://github.com/hank-ai/hankpdf)'
+$HttpTimeoutSec = 120
+$HttpMaxRetries = 3
 
 # --- helpers ----------------------------------------------------------
 
@@ -73,6 +91,40 @@ function Write-Warn2 {
     Write-Warning $Message
 }
 
+function Invoke-WithRetry {
+    <#
+    .SYNOPSIS
+        Run a script block with exponential-backoff retry on transient
+        network failures (E3).
+    #>
+    param(
+        [scriptblock]$ScriptBlock,
+        [int]$MaxAttempts = $HttpMaxRetries,
+        [string]$OpName = 'HTTP request'
+    )
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            return & $ScriptBlock
+        } catch [System.Net.WebException] {
+            $status = $null
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            # 4xx (except 408/429) aren't retryable — no amount of
+            # waiting fixes a missing resource.
+            if ($status -ge 400 -and $status -lt 500 -and $status -ne 408 -and $status -ne 429) {
+                throw
+            }
+            if ($attempt -ge $MaxAttempts) {
+                throw
+            }
+            $sleep = [math]::Pow(2, $attempt)  # 2s, 4s, 8s
+            Write-Host "    ${OpName} attempt ${attempt}/${MaxAttempts} failed: $($_.Exception.Message); retrying in ${sleep}s..."
+            Start-Sleep -Seconds $sleep
+        }
+    }
+}
+
 function Invoke-GitHubApi {
     param([string]$Url)
     $headers = @{
@@ -83,7 +135,9 @@ function Invoke-GitHubApi {
     # GitHub caps unauthenticated requests at 60/hr/IP; bubble up a
     # clear message instead of dumping the raw exception.
     try {
-        return Invoke-RestMethod -Uri $Url -Headers $headers -UseBasicParsing
+        return Invoke-WithRetry -OpName "GitHub API" -ScriptBlock {
+            Invoke-RestMethod -Uri $Url -Headers $headers -UseBasicParsing -TimeoutSec $HttpTimeoutSec
+        }
     }
     catch {
         $resp = $_.Exception.Response
@@ -153,7 +207,14 @@ function Get-ExpectedSha256 {
     # Sidecar is GNU sha256sum format: "<64 hex chars>  <filename>". We
     # only trust the hex; the filename is informational. Strip whitespace
     # and lowercase for case-insensitive comparison against Get-FileHash.
-    $content = (Invoke-WebRequest -Uri $SidecarUrl -UseBasicParsing -Headers @{ 'User-Agent' = $UserAgent }).Content
+    $ua = $UserAgent
+    $timeoutSec = $HttpTimeoutSec
+    $content = (Invoke-WithRetry -OpName "sidecar fetch" -ScriptBlock {
+        Invoke-WebRequest -Uri $SidecarUrl `
+            -UseBasicParsing `
+            -Headers @{ 'User-Agent' = $ua } `
+            -TimeoutSec $timeoutSec
+    }).Content
     $firstToken = ($content -split '\s+', 2)[0].Trim().ToLowerInvariant()
     if ($firstToken -notmatch '^[a-f0-9]{64}$') {
         throw "Sidecar did not contain a 64-hex-char SHA-256 digest. Got: $firstToken"
@@ -203,8 +264,19 @@ try {
         Write-Step "Downloading $AssetName"
         # Invoke-WebRequest honors system proxy; UseBasicParsing keeps
         # it working on Server Core / constrained PowerShell installs.
+        # Wrapped in retry (E3): transient 500/503/timeouts retry up
+        # to 3 times with exponential backoff; 4xx fails fast.
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $info.DownloadUrl -OutFile $zipPath -UseBasicParsing -Headers @{ 'User-Agent' = $UserAgent }
+        $downloadUrl = $info.DownloadUrl
+        $ua = $UserAgent
+        $timeoutSec = $HttpTimeoutSec
+        Invoke-WithRetry -OpName "download" -ScriptBlock {
+            Invoke-WebRequest -Uri $downloadUrl `
+                -OutFile $zipPath `
+                -UseBasicParsing `
+                -Headers @{ 'User-Agent' = $ua } `
+                -TimeoutSec $timeoutSec
+        }
 
         $fi = Get-Item $zipPath -ErrorAction Stop
         if ($fi.Length -le 0) {
