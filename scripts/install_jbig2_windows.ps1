@@ -297,12 +297,32 @@ try {
         }
         Write-Ok "SHA-256 verified: $actual"
 
-        # 3. Ensure destination exists and extract.
-        if (-not (Test-Path -Path $Destination)) {
-            New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-        }
+        # 3. Atomic install via rename-swap (E4).
+        #
+        # Previously we extracted to staging and copy-item'd each file
+        # into $Destination one by one — a crash mid-copy left the user
+        # with a half-populated install directory, corrupt from the
+        # perspective of any tool that had already picked the stale
+        # binary up via PATH. Per-file Copy-Item is also O(files)
+        # expensive when the bundle has 15+ DLLs.
+        #
+        # New flow:
+        #   1. Build the full new install in "$Destination.new"
+        #   2. Move any existing "$Destination" to "$Destination.old"
+        #   3. Rename "$Destination.new" -> "$Destination"
+        #   4. rm -rf "$Destination.old"
+        # Between steps 2 and 3 there's a microsecond window where
+        # neither path exists, but no concurrent consumer can hit a
+        # half-populated state. On Windows, Move-Item within the same
+        # filesystem is atomic (NTFS rename).
+        Write-Step "Extracting to $Destination (atomic rename-swap)"
+        $destNew = "$Destination.new"
+        $destOld = "$Destination.old"
+        # Clean up lingering "$.new" or "$.old" from a prior failed run.
+        if (Test-Path $destNew) { Remove-Item -Recurse -Force $destNew }
+        if (Test-Path $destOld) { Remove-Item -Recurse -Force $destOld }
+        New-Item -ItemType Directory -Path $destNew -Force | Out-Null
 
-        Write-Step "Extracting to $Destination"
         $stagingDir = Join-Path $tempDir 'extracted'
         New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
@@ -337,21 +357,43 @@ try {
             $archive.Dispose()
         }
 
-        # The zip contains a top-level 'jbig2-windows-x64/' directory;
-        # flatten it into $Destination so jbig2.exe lives at the root.
+        # Zip contains a top-level 'jbig2-windows-x64/' directory;
+        # flatten into $destNew so jbig2.exe lives at the root.
         $inner = Join-Path $stagingDir 'jbig2-windows-x64'
         $sourceRoot = if (Test-Path $inner) { $inner } else { $stagingDir }
 
         Get-ChildItem -Path $sourceRoot -Force | ForEach-Object {
-            $target = Join-Path $Destination $_.Name
+            $target = Join-Path $destNew $_.Name
             Copy-Item -Path $_.FullName -Destination $target -Recurse -Force
+        }
+
+        $newExe = Join-Path $destNew 'jbig2.exe'
+        if (-not (Test-Path $newExe)) {
+            throw "Extraction completed but $newExe was not created. Zip contents may be malformed."
+        }
+
+        # Atomic swap.
+        if (Test-Path $Destination) {
+            Move-Item -Path $Destination -Destination $destOld -Force
+        }
+        try {
+            Move-Item -Path $destNew -Destination $Destination -Force
+        } catch {
+            # Rollback: restore the old install if the new-rename failed.
+            if (Test-Path $destOld) {
+                Move-Item -Path $destOld -Destination $Destination -Force
+            }
+            throw
+        }
+        if (Test-Path $destOld) {
+            Remove-Item -Recurse -Force $destOld -ErrorAction SilentlyContinue
         }
 
         $exe = Join-Path $Destination 'jbig2.exe'
         if (-not (Test-Path $exe)) {
-            throw "Extraction completed but $exe was not created. Zip contents may be malformed."
+            throw "Atomic swap completed but $exe is missing. Filesystem consistency issue."
         }
-        Write-Ok "Installed jbig2.exe and bundled DLLs"
+        Write-Ok "Installed jbig2.exe and bundled DLLs (atomic swap)"
     }
     finally {
         if (Test-Path $tempDir) {
