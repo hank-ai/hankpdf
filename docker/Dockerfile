@@ -10,7 +10,14 @@
 # -----------------------------------------------------------------------------
 # Stage 1 — builder
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-bookworm AS builder
+# Base image pinned by digest for reproducibility (supply-chain hygiene).
+# Both stages MUST share the same digest so the runtime libc matches what we
+# linked jbig2 against. Regenerate via:
+#   docker pull python:3.14-slim-bookworm && \
+#     docker inspect --format='{{index .RepoDigests 0}}' python:3.14-slim-bookworm
+# or via the registry HTTP API; Dependabot's `docker` ecosystem will also
+# propose bumps when a new sha appears.
+FROM python:3.14-slim-bookworm@sha256:2e256d0381371566ed96980584957ed31297f437569b79b0e5f7e17f2720e53a AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential autoconf automake libtool pkg-config \
@@ -34,7 +41,9 @@ RUN git clone https://github.com/agl/jbig2enc.git /src/jbig2enc \
 # -----------------------------------------------------------------------------
 # Stage 2 — runtime
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-bookworm AS runtime
+# Same base + digest as the builder — see note above. If you regenerate the
+# digest, update BOTH FROM lines in lockstep.
+FROM python:3.14-slim-bookworm@sha256:2e256d0381371566ed96980584957ed31297f437569b79b0e5f7e17f2720e53a AS runtime
 
 ARG HANKPDF_VERSION=0.0.0
 
