@@ -40,6 +40,9 @@ jobs:
   build:
     name: Build jbig2.exe (MSYS2 / MinGW-w64)
     runs-on: windows-2022
+    # MSYS2 bootstrap is the slowest step; whole-job timeout protects
+    # against pacman hanging. E5.
+    timeout-minutes: 40
     defaults:
       run:
         shell: msys2 {0}
@@ -68,6 +71,7 @@ jobs:
           Write-Host "Pinned jbig2enc commit: $($versions.jbig2enc_commit)"
 
       - name: Set up MSYS2 / MinGW64
+        timeout-minutes: 20
         uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c  # v2
         with:
           msystem: MINGW64
@@ -96,6 +100,7 @@ jobs:
           git rev-parse HEAD
 
       - name: Build jbig2enc
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           cd /tmp/src
@@ -103,6 +108,12 @@ jobs:
           ./configure --prefix=/mingw64
           make -j"$(nproc)"
           ls -la src/jbig2.exe
+          {
+              echo "### Build"
+              echo ""
+              echo "- Commit: \`$(git -C /tmp/src rev-parse HEAD)\`"
+              echo "- Binary size: $(stat -c%s src/jbig2.exe 2>/dev/null || stat -f%z src/jbig2.exe) bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record MSYS2 package versions + enforce Leptonica floor
         run: |

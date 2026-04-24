@@ -43,6 +43,9 @@ jobs:
   build:
     name: Build and publish
     runs-on: ubuntu-latest
+    # Whole-job timeout backstops any individual step's timeout; picks up
+    # buildx hangs, runner agent crashes, and GHCR outages (E5).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
@@ -92,6 +95,7 @@ jobs:
 
       - name: Build (no push)
         if: github.event_name == 'pull_request'
+        timeout-minutes: 30
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
@@ -111,6 +115,7 @@ jobs:
       - name: Build and push
         if: github.event_name != 'pull_request'
         id: build
+        timeout-minutes: 45
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
@@ -208,6 +213,17 @@ jobs:
               exit 1
           fi
           echo "ratio >= 2x OK"
+
+          # GitHub Actions step-summary for visibility in the run page (E5).
+          {
+              echo "### Docker smoke test"
+              echo ""
+              echo "| Fixture | Input (bytes) | Output (bytes) | Ratio |"
+              echo "|---|---:|---:|---:|"
+              echo "| smoke_text.pdf | ${IN_SIZE} | ${OUT_SIZE} | $(awk "BEGIN {printf \"%.2fx\", ${IN_SIZE}/${OUT_SIZE}}") |"
+              echo ""
+              echo "Image: \`ghcr.io/hank-ai/hankpdf:sha-${SHORT_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke test (uid-mismatch — entrypoint hint path, E1)
         if: github.event_name != 'pull_request'
