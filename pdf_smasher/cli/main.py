@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -22,12 +23,165 @@ from pdf_smasher import (
     DecompressionBombError,
     EncryptedPDFError,
     MaliciousPDFError,
+    OcrTimeoutError,
     OversizeError,
+    PerPageTimeoutError,
     SignedPDFError,
+    TotalTimeoutError,
     __version__,
+    _enforce_input_policy,
     compress,
     triage,
 )
+from pdf_smasher.cli.warning_codes import emit as _warn
+from pdf_smasher.cli.warning_codes import emit_error as _warn_error
+from pdf_smasher.cli.warning_codes import emit_refusal as _refuse
+from pdf_smasher.cli.warning_codes import line_prefix as _line_prefix
+from pdf_smasher.engine.chunking import split_pdf_by_size
+from pdf_smasher.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
+from pdf_smasher.utils.atomic import _atomic_write_bytes
+from pdf_smasher.utils.text import format_page_list_short
+
+
+def _input_label(input_path: Path | None) -> str | Path | None:
+    """Resolve the CLI input argument to a loggable label.
+
+    Returns ``None`` for stdin or missing args — :func:`_line_prefix` and
+    :func:`_warn` render that as the plain ``[hankpdf]`` prefix. Otherwise
+    returns the path unchanged; redaction happens inside the warning_codes
+    helpers per THREAT_MODEL.md §5.
+    """
+    if input_path is None:
+        return None
+    if str(input_path) == "-":
+        return None
+    return input_path
+
+
+# Keep CLI cap in lockstep with the library cap (which is the real
+# enforcer). The CLI layer just fails fast with a nicer argparse
+# message instead of raising ValueError deep inside the generator.
+_MAX_IMAGE_DPI = _MAX_IMAGE_DPI_LIB
+_MAX_PAGES_RANGE = 1_000_000  # cap --pages "lo-hi" span to prevent DoS via
+# set(range(1, 10**11)) materialization — see DCR Wave 1.
+
+
+def _positive_float(raw: str) -> float:
+    """argparse type for flags that must be > 0.
+
+    Without this, `0` passes argparse, propagates through the full compress
+    pipeline, and only crashes at the very end when a downstream validator
+    rejects it. Failing fast at parse time keeps the error local to the
+    CLI flag the user got wrong.
+    """
+    try:
+        f = float(raw)
+    except ValueError as e:
+        msg = f"invalid float: {raw!r}"
+        raise argparse.ArgumentTypeError(msg) from e
+    if f <= 0:
+        msg = f"must be > 0 (got {f})"
+        raise argparse.ArgumentTypeError(msg)
+    return f
+
+
+def _positive_mb_value(raw: str) -> float:
+    """argparse type for megabyte flags where int(value * 1024**2) must be
+    >= 1 (i.e., the value must round up to at least one byte).
+
+    ``_positive_float`` alone would accept ``1e-10`` — > 0 but rounds to
+    zero bytes, which propagates as ``max_bytes=0`` into
+    ``split_pdf_by_size`` and raises a bare ValueError deep in the pipeline.
+    Reject at parse time so the user gets a clear message naming the flag.
+    """
+    f = _positive_float(raw)
+    if int(f * 1024 * 1024) < 1:
+        msg = (
+            f"must round to >= 1 byte (got {f} MB = "
+            f"{int(f * 1024 * 1024)} bytes). Try a value >= 0.000001."
+        )
+        raise argparse.ArgumentTypeError(msg)
+    return f
+
+
+def _positive_int(raw: str) -> int:
+    """argparse type for int flags that must be >= 1.
+
+    Used for --per-page-timeout-seconds and --total-timeout-seconds:
+    zero or negative values make future.result(timeout=X) raise
+    TimeoutError immediately on every page, producing a flood of
+    PerPageTimeoutError from deep in the engine. Reject at parse
+    time so the error names the right flag.
+    """
+    try:
+        n = int(raw)
+    except ValueError as e:
+        msg = f"invalid int: {raw!r}"
+        raise argparse.ArgumentTypeError(msg) from e
+    if n < 1:
+        msg = f"must be >= 1 (got {n})"
+        raise argparse.ArgumentTypeError(msg)
+    return n
+
+
+# Upper bound on --max-workers. 256 matches the ProcessPoolExecutor default
+# guidance (4 * cpu_count capped at 61 on Windows; anything beyond 256 is
+# DoS-adjacent: each worker re-imports cv2/pikepdf/numpy for ~2-3s and holds
+# a one-page raster worth of memory).
+_MAX_WORKER_COUNT = 256
+
+
+def _max_workers_value(raw: str) -> int:
+    """argparse type for --max-workers. Reject negative or absurd values.
+
+    0 = auto (cpu_count - 1, clamped ≥ 1) per CompressOptions.max_workers.
+    1 = serial. 2..256 = explicit worker count.
+
+    Reviewer B: negatives used to pass argparse and get silently coerced
+    inside ``_resolve_worker_count``. Fail fast at parse time so the error
+    names the right flag.
+    """
+    try:
+        n = int(raw)
+    except ValueError as e:
+        msg = f"--max-workers: invalid int: {raw!r}"
+        raise argparse.ArgumentTypeError(msg) from e
+    if n < 0:
+        msg = (
+            f"--max-workers must be >= 0 (got {n}); 0=auto, 1=serial, "
+            f"2..{_MAX_WORKER_COUNT}=explicit"
+        )
+        raise argparse.ArgumentTypeError(msg)
+    if n > _MAX_WORKER_COUNT:
+        msg = (
+            f"--max-workers capped at {_MAX_WORKER_COUNT} (got {n}); each "
+            "worker imports numpy/cv2/pikepdf and holds a one-page raster "
+            "worth of memory"
+        )
+        raise argparse.ArgumentTypeError(msg)
+    return n
+
+
+def _positive_dpi(raw: str) -> int:
+    """argparse type for --image-dpi. Reject unreasonably large or
+    non-positive values that would trigger a memory-exhaustion DoS in
+    rasterize_page()."""
+    try:
+        n = int(raw)
+    except ValueError as e:
+        msg = f"invalid int: {raw!r}"
+        raise argparse.ArgumentTypeError(msg) from e
+    if n < 1:
+        msg = f"--image-dpi must be >= 1 (got {n})"
+        raise argparse.ArgumentTypeError(msg)
+    if n > _MAX_IMAGE_DPI:
+        msg = (
+            f"--image-dpi capped at {_MAX_IMAGE_DPI} (got {n}); higher "
+            "values can exceed addressable memory on realistic page sizes"
+        )
+        raise argparse.ArgumentTypeError(msg)
+    return n
+
 
 # Exit codes per SPEC.md §2.2. Kept in sync with the CompressError class tree.
 EXIT_OK = 0
@@ -104,20 +258,41 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-embedded-files", action="store_true")
     p.add_argument("--password-file", type=Path, help="Read password from file")
 
-    # Limits
+    # Limits + passthrough floors
     p.add_argument("--max-pages", type=int)
     p.add_argument("--max-input-mb", type=float, default=2000.0)
     p.add_argument(
-        "--max-output-mb",
+        "--min-input-mb",
         type=float,
+        default=0.0,
+        help=(
+            "Skip compression (return input unchanged) when the input is "
+            "smaller than this many MB. Default 0 (gate disabled). Emits a "
+            "'passthrough-min-input-mb' warning in the report."
+        ),
+    )
+    p.add_argument(
+        "--min-ratio",
+        type=float,
+        default=1.5,
+        help=(
+            "If realized compression ratio is below this, return the input "
+            "unchanged rather than a larger output. Default 1.5 (matches "
+            "CompressOptions default). Set to 0 to disable. Emits a "
+            "'passthrough-ratio-floor' warning in the report."
+        ),
+    )
+    p.add_argument(
+        "--max-output-mb",
+        type=_positive_mb_value,
         default=None,
         help=(
             "Cap the output PDF size. If the compressed output exceeds this "
-            "value, split into multiple files named {base}_0{ext}, "
-            "{base}_1{ext}, ... preserving page order. Useful for email "
-            "attachment limits, archival chunk sizes, etc. A single page "
-            "that's already larger than the cap is emitted alone (you'll "
-            "see a warning)."
+            "value, split into multiple files named {base}_001{ext}, "
+            "{base}_002{ext}, ... (zero-padded, 1-indexed) preserving page "
+            "order. Useful for email attachment limits, archival chunk "
+            "sizes, etc. A single page that's already larger than the cap "
+            "is emitted alone (you'll see a warning)."
         ),
     )
     p.add_argument(
@@ -164,12 +339,32 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--max-workers",
-        type=int,
+        type=_max_workers_value,
         default=0,
         help=(
-            "Per-page parallelism. 0 (default) = auto (cpu_count-2, min 1). "
-            "1 = serial. N>1 = exactly N workers. Each worker gets its own "
-            "single-page PDF slice, never the whole source."
+            f"Per-page parallelism. 0 (default) = auto (cpu_count-1, min 1). "
+            f"1 = serial. 2..{_MAX_WORKER_COUNT} = exactly N workers. Each "
+            "worker gets its own single-page PDF slice, never the whole source."
+        ),
+    )
+    p.add_argument(
+        "--per-page-timeout-seconds",
+        type=_positive_int,
+        default=120,
+        help=(
+            "Per-page wall-clock budget for rasterize+OCR+compose+verify. "
+            "On overrun, the page's Tesseract subprocess is killed and "
+            "PerPageTimeoutError is raised. Default: 120."
+        ),
+    )
+    p.add_argument(
+        "--total-timeout-seconds",
+        type=_positive_int,
+        default=1200,
+        help=(
+            "Total wall-clock budget for the whole compress() call. On "
+            "overrun, TotalTimeoutError is raised between pipeline phases. "
+            "Default: 1200 (20 min)."
         ),
     )
 
@@ -192,9 +387,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--image-dpi",
-        type=int,
+        type=_positive_dpi,
         default=150,
-        help="DPI for image-export formats. Default: 150. 300 for archival.",
+        help=f"DPI for image-export formats. Default: 150. 300 for archival. Max: {_MAX_IMAGE_DPI}.",
     )
     p.add_argument(
         "--jpeg-quality",
@@ -208,8 +403,7 @@ def _parser() -> argparse.ArgumentParser:
         default=6,
         choices=range(10),
         help=(
-            "PNG zlib compression level 0-9. 0=no compression, 9=max. "
-            "Default: 6 (Pillow standard)."
+            "PNG zlib compression level 0-9. 0=no compression, 9=max. Default: 6 (Pillow standard)."
         ),
     )
     p.add_argument(
@@ -232,10 +426,34 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+def _int_from_pages_token(raw: str, part: str) -> int:
+    """Parse a token inside a --pages spec, re-raising ValueError with
+    --pages context on failure.
+
+    Without this wrapper, Python's built-in ``int("abc")`` surfaces as
+    ``invalid literal for int() with base 10: 'abc'`` — no reference to
+    --pages, so batch scripts grepping for flag errors miss it
+    (Reviewer B).
+    """
+    try:
+        return int(raw)
+    except ValueError as exc:
+        # Preserve the original text in the message so operators can see
+        # WHICH token failed; chain the original via `from exc` for
+        # programmatic inspection.
+        msg = (
+            f"--pages token {part!r} is malformed: expected 1-indexed "
+            f"integers separated by ',' and ranges 'lo-hi'; got non-integer "
+            f"part {raw!r}"
+        )
+        raise ValueError(msg) from exc
+
+
 def _parse_pages_spec(spec: str) -> set[int]:
     """Parse a 1-indexed page spec like '1,3-5,10' into a set of ints.
 
-    Raises ValueError on malformed input.
+    Raises ValueError on malformed input. Error messages always reference
+    --pages so batch logs are greppable — see :func:`_int_from_pages_token`.
     """
     out: set[int] = set()
     for raw in spec.split(","):
@@ -244,17 +462,36 @@ def _parse_pages_spec(spec: str) -> set[int]:
             continue
         if "-" in part:
             lo_s, hi_s = part.split("-", 1)
-            lo, hi = int(lo_s), int(hi_s)
+            # Empty halves ('-5' -> lo_s='', hi_s='5'; '5-' -> hi_s='') also
+            # trip the int() wrap; route through the helper so the error
+            # names --pages rather than raising 'invalid literal … :'.
+            lo = _int_from_pages_token(lo_s, part)
+            hi = _int_from_pages_token(hi_s, part)
             if lo < 1 or hi < lo:
-                msg = f"invalid range {part!r}: must be 1-indexed, lo <= hi"
+                msg = f"--pages range {part!r} invalid: must be 1-indexed, lo <= hi"
+                raise ValueError(msg)
+            if hi - lo + 1 > _MAX_PAGES_RANGE:
+                msg = (
+                    f"--pages range {part!r} too large: cap is "
+                    f"{_MAX_PAGES_RANGE:,} pages per range to prevent "
+                    "memory exhaustion"
+                )
                 raise ValueError(msg)
             out.update(range(lo, hi + 1))
         else:
-            n = int(part)
+            n = _int_from_pages_token(part, part)
             if n < 1:
-                msg = f"invalid page {part!r}: must be 1-indexed"
+                msg = f"--pages value {part!r} invalid: must be 1-indexed"
                 raise ValueError(msg)
             out.add(n)
+    # Total cardinality cap — a per-range check alone allows
+    # `--pages 1-1000000,2000001-3000000,…` to accumulate unbounded.
+    if len(out) > _MAX_PAGES_RANGE:
+        msg = (
+            f"--pages total set too large: {len(out):,} pages; cap is "
+            f"{_MAX_PAGES_RANGE:,} total pages to prevent memory exhaustion"
+        )
+        raise ValueError(msg)
     return out
 
 
@@ -287,6 +524,10 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         password=_read_password(args),
         max_pages=args.max_pages,
         max_input_mb=args.max_input_mb,
+        min_input_mb=args.min_input_mb,
+        min_ratio=args.min_ratio,
+        per_page_timeout_seconds=args.per_page_timeout_seconds,
+        total_timeout_seconds=args.total_timeout_seconds,
     )
 
 
@@ -356,10 +597,14 @@ def _format_report(report, fmt: str) -> str:  # type: ignore[no-untyped-def]
         return json.dumps(payload, default=str)
     # Plain text
     pct = (report.output_bytes / max(1, report.input_bytes)) * 100
+    v_status = report.verifier.status
+    suffix = f" verifier={v_status}"
+    if report.warnings:
+        suffix += f" warnings={len(report.warnings)}"
     return (
         f"ok  {report.input_bytes:,} -> {report.output_bytes:,} bytes "
         f"({pct:.1f}%, ratio {report.ratio:.2f}x, {report.pages} pages, "
-        f"{report.wall_time_ms} ms)"
+        f"{report.wall_time_ms} ms){suffix}"
     )
 
 
@@ -373,20 +618,73 @@ def _run_image_export(
     requested page as JPEG/PNG. Invoked from main() when the user picks
     jpeg/png via --output-format or an image extension on -o.
     """
-    from pdf_smasher.image_export import render_pages_as_images
+    _label = _input_label(args.input)
+    _prefix = _line_prefix(_label)
 
-    # Determine total page count via a triage.
+    # --max-output-mb is a PDF-only concept (it splits a merged PDF into
+    # size-bounded sibling files). In image-export mode each page is
+    # already its own file, so the flag has no semantics here. Warn
+    # loudly rather than silently ignore.
+    if args.max_output_mb is not None and not args.quiet:
+        print(
+            _warn(
+                "W-MAX-OUTPUT-MB-IMAGE-MODE",
+                "--max-output-mb applies only to PDF output; ignored in image-export mode",
+                input_name=_label,
+            ),
+            file=sys.stderr,
+        )
+
+    # Determine total page count via a triage. Route specific
+    # CompressError subclasses to their own exit codes BEFORE the
+    # generic catch-all, so upstream can distinguish a decompression
+    # bomb or malicious PDF from a plain corrupt one.
     try:
         tri = triage(input_bytes)
+    except MaliciousPDFError as e:
+        print(
+            _refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label), file=sys.stderr
+        )
+        return EXIT_MALICIOUS
+    except DecompressionBombError as e:
+        print(
+            _refuse("E-INPUT-DECOMPRESSION-BOMB", f"decompression bomb ({e})", input_name=_label),
+            file=sys.stderr,
+        )
+        return EXIT_DECOMPRESSION_BOMB
     except CompressError as e:
-        print(f"refused: {e}", file=sys.stderr)
+        print(_refuse("E-INPUT-CORRUPT", str(e), input_name=_label), file=sys.stderr)
         return EXIT_CORRUPT
+
+    # Enforce the same safety gates as compress(). Encrypted/signed/oversize
+    # PDFs must be refused regardless of output format.
+    try:
+        _enforce_input_policy(tri, _build_options(args), input_bytes)
+    except EncryptedPDFError as e:
+        print(
+            _refuse("E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label),
+            file=sys.stderr,
+        )
+        return EXIT_ENCRYPTED
+    except CertifiedSignatureError as e:
+        print(
+            _refuse("E-INPUT-CERTIFIED", f"certifying signature ({e})", input_name=_label),
+            file=sys.stderr,
+        )
+        return EXIT_CERTIFIED_SIG
+    except SignedPDFError as e:
+        print(_refuse("E-INPUT-SIGNED", f"signed PDF ({e})", input_name=_label), file=sys.stderr)
+        return EXIT_SIGNED
+    except OversizeError as e:
+        print(_refuse("E-INPUT-OVERSIZE", f"oversize ({e})", input_name=_label), file=sys.stderr)
+        return EXIT_OVERSIZE
 
     if only_pages is not None:
         out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]
         if out_of_range:
             print(
-                f"error: --pages requested {sorted(out_of_range)} but input has {tri.pages} pages",
+                f"error: --pages requested {format_page_list_short(out_of_range)} "
+                f"but input has {tri.pages} pages",
                 file=sys.stderr,
             )
             return EXIT_USAGE
@@ -394,64 +692,169 @@ def _run_image_export(
     else:
         page_indices = list(range(tri.pages))
 
-    images = render_pages_as_images(
-        input_bytes,
-        page_indices=page_indices,
-        image_format=image_format,  # type: ignore[arg-type]
-        dpi=args.image_dpi,
-        jpeg_quality=args.jpeg_quality,
-        png_compress_level=args.png_compress_level,
-        webp_quality=args.webp_quality,
-        webp_lossless=args.webp_lossless,
-    )
+    if not page_indices:
+        print(
+            "error: --pages parsed to an empty set (no pages selected); "
+            "provide at least one 1-indexed page number",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
-    if str(args.output) == "-":
-        if len(images) != 1:
-            print(
-                f"error: -o - (stdout) supports exactly one image; "
-                f"got {len(images)} (use --pages to select a single page)",
-                file=sys.stderr,
-            )
-            return EXIT_USAGE
-        sys.stdout.buffer.write(images[0])
-        return EXIT_OK
+    # Stdout (-o -) only supports a single image. Check up front so we
+    # don't spin up rasterize just to reject after the fact.
+    n = len(page_indices)
+    if str(args.output) == "-" and n != 1:
+        print(
+            f"error: -o - (stdout) supports exactly one image; "
+            f"got {n} (use --pages to select a single page)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if str(args.output) != "-":
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+
     out_ext = {"jpeg": ".jpg", "png": ".png", "webp": ".webp"}[image_format]
-    valid_image_exts = {"jpg", "jpeg", "png", "webp"}
+    # Map each valid image ext to its canonical image_format to detect
+    # mismatches (e.g. -o out.jpeg --output-format png must NOT write
+    # PNG bytes to a .jpeg file).
+    ext_to_format = {
+        "jpg": "jpeg",
+        "jpeg": "jpeg",
+        "png": "png",
+        "webp": "webp",
+    }
     base = args.output.stem
     parent = args.output.parent
-    # Keep the user's image extension if present; else append the canonical one.
+    # Keep the user's image extension only if it matches the resolved
+    # format; else replace it with the canonical one for image_format.
     requested_ext = args.output.suffix.lower()
-    final_ext = requested_ext if requested_ext.lstrip(".") in valid_image_exts else out_ext
-    if len(images) == 1:
-        # Single page → write exactly to -o (with ext normalization).
-        if requested_ext.lstrip(".") not in valid_image_exts:
-            target = parent / f"{base}{final_ext}"
-        else:
-            target = args.output
-        target.write_bytes(images[0])
-        if not args.quiet:
-            print(
-                f"wrote {target} ({len(images[0]):,} bytes, {image_format} @ {args.image_dpi} DPI)",
-                file=sys.stderr,
-            )
-    else:
-        for page_idx, blob in zip(page_indices, images, strict=True):
-            target = parent / f"{base}_{page_idx + 1:03d}{final_ext}"
-            target.write_bytes(blob)
+    ext_matches_format = ext_to_format.get(requested_ext.lstrip(".")) == image_format
+    final_ext = requested_ext if ext_matches_format else out_ext
+
+    # Progress: tqdm bar ticks on each encoded page, so a 400-page PNG
+    # export shows real progress (was silent while ~8 GB buffered in
+    # memory pre-Task-8). --quiet suppresses it.
+    from tqdm import tqdm  # type: ignore[import-untyped]
+
+    _bar: tqdm | None = None
+    if not args.quiet:
+        _bar = tqdm(
+            total=n,
+            desc=f"{image_format}",
+            unit="pg",
+            file=sys.stderr,
+            dynamic_ncols=True,
+            leave=True,
+        )
+
+    def _progress(phase: str, _current: int, _total: int) -> None:
+        if _bar is not None and phase == "page_done":
+            _bar.update(1)
+
+    try:
+        pages_iter = iter_pages_as_images(
+            input_bytes,
+            page_indices=page_indices,
+            image_format=image_format,  # type: ignore[arg-type]
+            dpi=args.image_dpi,
+            jpeg_quality=args.jpeg_quality,
+            png_compress_level=args.png_compress_level,
+            webp_quality=args.webp_quality,
+            webp_lossless=args.webp_lossless,
+            progress_callback=_progress,
+        )
+
+        if n == 1:
+            # Single-page fast path: either stream to stdout or write to
+            # the (possibly-ext-normalized) -o target.
+            blob = next(iter(pages_iter))
+            if str(args.output) == "-":
+                sys.stdout.buffer.write(blob)
+                return EXIT_OK
+            target = args.output if ext_matches_format else parent / f"{base}{final_ext}"
+            _atomic_write_bytes(target, blob)
             if not args.quiet:
                 print(
-                    f"wrote {target.name} ({len(blob):,} bytes, page {page_idx + 1})",
+                    f"{_prefix} wrote {target} ({len(blob):,} bytes, "
+                    f"{image_format} @ {args.image_dpi} DPI)",
                     file=sys.stderr,
                 )
-        if not args.quiet:
-            total = sum(len(b) for b in images)
-            print(
-                f"[hankpdf] exported {len(images)} {image_format} pages "
-                f"({total:,} total bytes, {args.image_dpi} DPI)",
-                file=sys.stderr,
-            )
+        else:
+            total_bytes = 0
+            written_paths: list[Path] = []
+            # Scale pad width so 1200-page exports don't mix 3- and 4-digit
+            # filenames (which sort-lex wrong: out_100 < out_99). The width
+            # tracks both count AND the largest page number we might print,
+            # since --pages can select a sparse range.
+            largest_num = max(page_indices) + 1 if page_indices else 1
+            pad_w = max(3, len(str(n)), len(str(largest_num)))
+            try:
+                for page_idx, blob in zip(page_indices, pages_iter, strict=True):
+                    target = parent / f"{base}_{page_idx + 1:0{pad_w}d}{final_ext}"
+                    _atomic_write_bytes(target, blob)
+                    written_paths.append(target)
+                    total_bytes += len(blob)
+                    if not args.quiet:
+                        print(
+                            f"{_prefix} wrote {target.name} "
+                            f"({len(blob):,} bytes, page {page_idx + 1})",
+                            file=sys.stderr,
+                        )
+            except MaliciousPDFError as exc:
+                print(
+                    _warn_error(
+                        "W-IMAGE-EXPORT-PARTIAL-FAILURE",
+                        f"image export failed after writing {len(written_paths)}/{n} pages: {exc}",
+                        input_name=_label,
+                    ),
+                    file=sys.stderr,
+                )
+                if written_paths:
+                    print(
+                        f"{_prefix} wrote these before failure: {[p.name for p in written_paths]}",
+                        file=sys.stderr,
+                    )
+                return EXIT_MALICIOUS
+            except DecompressionBombError as exc:
+                print(
+                    _warn_error(
+                        "W-IMAGE-EXPORT-PARTIAL-FAILURE",
+                        f"image export failed after writing {len(written_paths)}/{n} pages: {exc}",
+                        input_name=_label,
+                    ),
+                    file=sys.stderr,
+                )
+                if written_paths:
+                    print(
+                        f"{_prefix} wrote these before failure: {[p.name for p in written_paths]}",
+                        file=sys.stderr,
+                    )
+                return EXIT_DECOMPRESSION_BOMB
+            except (RuntimeError, CompressError) as exc:
+                print(
+                    _warn_error(
+                        "W-IMAGE-EXPORT-PARTIAL-FAILURE",
+                        f"image export failed after writing {len(written_paths)}/{n} pages: {exc}",
+                        input_name=_label,
+                    ),
+                    file=sys.stderr,
+                )
+                if written_paths:
+                    print(
+                        f"{_prefix} wrote these before failure: {[p.name for p in written_paths]}",
+                        file=sys.stderr,
+                    )
+                return EXIT_ENGINE_ERROR
+            if not args.quiet:
+                print(
+                    f"{_prefix} exported {n} {image_format} pages "
+                    f"({total_bytes:,} total bytes, {args.image_dpi} DPI)",
+                    file=sys.stderr,
+                )
+    finally:
+        if _bar is not None:
+            _bar.close()
     return EXIT_OK
 
 
@@ -476,14 +879,32 @@ def main(argv: list[str] | None = None) -> int:
     else:
         input_bytes = args.input.read_bytes()
 
+    # Resolve the log-label once so every stderr line this run emits
+    # carries the same redacted filename prefix (per THREAT_MODEL.md §5).
+    # stdin returns None → plain "[hankpdf]" prefix; no empty hash.
+    _label = _input_label(args.input)
+    _prefix = _line_prefix(_label)
+
     options = _build_options(args)
 
     only_pages: set[int] | None = None
-    if args.pages:
+    if args.pages is not None:
         try:
             only_pages = _parse_pages_spec(args.pages)
         except ValueError as e:
             print(f"error: --pages {e}", file=sys.stderr)
+            return EXIT_USAGE
+        # Empty spec (e.g., --pages "" from env-var expansion) must be
+        # treated as a usage error regardless of output format. Without
+        # this shared guard, the PDF path used to fall through to
+        # compress() → CompressError → EXIT_ENGINE_ERROR=30, while the
+        # image-export path returned EXIT_USAGE=40. Unify.
+        if not only_pages:
+            print(
+                "error: --pages parsed to an empty set (no pages "
+                "selected); provide at least one 1-indexed page number",
+                file=sys.stderr,
+            )
             return EXIT_USAGE
 
     # Resolve output format. --output-format wins; otherwise infer from
@@ -499,6 +920,31 @@ def main(argv: list[str] | None = None) -> int:
             "webp": "webp",
         }.get(ext, "pdf")
 
+    # Warn if an explicit --output-format overrides the -o extension.
+    # Users expect -o out.pdf to produce a PDF; if they also pass
+    # --output-format jpeg we silently wrote out.jpg with no explanation
+    # for the rename. Surface the override. DCR Wave 1.
+    if args.output_format is not None and args.output is not None:
+        o_ext = args.output.suffix.lower().lstrip(".")
+        implicit_format = {
+            "jpg": "jpeg",
+            "jpeg": "jpeg",
+            "png": "png",
+            "webp": "webp",
+            "pdf": "pdf",
+        }.get(o_ext)
+        if implicit_format is not None and implicit_format != resolved_format and not args.quiet:
+            print(
+                _warn(
+                    "W-OUTPUT-FORMAT-EXTENSION-OVERRIDE",
+                    f"--output-format {resolved_format} overrides the "
+                    f".{o_ext} extension; output will be written as "
+                    f"{resolved_format} regardless of the filename suffix",
+                    input_name=_label,
+                ),
+                file=sys.stderr,
+            )
+
     # Image-export mode bypasses the MRC pipeline entirely.
     if resolved_format in {"jpeg", "png", "webp"}:
         return _run_image_export(args, input_bytes, only_pages, resolved_format)
@@ -506,7 +952,7 @@ def main(argv: list[str] | None = None) -> int:
     # Progress: tqdm bar for the per-page phase + plain stderr lines for
     # the triage/merge/verify milestones. All output goes to stderr so that
     # --report json on stdout stays clean for piping. --quiet suppresses both.
-    from tqdm import tqdm  # type: ignore[import-untyped]
+    from tqdm import tqdm
 
     from pdf_smasher import ProgressEvent
 
@@ -517,7 +963,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.quiet:
             return
         if event.phase == "triage_complete":
-            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
+            print(f"{_prefix} {event.message}", file=sys.stderr, flush=True)
             # Create the per-page bar up front with total page count.
             _bar = tqdm(
                 total=event.total,
@@ -530,7 +976,15 @@ def main(argv: list[str] | None = None) -> int:
         elif event.phase == "page_start" and _bar is not None:
             _bar.set_postfix_str(f"rasterizing p{event.current}")
         elif event.phase == "page_done" and _bar is not None:
-            tag = "pass" if event.verifier_passed else "FAIL"
+            # Tri-state: True=pass, False=fail, None=verifier didn't run
+            # (skip_verify). Surface each distinctly — don't collapse
+            # None into "FAIL" since nothing was actually verified.
+            if event.verifier_passed is True:
+                tag = "pass"
+            elif event.verifier_passed is False:
+                tag = "FAIL"
+            else:
+                tag = "skip"
             ratio_str = f"{event.ratio:.2f}x" if event.ratio else "?x"
             byte_str = (
                 f"{event.input_bytes // 1024}→{event.output_bytes // 1024}KB"
@@ -550,9 +1004,9 @@ def main(argv: list[str] | None = None) -> int:
             if _bar is not None:
                 _bar.close()
                 _bar = None
-            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
+            print(f"{_prefix} {event.message}", file=sys.stderr, flush=True)
         elif event.phase in {"merge_complete", "triage"}:
-            print(f"[hankpdf] {event.message}", file=sys.stderr, flush=True)
+            print(f"{_prefix} {event.message}", file=sys.stderr, flush=True)
 
     try:
         try:
@@ -563,31 +1017,82 @@ def main(argv: list[str] | None = None) -> int:
                 only_pages=only_pages,
             )
         except EncryptedPDFError as e:
-            print(f"refused: encrypted without password ({e})", file=sys.stderr)
+            print(
+                _refuse(
+                    "E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label
+                ),
+                file=sys.stderr,
+            )
             return EXIT_ENCRYPTED
         except CertifiedSignatureError as e:
-            print(f"refused: certifying signature ({e})", file=sys.stderr)
+            print(
+                _refuse("E-INPUT-CERTIFIED", f"certifying signature ({e})", input_name=_label),
+                file=sys.stderr,
+            )
             return EXIT_CERTIFIED_SIG
         except SignedPDFError as e:
-            print(f"refused: signed PDF ({e})", file=sys.stderr)
+            print(
+                _refuse("E-INPUT-SIGNED", f"signed PDF ({e})", input_name=_label), file=sys.stderr
+            )
             return EXIT_SIGNED
         except OversizeError as e:
-            print(f"refused: oversize ({e})", file=sys.stderr)
+            print(
+                _refuse("E-INPUT-OVERSIZE", f"oversize ({e})", input_name=_label), file=sys.stderr
+            )
             return EXIT_OVERSIZE
         except DecompressionBombError as e:
-            print(f"refused: decompression bomb ({e})", file=sys.stderr)
+            print(
+                _refuse(
+                    "E-INPUT-DECOMPRESSION-BOMB", f"decompression bomb ({e})", input_name=_label
+                ),
+                file=sys.stderr,
+            )
             return EXIT_DECOMPRESSION_BOMB
         except CorruptPDFError as e:
-            print(f"refused: corrupt PDF ({e})", file=sys.stderr)
+            print(
+                _refuse("E-INPUT-CORRUPT", f"corrupt PDF ({e})", input_name=_label), file=sys.stderr
+            )
             return EXIT_CORRUPT
         except MaliciousPDFError as e:
-            print(f"refused: malicious PDF ({e})", file=sys.stderr)
+            print(
+                _refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label),
+                file=sys.stderr,
+            )
             return EXIT_MALICIOUS
         except ContentDriftError as e:
-            print(f"aborted: content drift ({e})", file=sys.stderr)
+            print(
+                _warn_error("E-VERIFIER-FAIL", f"aborted: content drift ({e})", input_name=_label),
+                file=sys.stderr,
+            )
             return EXIT_VERIFIER_FAIL
+        # Timeouts — subclasses of CompressError; catch BEFORE the generic
+        # handler so they carry stable codes (exit code is EXIT_ENGINE_ERROR
+        # since timeouts aren't a separate code in the SPEC §2.2 table).
+        except OcrTimeoutError as e:
+            print(
+                _warn_error("E-OCR-TIMEOUT", f"OCR subprocess timed out ({e})", input_name=_label),
+                file=sys.stderr,
+            )
+            return EXIT_ENGINE_ERROR
+        except PerPageTimeoutError as e:
+            print(
+                _warn_error("E-TIMEOUT-PER-PAGE", f"per-page timeout ({e})", input_name=_label),
+                file=sys.stderr,
+            )
+            return EXIT_ENGINE_ERROR
+        except TotalTimeoutError as e:
+            print(
+                _warn_error(
+                    "E-TIMEOUT-TOTAL", f"total wall-clock timeout ({e})", input_name=_label
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_ENGINE_ERROR
         except CompressError as e:
-            print(f"error: {e}", file=sys.stderr)
+            print(
+                _warn_error("E-ENGINE-ERROR", str(e), input_name=_label),
+                file=sys.stderr,
+            )
             return EXIT_ENGINE_ERROR
     finally:
         if _bar is not None:
@@ -598,45 +1103,161 @@ def main(argv: list[str] | None = None) -> int:
         # Stdout: can't split; always write the merged bytes.
         if args.max_output_mb is not None and len(output_bytes) > args.max_output_mb * 1024 * 1024:
             print(
-                "warning: --max-output-mb is ignored when -o - (stdout); wrote merged output",
+                _warn(
+                    "W-MAX-OUTPUT-MB-STDOUT",
+                    "--max-output-mb is ignored when -o - (stdout); wrote merged output",
+                    input_name=_label,
+                ),
                 file=sys.stderr,
             )
         sys.stdout.buffer.write(output_bytes)
     else:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         if args.max_output_mb is None:
-            args.output.write_bytes(output_bytes)
+            _atomic_write_bytes(args.output, output_bytes)
         else:
-            from pdf_smasher.chunking import split_pdf_by_size
-
             max_bytes = int(args.max_output_mb * 1024 * 1024)
             chunks = split_pdf_by_size(output_bytes, max_bytes=max_bytes)
             if len(chunks) == 1:
-                args.output.write_bytes(chunks[0])
+                _atomic_write_bytes(args.output, chunks[0])
+                # Oversize check even on the single-chunk path. This
+                # happens when the splitter can't go below the cap
+                # (e.g., a single page is already larger than max_bytes)
+                # — same condition the multi-chunk branch warns about.
+                if len(chunks[0]) > max_bytes and not args.quiet:
+                    print(
+                        _warn(
+                            "W-SINGLE-CHUNK-OVERSIZE",
+                            f"output exceeds --max-output-mb cap "
+                            f"({len(chunks[0]) / (1024 * 1024):.2f} MB > "
+                            f"{args.max_output_mb:.3f} MB). Single-page "
+                            "PDFs cannot be split further; the oversize "
+                            "output was retained.",
+                            input_name=_label,
+                        ),
+                        file=sys.stderr,
+                    )
             else:
                 base = args.output.stem
                 ext = args.output.suffix
                 parent = args.output.parent
+
+                # Pad width scales with chunk count so 1200-chunk jobs
+                # produce {base}_0001{ext} ... {base}_1200{ext} rather
+                # than a mix of 3- and 4-digit names that sort-lex wrong.
+                chunk_pad_w = max(3, len(str(len(chunks))))
+
+                # Detect stale chunks from prior runs that will not be
+                # overwritten because our new chunk count is smaller.
+                # Matches {base}_NN+{ext} with numeric index > len(chunks).
+                # Allow 3+ digits dynamically so a previous 1200-chunk
+                # run's _0150 file is still detected as stale by a
+                # subsequent 50-chunk run.
+                chunk_re = re.compile(
+                    rf"^{re.escape(base)}_(\d{{3,}}){re.escape(ext)}$",
+                )
+                stale: list[Path] = []
+                if parent.exists():
+                    for existing in parent.iterdir():
+                        m = chunk_re.match(existing.name)
+                        if m is not None and int(m.group(1)) > len(chunks):
+                            stale.append(existing)
+
                 written_paths: list[Path] = []
-                for idx, chunk in enumerate(chunks):
-                    p = parent / f"{base}_{idx}{ext}"
-                    p.write_bytes(chunk)
-                    written_paths.append(p)
+                try:
+                    for idx, chunk in enumerate(chunks, start=1):
+                        p = parent / f"{base}_{idx:0{chunk_pad_w}d}{ext}"
+                        _atomic_write_bytes(p, chunk)
+                        written_paths.append(p)
+                except OSError as exc:
+                    # Disk full / permission / path errors mid-write.
+                    # Orphan whatever shards hit disk before the failure;
+                    # tell the operator explicitly rather than leaving a
+                    # raw OSError traceback.
+                    print(
+                        _warn_error(
+                            "W-CHUNK-WRITE-PARTIAL-FAILURE",
+                            f"chunk write failed after "
+                            f"{len(written_paths)}/{len(chunks)} chunks: {exc}",
+                            input_name=_label,
+                        ),
+                        file=sys.stderr,
+                    )
+                    if written_paths:
+                        print(
+                            f"{_prefix} wrote these before failure: "
+                            f"{[p.name for p in written_paths]}",
+                            file=sys.stderr,
+                        )
+                    return EXIT_ENGINE_ERROR
                 oversize = [p for p in written_paths if p.stat().st_size > max_bytes]
                 if not args.quiet:
                     print(
-                        f"[hankpdf] wrote {len(chunks)} chunks "
+                        f"{_prefix} wrote {len(chunks)} chunks "
                         f"({args.max_output_mb:.1f} MB cap); "
                         f"sizes: {[f'{p.stat().st_size / (1024 * 1024):.2f} MB' for p in written_paths]}",
                         file=sys.stderr,
                     )
                     if oversize:
                         print(
-                            f"[hankpdf] warning: {len(oversize)} chunk(s) exceed "
-                            "the cap because they contain a single oversize page: "
-                            f"{[p.name for p in oversize]}",
+                            _warn(
+                                "W-CHUNKS-EXCEED-CAP",
+                                f"{len(oversize)} chunk(s) exceed the cap "
+                                "because they contain a single oversize "
+                                f"page: {[p.name for p in oversize]}",
+                                input_name=_label,
+                            ),
                             file=sys.stderr,
                         )
+                # W-STALE-CHUNK-FILES deliberately OUTSIDE the `not args.quiet`
+                # guard. Stale chunks are a correctness hazard: downstream
+                # batch jobs glob `{base}_*.pdf` and silently ingest chunks
+                # from a prior run whose index is higher than the current
+                # chunk count. Cron jobs typically run with --quiet, so a
+                # quiet-suppressed stale warning would hide exactly the case
+                # it matters for. SPEC.md §8.5.1 documents this exception.
+                if stale:
+                    stale_names = sorted(p.name for p in stale)
+                    print(
+                        _warn(
+                            "W-STALE-CHUNK-FILES",
+                            f"{len(stale)} stale chunk file(s) from a "
+                            f"previous run remain in {parent}: "
+                            f"{stale_names}. Remove them manually if "
+                            "they no longer belong to this output.",
+                            input_name=_label,
+                        ),
+                        file=sys.stderr,
+                    )
+
+    # Verifier-status banner. Default skip_verify=True is a UX trap:
+    # users see a clean text report and assume the output was content-
+    # checked against the input. Surface verifier.status explicitly on
+    # stderr when it's not a clean pass. --quiet suppresses the banner
+    # along with the rest of the progress chrome.
+    if not args.quiet:
+        v_status = report.verifier.status
+        if v_status == "skipped":
+            print(
+                _warn(
+                    "W-VERIFIER-SKIPPED",
+                    "content-preservation verifier was SKIPPED (default). "
+                    "Output was NOT content-checked against input. "
+                    "Use --verify to enable.",
+                    input_name=_label,
+                ),
+                file=sys.stderr,
+            )
+        elif v_status == "fail":
+            print(
+                _warn(
+                    "W-VERIFIER-FAILED",
+                    "content-preservation verifier FAILED on "
+                    f"{len(report.verifier.failing_pages)} page(s)",
+                    input_name=_label,
+                ),
+                file=sys.stderr,
+            )
 
     if not args.quiet and args.report != "none":
         line = _format_report(report, args.report)

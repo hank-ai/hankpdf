@@ -121,11 +121,15 @@ def test_compress_signed_without_opt_in_raises() -> None:
 
 @pytest.mark.integration
 def test_compress_respects_mode_safe() -> None:
-    """Safe mode runs but enforces stricter gates. On valid content, still passes."""
+    """Safe mode runs but enforces stricter gates. On valid content, still passes.
+
+    skip_verify defaults to True, so verifier status will be 'skipped' unless
+    explicitly enabled. This test verifies safe mode completes without error.
+    """
     pdf_in = _make_fake_scan(["HELLO WORLD"])
     pdf_out, report = compress(pdf_in, options=CompressOptions(mode="safe"))
     assert pdf_out.startswith(b"%PDF-")
-    assert report.verifier.status in ("pass", "fail")
+    assert report.verifier.status in ("pass", "fail", "skipped")
 
 
 def test_legal_codec_profile_raises_not_implemented() -> None:
@@ -140,3 +144,186 @@ def test_legal_codec_profile_none_does_not_raise_at_construction() -> None:
     typing was wrong (False is not None is True, raising every call)."""
     opts = CompressOptions()
     assert opts.legal_codec_profile is None
+
+
+def test_compress_skip_verify_reports_status_skipped() -> None:
+    """With skip_verify=True (the default), the returned CompressReport
+    must surface status='skipped' rather than a fake 'pass', and append
+    a 'verifier-skipped' warning."""
+    pdf_in = _make_fake_scan(["HELLO"])
+    _, report = compress(pdf_in, options=CompressOptions(skip_verify=True))
+    assert report.verifier.status == "skipped", f"expected skipped, got {report.verifier.status}"
+    assert any(w == "verifier-skipped" for w in report.warnings), (
+        f"expected 'verifier-skipped' in warnings; got {report.warnings}"
+    )
+
+
+def test_compress_verify_true_reports_real_status() -> None:
+    """With skip_verify=False, the verifier runs and status is 'pass' or
+    'fail' (not 'skipped'). No 'verifier-skipped' warning."""
+    pdf_in = _make_fake_scan(["HELLO"])
+    _, report = compress(pdf_in, options=CompressOptions(skip_verify=False))
+    assert report.verifier.status in ("pass", "fail"), (
+        f"expected pass|fail, got {report.verifier.status}"
+    )
+    assert not any(w == "verifier-skipped" for w in report.warnings)
+
+
+def _make_color_scan(*, source_dpi: int = 200) -> bytes:
+    """Build a single-page PDF with clearly colored content so
+    force_monochrome triggers the color-detected warning."""
+    w_pt, h_pt = 612.0, 792.0
+    w_px = round(w_pt * source_dpi / 72)
+    h_px = round(h_pt * source_dpi / 72)
+    img = Image.new("RGB", (w_px, h_px), color="white")
+    draw = ImageDraw.Draw(img)
+    # Big saturated red rectangle so _page_has_color() definitely fires.
+    draw.rectangle((100, 100, w_px - 100, h_px - 100), fill=(255, 0, 0))
+
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(w_pt, h_pt))
+    page = pdf.pages[0]
+    jbuf = io.BytesIO()
+    img.save(jbuf, format="JPEG", quality=92, subsampling=0)
+    xobj = pdf.make_stream(
+        jbuf.getvalue(),
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Image,
+        Width=w_px,
+        Height=h_px,
+        ColorSpace=pikepdf.Name.DeviceRGB,
+        BitsPerComponent=8,
+        Filter=pikepdf.Name.DCTDecode,
+    )
+    page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Scan=xobj))
+    page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Scan Do Q\n")
+    buf = io.BytesIO()
+    pdf.save(buf)
+    return buf.getvalue()
+
+
+def test_worker_warnings_propagate_to_report_serial() -> None:
+    """Regression: worker-emitted warnings (e.g.
+    page-N-color-detected-in-monochrome-mode) must survive the
+    worker→parent boundary and land in report.warnings. Serial mode.
+    """
+    pdf_in = _make_color_scan()
+    _, report = compress(
+        pdf_in,
+        options=CompressOptions(
+            force_monochrome=True,
+            skip_verify=True,
+            max_workers=1,
+        ),
+    )
+    combined = " ".join(report.warnings)
+    assert (
+        "force-monochrome-discarded-color" in combined
+        or "color-detected-in-monochrome-mode" in combined
+    ), f"expected a force-monochrome color warning; got {report.warnings!r}"
+
+
+def test_worker_warnings_propagate_to_report_parallel() -> None:
+    """Same invariant when pages run in worker processes: warnings
+    appended inside the worker's local list must survive pickling via
+    _PageResult.per_page_warnings and land in report.warnings."""
+    # Two pages so the pool actually has work to parallelize.
+    pdf_in_a = _make_color_scan()
+    # Merge two color pages into one doc.
+    with pikepdf.open(io.BytesIO(pdf_in_a)) as a, pikepdf.open(io.BytesIO(pdf_in_a)) as b:
+        a.pages.extend(b.pages)
+        buf = io.BytesIO()
+        a.save(buf)
+        two_page = buf.getvalue()
+
+    _, report = compress(
+        two_page,
+        options=CompressOptions(
+            force_monochrome=True,
+            skip_verify=True,
+            max_workers=2,
+        ),
+    )
+    combined = " ".join(report.warnings)
+    assert (
+        "force-monochrome-discarded-color" in combined
+        or "color-detected-in-monochrome-mode" in combined
+    ), f"expected a force-monochrome color warning from workers; got {report.warnings!r}"
+
+
+def test_verifier_fail_warning_code_is_normalized() -> None:
+    """Regression: the verifier-fail warning used list repr for the
+    failing pages (`verifier-fail-...-pages-[1, 2, 3]`), which contains
+    spaces and brackets that break grep/log-parsing tooling. Normalize
+    to comma-separated integers with no brackets/spaces and cap at the
+    first 10 plus a +N suffix for longer lists."""
+    import re as _re
+
+    # We exercise the warning-formatting helper directly (keeps the test
+    # fast and deterministic vs running full compress twice).
+    from pdf_smasher import _format_verifier_failing_pages
+
+    failing = tuple(range(1, 21))  # 20 failing pages
+    fragment = _format_verifier_failing_pages(failing)
+    full_code = f"verifier-fail-fast-mode-pages-{fragment}"
+    # No brackets, no spaces; all chars match [a-z0-9,+\-] (ASCII only).
+    assert _re.fullmatch(r"[a-z0-9,\-+]+", full_code), (
+        f"expected normalized code; got {full_code!r}"
+    )
+    # First 10 ids are present, followed by +10.
+    assert "1,2,3,4,5,6,7,8,9,10" in full_code
+    assert "+10" in full_code
+
+
+def test_passthrough_min_input_mb_uses_fail_closed_sentinels() -> None:
+    """Passthrough must use the same fail-closed sentinels as skip_verify
+    so downstream gates can't mistake passthrough for clean verified."""
+    # Tiny input, below a high floor -> passthrough fires.
+    tiny_pdf = _make_fake_scan(["HELLO"])
+    _, report = compress(tiny_pdf, options=CompressOptions(min_input_mb=10.0))
+    assert report.status == "passed_through"
+    assert report.verifier.status == "skipped"
+    # Fail-closed sentinels must match skipped_result():
+    assert report.verifier.ocr_levenshtein == 1.0  # max drift, NOT 0
+    assert report.verifier.ssim_global == 0.0
+    assert report.verifier.ssim_min_tile == 0.0
+    assert report.verifier.digit_multiset_match is False
+    assert report.verifier.color_preserved is False
+    assert report.verifier.structural_match is False
+    assert report.verifier.failing_pages == ()
+
+
+def test_passthrough_min_ratio_uses_fail_closed_sentinels() -> None:
+    """Same for min_ratio passthrough."""
+    tiny_pdf = _make_fake_scan(["HELLO"])
+    _, report = compress(tiny_pdf, options=CompressOptions(min_ratio=1000.0))
+    assert report.status == "passed_through"
+    assert report.verifier.status == "skipped"
+    assert report.verifier.ocr_levenshtein == 1.0
+    assert report.verifier.ssim_global == 0.0
+    assert report.verifier.ssim_min_tile == 0.0
+    assert report.verifier.digit_multiset_match is False
+    assert report.verifier.structural_match is False
+    assert report.verifier.color_preserved is False
+    assert report.verifier.failing_pages == ()
+
+
+def test_progress_event_verifier_passed_is_none_when_skipped() -> None:
+    """Regression: when skip_verify=True the worker synthesizes a
+    trivially-passing verdict, which used to bubble up to the progress
+    event as verifier_passed=True — misleading since nothing was
+    verified. With skip_verify the event must emit None (or the tri-
+    state 'skipped' conceptually)."""
+    pdf_in = _make_fake_scan(["HELLO"])
+    events = []
+
+    def grab(event):  # type: ignore[no-untyped-def]
+        events.append(event)
+
+    compress(pdf_in, options=CompressOptions(skip_verify=True), progress_callback=grab)
+    page_done = [e for e in events if e.phase == "page_done"]
+    assert page_done, "expected at least one page_done event"
+    for e in page_done:
+        assert e.verifier_passed is None, (
+            f"expected verifier_passed=None under skip_verify, got {e.verifier_passed!r}"
+        )

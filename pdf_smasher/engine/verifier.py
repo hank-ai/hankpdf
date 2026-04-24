@@ -274,6 +274,26 @@ class _VerifierAggregator:
             failing_pages=tuple(self._failing_pages),
         )
 
+    def skipped_result(self) -> VerifierResult:
+        """Return a VerifierResult explicitly marked status='skipped'.
+
+        Uses fail-closed sentinel metrics so any code keying on e.g.
+        ``result.ssim_global >= 0.92`` fails rather than seeing a fake
+        perfect score. The content-preservation invariant the README
+        advertises was intentionally not run — the report must make
+        that distinguishable from a real pass.
+        """
+        return VerifierResult(
+            status="skipped",
+            ocr_levenshtein=1.0,
+            ssim_global=0.0,
+            ssim_min_tile=0.0,
+            digit_multiset_match=False,
+            structural_match=False,
+            color_preserved=False,
+            failing_pages=(),
+        )
+
 
 def tile_ssim_min(
     a: Image.Image,

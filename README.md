@@ -22,6 +22,59 @@ Takes oversized scanned PDFs (typical input: 200-page, 800 MB image scans) and p
 - **Weird-PDF robust** — encrypted, signed, corrupt-xref, JBIG2-in, form XObjects, color profiles, linearized, tagged, PDF/A-3-embedded: each class has an explicit detect-and-handle policy. None crash the pipeline.
 - **Honest compression targets** — we promise what we deliver: ≥3× guaranteed, 8–15× typical, 50–200× best-case on text-only content. Not 200× on everything.
 
+## Output modes
+
+HankPDF produces three output shapes out of the same `hankpdf` command:
+
+**PDF (default):**
+
+```bash
+hankpdf in.pdf -o out.pdf
+```
+
+**Chunked PDF (for email attachment limits):**
+
+```bash
+hankpdf in.pdf -o out.pdf --max-output-mb 25
+# writes out_001.pdf, out_002.pdf, ... if the merged output exceeds 25 MB
+```
+
+Chunk filenames are zero-padded, 1-indexed, and preserve page order. A single page that's already larger than the cap is emitted alone (you'll see a stderr warning).
+
+> **Scheme change in schema v2:** chunk filenames are now `{base}_{NNN}{ext}` (1-indexed, min 3-digit zero-pad). The previous scheme was `{base}_{idx}{ext}` (0-indexed, unpadded). Automation pinned to `out_0.pdf` should migrate to `out_001.pdf` or glob `out_*.pdf` with a lexical sort.
+
+**Per-page image export (JPEG, PNG, or WebP):**
+
+```bash
+hankpdf in.pdf -o page.jpg --pages 1 --image-dpi 150 --jpeg-quality 80
+hankpdf in.pdf -o dump.png --image-dpi 200
+hankpdf in.pdf -o small.webp --pages 1-5 --webp-quality 70
+```
+
+Image export skips the MRC compression pipeline; each requested page is rendered and saved as a standalone image. The output format is inferred from the `-o` extension (or set explicitly via `--output-format`). Use `--pages` to restrict to a subset — without it, every page is exported.
+
+## Passthrough on low compressibility
+
+By default HankPDF returns the input **unchanged** if the achieved ratio
+is below **1.5×** — producing an MRC output larger than the input serves
+no one. The run exits 0 with `status="passed_through"` (exit code 2) and
+a warning code `passthrough-ratio-floor` on stderr; `report.output_sha256`
+equals `report.input_sha256` and the verifier is marked `"skipped"` with
+fail-closed sentinels so downstream gates can't mistake passthrough for
+a clean verified run.
+
+Overrides:
+
+```bash
+hankpdf in.pdf -o out.pdf --min-ratio 1.0   # force MRC output regardless
+hankpdf in.pdf -o out.pdf --min-ratio 0     # disable the floor entirely
+hankpdf in.pdf -o out.pdf --min-input-mb 5  # also passthrough if input < 5 MB
+```
+
+`--min-input-mb` is a sibling gate for inputs so small that the MRC
+per-page overhead (~2-3 s/page) isn't worth the ratio gain; it emits
+warning code `passthrough-min-input-mb`.
+
 ## Documentation
 
 | Doc | Purpose |

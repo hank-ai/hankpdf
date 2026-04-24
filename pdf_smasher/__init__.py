@@ -17,11 +17,20 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+)
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import IO, Any, Literal
 
 import pikepdf
 
+# Import for side effect: installs PIL.Image.MAX_IMAGE_PIXELS per SECURITY.md
+# and docs/THREAT_MODEL.md. Must run before any other module that opens images
+# via Pillow, so keep this import early in __init__.
+from pdf_smasher import _pillow_hardening as _pillow_hardening
 from pdf_smasher._version import __engine_version__, __version__
 from pdf_smasher.exceptions import (
     CertifiedSignatureError,
@@ -32,8 +41,11 @@ from pdf_smasher.exceptions import (
     EncryptedPDFError,
     EnvironmentError,  # noqa: A004 — part of our public error hierarchy
     MaliciousPDFError,
+    OcrTimeoutError,
     OversizeError,
+    PerPageTimeoutError,
     SignedPDFError,
+    TotalTimeoutError,
 )
 from pdf_smasher.types import (
     CompressOptions,
@@ -42,6 +54,7 @@ from pdf_smasher.types import (
     TriageReport,
     VerifierResult,
 )
+from pdf_smasher.utils.text import format_page_list_short
 
 __all__ = [
     "CertifiedSignatureError",
@@ -54,12 +67,16 @@ __all__ = [
     "EncryptedPDFError",
     "EnvironmentError",
     "MaliciousPDFError",
+    "OcrTimeoutError",
     "OversizeError",
+    "PerPageTimeoutError",
     "ProgressEvent",
     "SignedPDFError",
+    "TotalTimeoutError",
     "TriageReport",
     "VerifierResult",
     "__version__",
+    "_enforce_input_policy",
     "compress",
     "compress_stream",
     "triage",
@@ -132,7 +149,6 @@ class _WorkerInput:
 
     input_page_pdf: bytes  # 1-page PDF extracted from source
     page_index: int  # 0-indexed position in original PDF
-    total_pages: int  # for human-readable log messages
     page_size: tuple[float, float]  # (width_pt, height_pt)
     source_dpi: int
     bg_target_dpi: int
@@ -161,6 +177,99 @@ class _PageResult:
     # parent wall to diagnose parallelism: if parallel, sum >> wall; if
     # serial/contention, sum ≈ wall.
     worker_wall_ms: int = 0
+
+
+def _format_verifier_failing_pages(ids: tuple[int, ...], limit: int = 10) -> str:
+    """Format failing-page IDs for a warning code: comma-separated ints,
+    no brackets, no spaces, capped at ``limit`` with a ``+N`` suffix for
+    longer lists. Keeps warning codes grep-friendly and bounded length.
+    """
+    sorted_ids = sorted(ids)
+    if len(sorted_ids) <= limit:
+        return ",".join(str(n) for n in sorted_ids)
+    head = sorted_ids[:limit]
+    remaining = len(sorted_ids) - limit
+    return f"{','.join(str(n) for n in head)}+{remaining}"
+
+
+def _build_passthrough_report(
+    input_data: bytes,
+    pages: int,
+    wall_ms: int,
+    reason: str,
+    warning_code: str,
+) -> CompressReport:
+    """Construct a CompressReport for a passthrough return (input unchanged).
+
+    Used by :func:`compress` when one of the ``CompressOptions`` thresholds
+    (min_input_mb, min_ratio) short-circuits the pipeline — the output
+    equals the input, verifier is marked "skipped" (nothing to compare),
+    and a kebab-case warning code names the specific gate that tripped.
+
+    Delegates to ``_VerifierAggregator().skipped_result()`` so there's a
+    single source of truth for the fail-closed sentinel policy. Without
+    this, the hand-rolled VerifierResult here and the one returned by
+    ``skipped_result()`` can drift (ocr_levenshtein=0.0 vs 1.0 — one is
+    fail-open, one fail-closed).
+    """
+    import hashlib
+
+    # Local import to avoid circular import at module load: engine.verifier
+    # imports from pdf_smasher.types, and this module re-exports from types.
+    from pdf_smasher.engine.verifier import _VerifierAggregator
+
+    sha = hashlib.sha256(input_data).hexdigest()
+    return CompressReport(
+        status="passed_through",
+        exit_code=2,  # EXIT_NOOP_PASSTHROUGH per cli.main
+        input_bytes=len(input_data),
+        output_bytes=len(input_data),
+        ratio=1.0,
+        pages=pages,
+        wall_time_ms=wall_ms,
+        engine="mrc",
+        engine_version=__engine_version__,
+        verifier=_VerifierAggregator().skipped_result(),
+        input_sha256=sha,
+        output_sha256=sha,  # same bytes → same hash
+        canonical_input_sha256=None,
+        warnings=(warning_code,),
+        reason=reason,
+    )
+
+
+def _enforce_input_policy(
+    tri: TriageReport,
+    options: CompressOptions,
+    input_data: bytes,
+) -> None:
+    """Apply every safety gate that compress() enforces on the input.
+
+    Raises the appropriate exception from the CompressError hierarchy if
+    a gate is tripped. Both compress() and the CLI's image-export path
+    must route through this so users get the same refusal behavior
+    regardless of the chosen output format.
+    """
+    if tri.classification == "require-password" and options.password is None:
+        msg = "input is encrypted; supply CompressOptions.password"
+        raise EncryptedPDFError(msg)
+
+    if tri.is_certified_signature and not options.allow_certified_invalidation:
+        msg = "input carries a certifying signature; --allow-certified-invalidation required"
+        raise CertifiedSignatureError(msg)
+
+    if tri.is_signed and not options.allow_signed_invalidation:
+        msg = "input is signed; --allow-signed-invalidation required"
+        raise SignedPDFError(msg)
+
+    if options.max_pages is not None and tri.pages > options.max_pages:
+        msg = f"input has {tri.pages} pages; max_pages={options.max_pages}"
+        raise OversizeError(msg)
+
+    input_mb = len(input_data) / (1024 * 1024)
+    if input_mb > options.max_input_mb:
+        msg = f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb}"
+        raise OversizeError(msg)
 
 
 def _mrc_compose(
@@ -216,6 +325,8 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     Imports are function-local so worker processes don't pay the engine
     import cost until they actually run (pool startup is cheap).
     """
+    import contextlib
+
     import numpy as np
 
     from pdf_smasher.engine.compose import (
@@ -241,7 +352,6 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
 
     _worker_t0 = time.monotonic()
     i = winput.page_index
-    total = winput.total_pages
     width_pt, height_pt = winput.page_size
     options = winput.options
     is_safe = winput.is_safe
@@ -263,69 +373,129 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     _input_ocr_future: Any = None
     word_boxes: list[Any] = []
     ocr_text: str = ""
-    if need_input_ocr:
-        _ocr_pool = ThreadPoolExecutor(max_workers=2)  # 1 for input, 1 for output
-        _input_ocr_future = _ocr_pool.submit(
-            tesseract_word_boxes,
-            raster,
-            language=options.ocr_language,
-        )
-    else:
-        _ocr_pool = None
+    # ExitStack guarantees the OCR ThreadPoolExecutor's __exit__ fires on
+    # any path out of this block (happy return OR exception), which drains
+    # in-flight tesseract subprocess threads instead of leaking them.
+    _ocr_pool: ThreadPoolExecutor | None = None
+    with contextlib.ExitStack() as _ocr_stack:
+        if need_input_ocr:
+            _ocr_pool = ThreadPoolExecutor(max_workers=2)  # 1 for input, 1 for output
+            # Register an explicit shutdown callback that cancels pending
+            # futures and skips waiting. The default ExitStack + `with`
+            # on a ThreadPoolExecutor invokes shutdown(wait=True,
+            # cancel_futures=False) — if a Tesseract subprocess is wedged
+            # (timeout kwarg saves us for normal hangs, but signals like
+            # SIGSTOP can defeat it), we'd block forever on worker-pool
+            # exit. cancel_futures=True tells any queued-but-unstarted
+            # tasks to abandon, and wait=False doesn't block.
+            # Pytesseract's timeout kwarg already kills subprocesses on
+            # overrun, so in-flight work almost always completes.
+            # Pin to the local binding so the lambda captures a non-None
+            # ThreadPoolExecutor (mypy can't narrow across the lambda).
+            _pool = _ocr_pool
+            _ocr_stack.callback(
+                lambda: _pool.shutdown(wait=False, cancel_futures=True),
+            )
+            _input_ocr_future = _ocr_pool.submit(
+                tesseract_word_boxes,
+                raster,
+                language=options.ocr_language,
+                timeout_seconds=options.per_page_timeout_seconds,
+            )
 
-    # Source-truth: prefer native PDF text layer when present.
-    # (Still cheap even with skip_verify; just a textpage read.)
-    from pypdfium2 import PdfDocument as _Pdfium
+        # Source-truth: prefer native PDF text layer when present.
+        # (Still cheap even with skip_verify; just a textpage read.)
+        from pypdfium2 import PdfDocument as _Pdfium
 
-    _doc = _Pdfium(winput.input_page_pdf)
-    try:
-        _tp = _doc[0].get_textpage()
+        _doc = _Pdfium(winput.input_page_pdf)
         try:
-            _native_text = _tp.get_text_range()
+            _tp = _doc[0].get_textpage()
+            try:
+                _native_text = _tp.get_text_range()
+            finally:
+                _tp.close()
         finally:
-            _tp.close()
-    finally:
-        _doc.close()
+            _doc.close()
 
-    def _await_input_ocr() -> None:
-        """Populate word_boxes + ocr_text from the background OCR future.
-        No-op if already resolved or not needed."""
-        nonlocal word_boxes, ocr_text
-        if _input_ocr_future is None or word_boxes:
-            return
-        word_boxes = _input_ocr_future.result()
-        ocr_text = " ".join(b.text for b in word_boxes)
+        def _await_input_ocr() -> None:
+            """Populate word_boxes + ocr_text from the background OCR future.
+            No-op if already resolved or not needed."""
+            nonlocal word_boxes, ocr_text
+            if _input_ocr_future is None or word_boxes:
+                return
+            word_boxes = _input_ocr_future.result()
+            ocr_text = " ".join(b.text for b in word_boxes)
 
-    # If native text is present we can skip waiting on OCR for the verifier
-    # ground-truth (native wins anyway). But we still need word_boxes later
-    # if options.ocr is set (for text-layer positioning).
-    if _native_text and _native_text.strip():
-        input_ocr_text = _native_text.strip()
-    else:
-        _await_input_ocr()
-        input_ocr_text = ocr_text
+        # If native text is present we can skip waiting on OCR for the verifier
+        # ground-truth (native wins anyway). But we still need word_boxes later
+        # if options.ocr is set (for text-layer positioning).
+        if _native_text and _native_text.strip():
+            input_ocr_text = _native_text.strip()
+        else:
+            _await_input_ocr()
+            input_ocr_text = ocr_text
 
-    # --- Mask + classify ---
-    mask = build_mask(raster)
-    mask_arr = np.asarray(mask.convert("1"), dtype=bool)
-    mask_coverage = float(mask_arr.sum()) / max(1, mask_arr.size)
-    strategy = classify_page(raster, mask_coverage_fraction=mask_coverage)
+        # --- Mask + classify ---
+        mask = build_mask(raster)
+        mask_arr = np.asarray(mask.convert("1"), dtype=bool)
+        mask_coverage = float(mask_arr.sum()) / max(1, mask_arr.size)
+        strategy = classify_page(raster, mask_coverage_fraction=mask_coverage)
 
-    if options.force_monochrome and _page_has_color(raster):
-        warnings.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
+        if options.force_monochrome and _page_has_color(raster):
+            warnings.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
 
-    if strategy == PageStrategy.ALREADY_OPTIMIZED:
-        msg = (
-            f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
-            "compress() has no handler for this value."
-        )
-        raise AssertionError(msg)
+        if strategy == PageStrategy.ALREADY_OPTIMIZED:
+            msg = (
+                f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
+                "compress() has no handler for this value."
+            )
+            raise AssertionError(msg)
 
-    # --- Strategy dispatch ---
-    if strategy == PageStrategy.TEXT_ONLY:
-        if not options.force_monochrome and not is_effectively_monochrome(raster):
-            warnings.append(f"page-{i + 1}-text-only-demoted-to-mixed-color-detected")
-            strategy = PageStrategy.MIXED
+        # --- Strategy dispatch ---
+        if strategy == PageStrategy.TEXT_ONLY:
+            if not options.force_monochrome and not is_effectively_monochrome(raster):
+                warnings.append(f"page-{i + 1}-text-only-demoted-to-mixed-color-detected")
+                strategy = PageStrategy.MIXED
+                _JBIG2_CASCADE_STATE.tripped = False
+                composed = _mrc_compose(
+                    raster,
+                    mask,
+                    width_pt,
+                    height_pt,
+                    winput.bg_target_dpi,
+                    winput.source_dpi,
+                    bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
+                    bg_jpeg_quality=options.target_color_quality,
+                    bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+                    force_grayscale=options.force_monochrome,
+                )
+            else:
+                fg = extract_foreground(raster, mask=mask)
+                paper = detect_paper_color(raster)
+                composed = compose_text_only_page(
+                    mask=mask,
+                    foreground_color=fg.ink_color,
+                    paper_color=paper,
+                    page_width_pt=width_pt,
+                    page_height_pt=height_pt,
+                )
+        elif strategy == PageStrategy.PHOTO_ONLY:
+            _photo_bg_color_mode: Literal["rgb", "grayscale"] = (
+                "grayscale"
+                if (options.force_monochrome or is_effectively_monochrome(raster))
+                else "rgb"
+            )
+            composed = compose_photo_only_page(
+                raster=raster,
+                page_width_pt=width_pt,
+                page_height_pt=height_pt,
+                target_dpi=options.photo_target_dpi,
+                bg_color_mode=_photo_bg_color_mode,
+                bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
+                jpeg_quality=options.target_color_quality,
+                subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
+            )
+        else:  # MIXED
             _JBIG2_CASCADE_STATE.tripped = False
             composed = _mrc_compose(
                 raster,
@@ -339,151 +509,109 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
                 bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
                 force_grayscale=options.force_monochrome,
             )
-        else:
-            fg = extract_foreground(raster, mask=mask)
-            paper = detect_paper_color(raster)
-            composed = compose_text_only_page(
-                mask=mask,
-                foreground_color=fg.ink_color,
-                paper_color=paper,
+            if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
+                warnings.append(f"page-{i + 1}-jbig2-fallback-to-flate")
+
+        if options.ocr:
+            _await_input_ocr()
+            composed = add_text_layer(
+                composed,
+                page_index=0,
+                word_boxes=word_boxes,
+                raster_width_px=raster.size[0],
+                raster_height_px=raster.size[1],
                 page_width_pt=width_pt,
                 page_height_pt=height_pt,
             )
-    elif strategy == PageStrategy.PHOTO_ONLY:
-        _photo_bg_color_mode: Literal["rgb", "grayscale"] = (
-            "grayscale"
-            if (options.force_monochrome or is_effectively_monochrome(raster))
-            else "rgb"
-        )
-        composed = compose_photo_only_page(
-            raster=raster,
-            page_width_pt=width_pt,
-            page_height_pt=height_pt,
-            target_dpi=options.photo_target_dpi,
-            bg_color_mode=_photo_bg_color_mode,
-            bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
-            jpeg_quality=options.target_color_quality,
-            subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
-        )
-    else:  # MIXED
-        _JBIG2_CASCADE_STATE.tripped = False
-        composed = _mrc_compose(
-            raster,
-            mask,
-            width_pt,
-            height_pt,
-            winput.bg_target_dpi,
-            winput.source_dpi,
-            bg_codec=winput.effective_bg_codec,  # type: ignore[arg-type]
-            bg_jpeg_quality=options.target_color_quality,
-            bg_subsampling=_CHROMA_TO_PIL[options.bg_chroma_subsampling],
-            force_grayscale=options.force_monochrome,
-        )
-        if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
-            warnings.append(f"page-{i + 1}-jbig2-fallback-to-flate")
 
-    if options.ocr:
-        _await_input_ocr()
-        composed = add_text_layer(
-            composed,
-            page_index=0,
-            word_boxes=word_boxes,
-            raster_width_px=raster.size[0],
-            raster_height_px=raster.size[1],
-            page_width_pt=width_pt,
-            page_height_pt=height_pt,
-        )
+        # --- Streaming verify ---
+        # When skip_verify is set, synthesize a trivially-passing verdict and
+        # don't re-rasterize / re-OCR the output. Saves 2-5 s/page (Tesseract
+        # runs twice per page inside the verifier otherwise).
+        if options.skip_verify:
+            from pdf_smasher.engine.verifier import PageVerdict as _PageVerdict
 
-    # --- Streaming verify ---
-    # When skip_verify is set, synthesize a trivially-passing verdict and
-    # don't re-rasterize / re-OCR the output. Saves 2-5 s/page (Tesseract
-    # runs twice per page inside the verifier otherwise).
-    if options.skip_verify:
-        from pdf_smasher.engine.verifier import PageVerdict as _PageVerdict
-
-        verdict = _PageVerdict(
-            page_index=-1,
-            passed=True,
-            lev=0.0,
-            ssim_global=1.0,
-            ssim_tile_min=1.0,
-            digits_match=True,
-            color_preserved=True,
-        )
-    else:
-        output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
-        # Kick off output OCR in parallel with awaiting the input OCR (if
-        # we haven't already needed it). Two tesseract subprocesses run
-        # concurrently inside this worker — each uses 1 thread (OMP pinned)
-        # so the pair still fits in 1 CPU core's worth of work, but they
-        # overlap for ~40% wall-time reduction on the OCR phase.
-        if _ocr_pool is not None:
-            _output_ocr_future = _ocr_pool.submit(
-                tesseract_word_boxes,
-                output_raster,
-                language=options.ocr_language,
+            verdict = _PageVerdict(
+                page_index=-1,
+                passed=True,  # don't add to failing_pages
+                lev=1.0,  # sentinel: max drift
+                ssim_global=0.0,
+                ssim_tile_min=0.0,
+                digits_match=False,
+                color_preserved=False,
             )
         else:
-            _output_ocr_future = None
-        # Resolve input OCR (may already be done if native text wasn't present).
-        _await_input_ocr()
-        # Reassign in case native text was used — verifier needs input_ocr_text
-        # from our source-truth path above; here we need the RAW tesseract
-        # output for comparison against RAW tesseract on the output.
-        # Note: we use `input_ocr_text` (source-truth preferred) as the ground
-        # truth, but compare against `output_ocr_text` which is always raw OCR.
-        if _output_ocr_future is not None:
-            _out_wb = _output_ocr_future.result()
-        else:
-            _out_wb = tesseract_word_boxes(output_raster, language=options.ocr_language)
-        output_ocr_text = " ".join(b.text for b in _out_wb)
-        per_page_input_estimate = raster.width * raster.height * 3
-        per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
-        anomalous = (
-            per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD and strategy != PageStrategy.TEXT_ONLY
-        )
-        if strategy == PageStrategy.MIXED:
-            page_tile_ssim_floor = (
-                _DEFAULT_TILE_SSIM_FLOOR_SAFE
-                if (anomalous or is_safe)
-                else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
+            output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
+            # Kick off output OCR in parallel with awaiting the input OCR (if
+            # we haven't already needed it). Two tesseract subprocesses run
+            # concurrently inside this worker — each uses 1 thread (OMP pinned)
+            # so the pair still fits in 1 CPU core's worth of work, but they
+            # overlap for ~40% wall-time reduction on the OCR phase.
+            if _ocr_pool is not None:
+                _output_ocr_future = _ocr_pool.submit(
+                    tesseract_word_boxes,
+                    output_raster,
+                    language=options.ocr_language,
+                    timeout_seconds=options.per_page_timeout_seconds,
+                )
+            else:
+                _output_ocr_future = None
+            # Resolve input OCR (may already be done if native text wasn't present).
+            _await_input_ocr()
+            # Reassign in case native text was used — verifier needs input_ocr_text
+            # from our source-truth path above; here we need the RAW tesseract
+            # output for comparison against RAW tesseract on the output.
+            # Note: we use `input_ocr_text` (source-truth preferred) as the ground
+            # truth, but compare against `output_ocr_text` which is always raw OCR.
+            if _output_ocr_future is not None:
+                _out_wb = _output_ocr_future.result()
+            else:
+                _out_wb = tesseract_word_boxes(
+                    output_raster,
+                    language=options.ocr_language,
+                    timeout_seconds=options.per_page_timeout_seconds,
+                )
+            output_ocr_text = " ".join(b.text for b in _out_wb)
+            per_page_input_estimate = raster.width * raster.height * 3
+            per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
+            anomalous = (
+                per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD
+                and strategy != PageStrategy.TEXT_ONLY
             )
-            page_ssim_floor = ssim_floor
-            page_lev_ceiling = lev_ceiling
-        elif strategy == PageStrategy.PHOTO_ONLY:
-            page_tile_ssim_floor = -1.0
-            page_ssim_floor = 0.5
-            page_lev_ceiling = 1.0
-        else:
-            page_tile_ssim_floor = -1.0
-            page_ssim_floor = ssim_floor
-            page_lev_ceiling = lev_ceiling
-        if anomalous:
-            warnings.append(
-                f"page-{i + 1}-anomalous-ratio-{per_page_pixel_ratio:.0f}x-safe-verify",
+            if strategy == PageStrategy.MIXED:
+                page_tile_ssim_floor = (
+                    _DEFAULT_TILE_SSIM_FLOOR_SAFE
+                    if (anomalous or is_safe)
+                    else _DEFAULT_TILE_SSIM_FLOOR_STANDARD
+                )
+                page_ssim_floor = ssim_floor
+                page_lev_ceiling = lev_ceiling
+            elif strategy == PageStrategy.PHOTO_ONLY:
+                page_tile_ssim_floor = -1.0
+                page_ssim_floor = 0.5
+                page_lev_ceiling = 1.0
+            else:
+                page_tile_ssim_floor = -1.0
+                page_ssim_floor = ssim_floor
+                page_lev_ceiling = lev_ceiling
+            if anomalous:
+                warnings.append(
+                    f"page-{i + 1}-anomalous-ratio-{per_page_pixel_ratio:.0f}x-safe-verify",
+                )
+            verdict = verify_single_page(
+                input_raster=raster,
+                output_raster=output_raster,
+                input_ocr_text=input_ocr_text,
+                output_ocr_text=output_ocr_text,
+                lev_ceiling=page_lev_ceiling,
+                ssim_floor=page_ssim_floor,
+                tile_ssim_floor=page_tile_ssim_floor,
+                check_color_preserved=not options.force_monochrome,
             )
-        verdict = verify_single_page(
-            input_raster=raster,
-            output_raster=output_raster,
-            input_ocr_text=input_ocr_text,
-            output_ocr_text=output_ocr_text,
-            lev_ceiling=page_lev_ceiling,
-            ssim_floor=page_ssim_floor,
-            tile_ssim_floor=page_tile_ssim_floor,
-            check_color_preserved=not options.force_monochrome,
-        )
-
-    # Clean up the per-worker OCR thread pool before returning.
-    if _ocr_pool is not None:
-        _ocr_pool.shutdown(wait=False)
 
     in_bytes = len(winput.input_page_pdf)
     out_bytes = len(composed)
     true_ratio = in_bytes / max(1, out_bytes)
-
-    # Use `total` (captured above) for the log string only — this proves
-    # the local variable isn't accidentally unused when reading the code.
-    del total
 
     return _PageResult(
         page_index=i,
@@ -564,6 +692,22 @@ def compress(
     t0 = time.monotonic()
     options = options or CompressOptions()
 
+    def _check_total_timeout(phase: str) -> None:
+        """Raise TotalTimeoutError if the cumulative wall-clock since t0
+        exceeds options.total_timeout_seconds.
+
+        Called between pipeline phases (post-triage, post-per-page, post-
+        merge, post-verify). ``total_timeout_seconds=0`` disables the
+        watchdog entirely.
+        """
+        budget = options.total_timeout_seconds
+        if budget <= 0:
+            return
+        elapsed = time.monotonic() - t0
+        if elapsed > budget:
+            msg = f"total_timeout_seconds={budget} exceeded after {phase}: {elapsed:.2f}s elapsed"
+            raise TotalTimeoutError(msg)
+
     def _emit(
         phase: str,
         message: str,
@@ -618,7 +762,10 @@ def compress(
             raise CompressError(msg)
         out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]
         if out_of_range:
-            msg = f"only_pages requested {sorted(out_of_range)} but input has {tri.pages} pages"
+            msg = (
+                f"only_pages requested {format_page_list_short(out_of_range)} "
+                f"but input has {tri.pages} pages"
+            )
             raise CompressError(msg)
         # Convert to 0-indexed set for internal use, keep sorted order for output.
         _selected_indices = sorted(p - 1 for p in only_pages)
@@ -639,26 +786,26 @@ def compress(
         total=len(_selected_indices),
     )
 
-    if tri.classification == "require-password" and options.password is None:
-        msg = "input is encrypted; supply CompressOptions.password"
-        raise EncryptedPDFError(msg)
+    _enforce_input_policy(tri, options, input_data)
+    _check_total_timeout("triage")
 
-    if tri.is_certified_signature and not options.allow_certified_invalidation:
-        msg = "input carries a certifying signature; --allow-certified-invalidation required"
-        raise CertifiedSignatureError(msg)
-
-    if tri.is_signed and not options.allow_signed_invalidation:
-        msg = "input is signed; --allow-signed-invalidation required"
-        raise SignedPDFError(msg)
-
-    if options.max_pages is not None and tri.pages > options.max_pages:
-        msg = f"input has {tri.pages} pages; max_pages={options.max_pages}"
-        raise OversizeError(msg)
-
+    # --- Passthrough: min_input_mb floor ---
+    # If the input is below the configured minimum size, return it
+    # unchanged. The MRC pipeline's per-page overhead (~2-3 s/page even
+    # in --mode fast) isn't worth the ratio gain on small files; batch
+    # operators set this to skip anything already below their quota.
+    # Must fire BEFORE the expensive pdfium open / page-split phase.
     input_mb = len(input_data) / (1024 * 1024)
-    if input_mb > options.max_input_mb:
-        msg = f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb}"
-        raise OversizeError(msg)
+    if options.min_input_mb > 0 and input_mb < options.min_input_mb:
+        wall_ms = int((time.monotonic() - t0) * 1000)
+        reason = f"input {input_mb:.3f} MB below min_input_mb={options.min_input_mb} MB"
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=wall_ms,
+            reason=reason,
+            warning_code="passthrough-min-input-mb",
+        )
 
     # --- Per-page recompress ---
     source_dpi = 200 if options.mode == "fast" else 300
@@ -696,6 +843,8 @@ def compress(
     ssim_floor = 0.92
 
     warnings_list: list[str] = []
+    if options.skip_verify:
+        warnings_list.append("verifier-skipped")
     if shutil.which("jbig2") is None:
         warnings_list.append("jbig2enc-unavailable-using-flate-fallback")
 
@@ -728,19 +877,29 @@ def compress(
         verifier_agg.merge(result.page_index, result.verdict)
         strategy_counts[result.strategy_name] += 1
         _worker_wall_ms_total.append(result.worker_wall_ms)
+        # Under skip_verify the worker synthesizes a trivially-passing
+        # verdict so it can still be aggregated; don't let that leak
+        # into the progress event as "verifier=pass". Emit None (tri-
+        # state) and surface "skipped" in the human-readable message.
+        if options.skip_verify:
+            v_passed: bool | None = None
+            v_label = "skipped"
+        else:
+            v_passed = result.verdict.passed
+            v_label = "pass" if result.verdict.passed else "fail"
         _emit(
             "page_done",
             f"page {result.page_index + 1}/{tri.pages} done: strategy={result.strategy_name}, "
             f"{result.input_bytes:,}→{result.output_bytes:,} bytes "
             f"({result.ratio:.2f}x), worker={result.worker_wall_ms}ms, "
-            f"verifier={'pass' if result.verdict.passed else 'fail'}",
+            f"verifier={v_label}",
             current=pos,
             total=len(_selected_indices),
             strategy=result.strategy_name,
             ratio=result.ratio,
             input_bytes=result.input_bytes,
             output_bytes=result.output_bytes,
-            verifier_passed=result.verdict.passed,
+            verifier_passed=v_passed,
         )
 
     # Build worker inputs once.
@@ -748,7 +907,6 @@ def compress(
         _WorkerInput(
             input_page_pdf=single_page_pdfs[i],
             page_index=i,
-            total_pages=tri.pages,
             page_size=page_sizes[i],
             source_dpi=source_dpi,
             bg_target_dpi=bg_target_dpi,
@@ -800,9 +958,7 @@ def compress(
             chosen_method = "forkserver" if "forkserver" in available else "spawn"
             ctx = _mp.get_context(chosen_method)
             if chosen_method == "forkserver":
-                import contextlib as _contextlib
-
-                with _contextlib.suppress(ValueError, RuntimeError):
+                try:
                     ctx.set_forkserver_preload(
                         [
                             "numpy",
@@ -825,10 +981,16 @@ def compress(
                             "pdf_smasher.engine.background",
                         ]
                     )
-                # set_forkserver_preload can raise ValueError/RuntimeError
-                # if a listed module instantiates mp objects at import time.
-                # If so, suppress the exception and skip preloading —
-                # workers still work, first run is a bit slower.
+                except (ValueError, RuntimeError) as _e:
+                    # set_forkserver_preload can raise ValueError/RuntimeError
+                    # if a listed module instantiates mp objects at import time.
+                    # Workers still function, but each re-imports the heavy
+                    # module chain (numpy/cv2/pikepdf ~ 2-3 s each) — a
+                    # significant silent regression. Surface it as a warning
+                    # so users/ops can grep for it.
+                    warnings_list.append(
+                        f"forkserver-preload-failed-{type(_e).__name__}",
+                    )
             _ex_kwargs["mp_context"] = ctx
             label = f"process/{chosen_method}"
         _emit(
@@ -845,8 +1007,19 @@ def compress(
             }
             # `as_completed` iterates in completion order. `_pos` is 1-indexed
             # completion position, which is what tqdm wants for the progress bar.
+            # Per-page timeout: we wait at most per_page_timeout_seconds * n_pages
+            # for ALL futures to complete (a proxy for strict per-page — true
+            # per-page is impossible with as_completed since workers start
+            # together). If the total budget expires, we cancel and raise
+            # PerPageTimeoutError naming the laggards.
+            _per_page_budget = options.per_page_timeout_seconds
+            _parallel_total_budget = _per_page_budget * max(1, len(winputs))
             try:
-                for _pos, fut in enumerate(as_completed(future_to_winput), start=1):
+                _completed_iter = as_completed(
+                    future_to_winput,
+                    timeout=_parallel_total_budget,
+                )
+                for _pos, fut in enumerate(_completed_iter, start=1):
                     w = future_to_winput[fut]
                     try:
                         result = fut.result()
@@ -861,28 +1034,63 @@ def compress(
                         msg = _page_error_context(w.page_index, e)
                         raise CompressError(msg) from e
                     _merge_result(_pos, result)
+            except FuturesTimeoutError as e:
+                ex.shutdown(wait=False, cancel_futures=True)
+                _pending = [
+                    fw.page_index + 1 for fut, fw in future_to_winput.items() if not fut.done()
+                ]
+                _pending_display = _format_verifier_failing_pages(
+                    tuple(_pending),
+                    limit=10,
+                )
+                msg = (
+                    f"per-page timeout ({_per_page_budget}s x {len(winputs)} pages) "
+                    f"exceeded; {len(_pending)} page(s) still pending: "
+                    f"{_pending_display}"
+                )
+                raise PerPageTimeoutError(msg) from e
             except BaseException:  # pragma: no cover — cancellation path
                 ex.shutdown(wait=False, cancel_futures=True)
                 raise
     else:
-        for _pos, w in enumerate(winputs, start=1):
-            _emit(
-                "page_start",
-                f"page {w.page_index + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
-                current=_pos,
-                total=len(winputs),
-            )
-            try:
-                result = _process_single_page(w)
-            except KeyboardInterrupt:
-                page_pdfs_by_index.clear()
-                raise
-            except AssertionError, CompressError:
-                raise
-            except Exception as e:
-                msg = _page_error_context(w.page_index, e)
-                raise CompressError(msg) from e
-            _merge_result(_pos, result)
+        # Serial path: dispatch each page through a 1-worker ThreadPoolExecutor
+        # so we can enforce per_page_timeout_seconds via future.result(timeout=).
+        # The thread still runs in this process (no IPC overhead). Pytesseract's
+        # own timeout kwarg kills the Tesseract subprocess on overrun, so the
+        # thread unblocks — the future-level timeout is belt-and-suspenders for
+        # non-Tesseract hangs (numpy/opencv loops without GIL release).
+        _per_page_budget = options.per_page_timeout_seconds
+        with ThreadPoolExecutor(max_workers=1) as _serial_ex:
+            for _pos, w in enumerate(winputs, start=1):
+                _emit(
+                    "page_start",
+                    f"page {w.page_index + 1}/{tri.pages}: rasterizing + OCR ({source_dpi} DPI)",
+                    current=_pos,
+                    total=len(winputs),
+                )
+                _fut = _serial_ex.submit(_process_single_page, w)
+                try:
+                    result = _fut.result(timeout=_per_page_budget)
+                except FuturesTimeoutError as e:
+                    # Cancel the executor before raising so the zombie thread
+                    # doesn't keep consuming CPU. The Tesseract subprocess was
+                    # already killed by pytesseract's timeout (which is <=
+                    # this budget), so the thread unblocks soon.
+                    _serial_ex.shutdown(wait=False, cancel_futures=True)
+                    msg = (
+                        f"page {w.page_index + 1}/{tri.pages} exceeded "
+                        f"per_page_timeout_seconds={_per_page_budget}"
+                    )
+                    raise PerPageTimeoutError(msg) from e
+                except KeyboardInterrupt:
+                    page_pdfs_by_index.clear()
+                    raise
+                except AssertionError, CompressError:
+                    raise
+                except Exception as e:
+                    msg = _page_error_context(w.page_index, e)
+                    raise CompressError(msg) from e
+                _merge_result(_pos, result)
 
     # Parallelism diagnostic. Compare the sum of per-worker wall times to
     # the pages-phase wall time. If workers truly parallelize, the sum is
@@ -900,6 +1108,8 @@ def compress(
             f"(ideal={len(_worker_wall_ms_total)}x if fully parallel, "
             f"1.0x = no parallelism)",
         )
+
+    _check_total_timeout("per-page")
 
     # Merge pages in original order (matters when parallel completes out of order).
     page_pdfs: list[bytes] = [page_pdfs_by_index[i] for i in sorted(_selected_indices)]
@@ -935,7 +1145,31 @@ def compress(
         ratio=len(input_data) / max(1, len(output_bytes)),
     )
 
-    verifier_result = verifier_agg.result()
+    _check_total_timeout("merge")
+
+    # --- Passthrough: min_ratio floor ---
+    # If realized compression ratio is below options.min_ratio, return
+    # the ORIGINAL input — a user who set min_ratio=1.5 doesn't want an
+    # output bigger than the input. Must fire BEFORE the verifier so we
+    # don't waste wall time re-OCRing a shard we're about to discard.
+    realized_ratio = len(input_data) / max(1, len(output_bytes))
+    if options.min_ratio > 0 and realized_ratio < options.min_ratio:
+        wall_ms = int((time.monotonic() - t0) * 1000)
+        reason = (
+            f"realized ratio {realized_ratio:.2f}x below "
+            f"min_ratio={options.min_ratio}x; returning original input"
+        )
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=wall_ms,
+            reason=reason,
+            warning_code="passthrough-ratio-floor",
+        )
+
+    verifier_result = (
+        verifier_agg.skipped_result() if options.skip_verify else verifier_agg.result()
+    )
     if verifier_result.status == "fail":
         if options.mode != "fast" and not options.accept_drift:
             summary = verifier_agg.failure_summary()
@@ -957,8 +1191,12 @@ def compress(
             )
             raise ContentDriftError(msg)
         tag = "accept-drift" if options.accept_drift else "fast-mode"
+        # Warning codes must stay grep-friendly — no brackets, no spaces.
+        # _format_verifier_failing_pages caps at the first 10 ids with a
+        # +N suffix for longer lists.
         warnings_list.append(
-            f"verifier-fail-{tag}-pages-{list(verifier_result.failing_pages)}",
+            f"verifier-fail-{tag}-pages-"
+            f"{_format_verifier_failing_pages(verifier_result.failing_pages)}",
         )
 
     # --- Hashes ---

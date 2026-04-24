@@ -133,6 +133,10 @@ ignore = [
 "pdf_smasher/engine/triage.py" = [
     "SIM118",   # iterating pikepdf dict keys is more explicit via .keys()
 ]
+"pdf_smasher/engine/image_export.py" = [
+    "C901",     # per-page try/except + 3 format branches inline is by design
+    "TRY301",   # inline raises inside the per-page try are the wrap target
+]
 "pdf_smasher/engine/codecs/*.py" = [
     "S603", "S607",  # we invoke binaries like `jbig2` by name on purpose
 ]

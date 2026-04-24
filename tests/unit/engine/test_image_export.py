@@ -8,7 +8,7 @@ import pikepdf
 import pytest
 from PIL import Image
 
-from pdf_smasher.image_export import render_pages_as_images
+from pdf_smasher.engine.image_export import iter_pages_as_images, render_pages_as_images
 
 
 def _make_pdf(n_pages: int) -> bytes:
@@ -155,7 +155,10 @@ def test_png_compress_level_controls_file_size() -> None:
 
 def test_rejects_out_of_range_page_index() -> None:
     pdf_bytes = _make_pdf(2)
-    with pytest.raises((IndexError, ValueError)):
+    # Per-page errors are now wrapped in RuntimeError with "page N/total"
+    # context (Task 7); the underlying IndexError/ValueError is chained
+    # via __cause__.
+    with pytest.raises(RuntimeError, match="page 6"):
         render_pages_as_images(
             pdf_bytes,
             page_indices=[5],
@@ -187,7 +190,10 @@ def test_rejects_unknown_format() -> None:
 def test_webp_produces_valid_webp_bytes() -> None:
     pdf_bytes = _make_pdf(2)
     blobs = render_pages_as_images(
-        pdf_bytes, page_indices=[0, 1], image_format="webp", dpi=72,
+        pdf_bytes,
+        page_indices=[0, 1],
+        image_format="webp",
+        dpi=72,
     )
     assert len(blobs) == 2
     for blob in blobs:
@@ -201,14 +207,21 @@ def test_webp_quality_controls_file_size() -> None:
     """Lossy WebP: lower quality → smaller file."""
     pdf_bytes = _make_rich_pdf()
     hi_q = render_pages_as_images(
-        pdf_bytes, page_indices=[0], image_format="webp", dpi=150, webp_quality=90,
+        pdf_bytes,
+        page_indices=[0],
+        image_format="webp",
+        dpi=150,
+        webp_quality=90,
     )[0]
     lo_q = render_pages_as_images(
-        pdf_bytes, page_indices=[0], image_format="webp", dpi=150, webp_quality=30,
+        pdf_bytes,
+        page_indices=[0],
+        image_format="webp",
+        dpi=150,
+        webp_quality=30,
     )[0]
     assert len(lo_q) < len(hi_q), (
-        f"webp quality=30 ({len(lo_q):,}) should be smaller than quality=90 "
-        f"({len(hi_q):,})"
+        f"webp quality=30 ({len(lo_q):,}) should be smaller than quality=90 ({len(hi_q):,})"
     )
 
 
@@ -239,11 +252,143 @@ def test_webp_is_smaller_than_jpeg_at_matching_settings() -> None:
     """
     pdf_bytes = _make_rich_pdf()
     jpeg = render_pages_as_images(
-        pdf_bytes, page_indices=[0], image_format="jpeg", dpi=150, jpeg_quality=75,
+        pdf_bytes,
+        page_indices=[0],
+        image_format="jpeg",
+        dpi=150,
+        jpeg_quality=75,
     )[0]
     webp = render_pages_as_images(
-        pdf_bytes, page_indices=[0], image_format="webp", dpi=150, webp_quality=75,
+        pdf_bytes,
+        page_indices=[0],
+        image_format="webp",
+        dpi=150,
+        webp_quality=75,
     )[0]
-    assert len(webp) <= len(jpeg), (
-        f"webp ({len(webp):,}) should be <= jpeg ({len(jpeg):,}) at q=75"
+    assert len(webp) <= len(jpeg), f"webp ({len(webp):,}) should be <= jpeg ({len(jpeg):,}) at q=75"
+
+
+def test_render_pages_emits_progress_events() -> None:
+    """render_pages_as_images accepts an optional progress_callback and
+    fires one event per completed page."""
+    pdf_bytes = _make_pdf(3)
+    events: list[tuple[int, int]] = []
+
+    def _cb(phase: str, current: int, total: int) -> None:
+        if phase == "page_done":
+            events.append((current, total))
+
+    render_pages_as_images(
+        pdf_bytes,
+        page_indices=[0, 1, 2],
+        image_format="jpeg",
+        dpi=72,
+        progress_callback=_cb,
     )
+    # 3 page_done events, 1-indexed current, total=3.
+    assert events == [(1, 3), (2, 3), (3, 3)], f"got {events}"
+
+
+def test_render_pages_per_page_error_context() -> None:
+    """When rasterize_page fails on page N, the raised exception must
+    contain 'page {N+1}' so logs tell the user which page."""
+    pdf_bytes = _make_pdf(5)
+    with pytest.raises(Exception, match="page 3"):
+        render_pages_as_images(
+            pdf_bytes,
+            page_indices=[2],  # 0-indexed -> displayed as 1-indexed page 3
+            image_format="jpeg",
+            dpi=72,
+            _force_rasterize_error_for_test=True,  # new test hook
+        )
+
+
+def test_iter_pages_yields_bytes_lazily() -> None:
+    """iter_pages_as_images must be a generator, yielding one encoded
+    image per iteration without materializing the whole list."""
+    import types
+
+    pdf_bytes = _make_pdf(3)
+    it = iter_pages_as_images(
+        pdf_bytes,
+        page_indices=[0, 1, 2],
+        image_format="jpeg",
+        dpi=72,
+    )
+    assert isinstance(it, types.GeneratorType)
+    first = next(it)
+    assert first[:2] == b"\xff\xd8"
+    rest = list(it)
+    assert len(rest) == 2
+
+
+def test_pre_allocation_pixel_budget_check() -> None:
+    """Decompression bomb guard must refuse BEFORE pdfium allocates
+    the raster. The synthetic hook bypasses the rasterize call entirely
+    so the only way the error can be raised is the pre-allocation check.
+    """
+    pdf_bytes = _make_pdf(1)
+    with pytest.raises(Exception, match=r"bomb|cap|exceed"):
+        list(
+            iter_pages_as_images(
+                pdf_bytes,
+                page_indices=[0],
+                image_format="jpeg",
+                dpi=1200,  # within CLI cap
+                _simulate_huge_page_for_test=True,
+            )
+        )
+
+
+def test_pillow_decompression_bomb_translated_to_our_class() -> None:
+    """Pillow raises PIL.Image.DecompressionBombError; our code must catch
+    it and re-raise as pdf_smasher.DecompressionBombError so the CLI can
+    route it to EXIT_DECOMPRESSION_BOMB=16.
+
+    Regression: Pillow's DecompressionBombError is NOT a subclass of ours,
+    so ``except DecompressionBombError`` in the CLI used to miss it entirely
+    and it would fall through to EXIT_ENGINE_ERROR=30.
+    """
+    from unittest.mock import patch
+
+    import PIL.Image
+
+    from pdf_smasher import DecompressionBombError as HankBomb
+    from pdf_smasher.engine import image_export as ie
+
+    pdf_bytes = _make_pdf(1)
+
+    def _raise_pillow_bomb(*_args: object, **_kwargs: object) -> None:
+        msg = "synthetic pillow bomb"
+        raise PIL.Image.DecompressionBombError(msg)
+
+    # Patch rasterize_page so we control exactly when the Pillow bomb fires
+    # inside the generator's per-page try. We use the image_export module's
+    # re-export so the patch hits the real call site.
+    with patch.object(ie, "rasterize_page", _raise_pillow_bomb), pytest.raises(HankBomb):
+        list(
+            iter_pages_as_images(
+                pdf_bytes,
+                page_indices=[0],
+                image_format="jpeg",
+                dpi=72,
+            ),
+        )
+
+
+def test_iter_pages_rejects_excessive_dpi_at_library_level() -> None:
+    """Library callers must not bypass the --image-dpi cap.
+
+    The CLI enforces --image-dpi <= 1200 at argparse time, but library
+    callers of iter_pages_as_images previously got no cap at all.
+    """
+    pdf_bytes = _make_pdf(1)
+    with pytest.raises(ValueError, match=r"dpi|cap"):
+        list(
+            iter_pages_as_images(
+                pdf_bytes,
+                page_indices=[0],
+                image_format="jpeg",
+                dpi=5000,  # above the 1200 cap
+            )
+        )

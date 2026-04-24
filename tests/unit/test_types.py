@@ -93,5 +93,9 @@ def test_compress_report_construct() -> None:
         output_sha256="1" * 64,
         canonical_input_sha256="2" * 64,
     )
-    assert report.schema_version == 1
+    # Schema v2 bump — see SPEC.md §11. v2 added:
+    #   - VerifierResult.status "skipped" literal
+    #   - CompressReport.warnings kebab-case codes (e.g. verifier-skipped)
+    #   - CompressReport.strategy_distribution populated
+    assert report.schema_version == 2
     assert report.ratio == 2.0
