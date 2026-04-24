@@ -17,3 +17,15 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+
+  # Bumps the base-image digest in docker/Dockerfile when python:3.14-slim-*
+  # ships a new sha256. A1 pinned FROM python:...@sha256:...; without this
+  # ecosystem we'd have to regenerate the digest by hand each security bump.
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
