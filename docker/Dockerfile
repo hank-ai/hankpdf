@@ -201,11 +201,13 @@ RUN pip install --no-cache-dir "uv==0.9.9" \
     && rm -rf /root/.cache/uv
 ENV PATH="/app/.venv/bin:${PATH}"
 
+# Entrypoint wrapper: prints an actionable hint when /data is not
+# writable by uid 1000 before invoking hankpdf. See E1 + docker/README.md.
+COPY docker/entrypoint.sh /usr/local/bin/hankpdf-entrypoint
+RUN chmod 755 /usr/local/bin/hankpdf-entrypoint
+
 USER hankpdf
 WORKDIR /data
 
-HEALTHCHECK --interval=60s --timeout=5s --retries=2 \
-    CMD hankpdf --version || exit 1
-
-ENTRYPOINT ["hankpdf"]
+ENTRYPOINT ["/usr/local/bin/hankpdf-entrypoint"]
 CMD ["--help"]
