@@ -11,7 +11,7 @@ _Repo / package name: `pdf-smasher`. Product brand: **HankPDF**._
 Takes oversized scanned PDFs (typical input: 200-page, 800 MB image scans) and produces compact, searchable, verified outputs. **CLI-first. Two install targets, both run the same engine locally**:
 
 1. **Python package** — `pip install pdf-smasher`. Brings the `compress()` API and the `hankpdf` console script. Requires Tesseract + jbig2enc via your system package manager (one-line install on every major OS — see `docs/INSTALL.md`).
-2. **Docker image** — `ghcr.io/ourorg/pdf-smasher:X.Y`. All native deps baked in; zero host setup. Ideal for CI/CD, SFTP upload wrappers, batch jobs, and any environment where installing Tesseract on the host is inconvenient.
+2. **Docker image** — `ghcr.io/hank-ai/hankpdf:latest`. All native deps baked in; zero host setup. Ideal for CI/CD, SFTP upload wrappers, batch jobs, and any environment where installing Tesseract on the host is inconvenient.
 
 **Not a service, not a GUI, not a signed installer.** HankPDF is a command-line tool. It runs entirely on the user's machine, never uploads PDFs anywhere, never phones home, writes no analytics, stores no persistent state beyond what the user asks (output PDF, optional sidecar manifest).
 
@@ -85,6 +85,19 @@ If you're not a developer, the fastest path is to clone the repo, open it in an 
 
 The agent reads the OS-specific blocks below, runs the commands, reports test output. You'll be up in ~5-15 minutes depending on network and whether jbig2enc needs building from source.
 
+### Docker (any OS)
+
+Zero host setup. Works on macOS, Linux, and Windows with Docker Desktop.
+
+```bash
+docker pull ghcr.io/hank-ai/hankpdf:latest
+docker run --rm -v "$PWD:/data" ghcr.io/hank-ai/hankpdf:latest \
+    /data/in.pdf -o /data/out.pdf
+```
+
+See [docker/README.md](docker/README.md) for tag semantics and local-build
+instructions.
+
 ### Manual setup — macOS
 
 ```bash
@@ -132,7 +145,22 @@ uv run pytest -q
 
 ### Manual setup — Windows
 
-Two paths. **Pick WSL2 unless you have a reason not to.**
+Three paths. **Pick Docker unless you need a native Python install.**
+
+**Option 0 — Docker Desktop (easiest for non-developers):**
+
+```powershell
+# Install Docker Desktop from docker.com
+docker pull ghcr.io/hank-ai/hankpdf:latest
+docker run --rm -v "${PWD}:/data" ghcr.io/hank-ai/hankpdf:latest `
+    /data/in.pdf -o /data/out.pdf
+```
+
+No Python, no native deps, no WSL needed. Works on Windows 10/11
+Pro/Enterprise/Home with WSL2 backend enabled. Docker Desktop licensing
+is free for personal use, education, and small businesses (<= 250 employees
+and < $10M annual revenue). Larger orgs need a Docker Business license or
+can install Docker Engine via WSL instead.
 
 **Option A — WSL2 (recommended):** run the Linux instructions above inside WSL Ubuntu. From PowerShell (admin):
 
