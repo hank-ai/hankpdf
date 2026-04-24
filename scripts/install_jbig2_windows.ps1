@@ -232,7 +232,38 @@ try {
 
         Write-Step "Extracting to $Destination"
         $stagingDir = Join-Path $tempDir 'extracted'
-        Expand-Archive -Path $zipPath -DestinationPath $stagingDir -Force
+        New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+        # Use System.IO.Compression instead of Expand-Archive so we can
+        # defend against zip-slip (../ escape) — Expand-Archive on PS 5.1
+        # silently follows path-traversal sequences in zip entries and
+        # writes outside $stagingDir. Each entry's destination is
+        # resolved and compared to the staging root; any entry outside
+        # that tree is refused.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $stagingFull = [System.IO.Path]::GetFullPath($stagingDir).TrimEnd('\')
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+        try {
+            foreach ($entry in $archive.Entries) {
+                $target = [System.IO.Path]::GetFullPath(
+                    [System.IO.Path]::Combine($stagingDir, $entry.FullName))
+                if (-not $target.StartsWith($stagingFull + [System.IO.Path]::DirectorySeparatorChar) `
+                    -and $target -ne $stagingFull) {
+                    throw "[E-EXTRACT] Zip-slip attempt detected: entry '$($entry.FullName)' resolves outside the staging dir; refusing to extract."
+                }
+                $parent = Split-Path -Parent $target
+                if ($parent) {
+                    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+                }
+                if ($entry.FullName.EndsWith('/')) {
+                    # Directory entry; already created above.
+                    continue
+                }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+            }
+        } finally {
+            $archive.Dispose()
+        }
 
         # The zip contains a top-level 'jbig2-windows-x64/' directory;
         # flatten it into $Destination so jbig2.exe lives at the root.
@@ -287,9 +318,40 @@ try {
         Write-Host "    PATH already contained $Destination; no change."
     }
 }
-catch {
+catch [System.Net.WebException] {
+    # Network / DNS / TLS / proxy failures. HTTP 403/404 from the
+    # GitHub API are translated to more specific exceptions inside
+    # Invoke-GitHubApi so we don't land here for those.
     Write-Host ""
-    Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[E-NETWORK] Network request failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Hint: check proxy/VPN, corporate firewall, or re-run in a minute."
+    exit 2
+}
+catch [System.IO.InvalidDataException] {
+    # Expand-Archive throws this for malformed zips.
+    Write-Host ""
+    Write-Host "[E-EXTRACT] Archive extraction failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Hint: the download may have been truncated; re-run to retry."
+    exit 3
+}
+catch [System.UnauthorizedAccessException] {
+    # Target dir / PATH key not writable by the current user.
+    Write-Host ""
+    Write-Host "[E-PERMISSIONS] Permission denied: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Hint: pick a different -Destination or run from a user with write access."
+    exit 4
+}
+catch {
+    # Everything else — SHA-256 mismatch (our own throw), missing
+    # sidecar, etc. We explicitly label the common cases so on-call
+    # logs are greppable by [E-*] code.
+    $msg = $_.Exception.Message
+    Write-Host ""
+    if ($msg -match '\[E-SHA256-MISMATCH\]') {
+        Write-Host "[E-SHA256-MISMATCH] $msg" -ForegroundColor Red
+        exit 5
+    }
+    Write-Host "[E-UNKNOWN] $msg" -ForegroundColor Red
     Write-Host ""
     Write-Host "Fallback: HankPDF still works without jbig2.exe - the MRC"
     Write-Host "pipeline falls back to CCITT G4, which produces outputs"
