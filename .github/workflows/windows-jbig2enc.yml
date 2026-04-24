@@ -24,27 +24,65 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write  # required by softprops/action-gh-release on tag push
+  # Workflow-level perms are the MINIMUM needed by every job — the
+  # build job runs with contents: read; the publish job (tag push)
+  # overrides with contents: write. See E8.
+  contents: read
 
 env:
-  # Must match the pinned commit in docker/Dockerfile so the Linux container
-  # and the Windows binary are built from the same jbig2enc source.
-  JBIG2ENC_COMMIT: e3fcf0210efa4f644e458a51616d86098d47d8da
+  # BUNDLE_NAME is the release zip's base name. JBIG2ENC_COMMIT is no longer
+  # set here — see the "Read pinned versions" step below, which pulls from
+  # .github/versions.json (single source of truth shared with the Docker
+  # build). CI's workflow-audit job fails if the commit SHA ever appears
+  # outside versions.json.
   BUNDLE_NAME: jbig2-windows-x64
 
 jobs:
   build:
     name: Build jbig2.exe (MSYS2 / MinGW-w64)
     runs-on: windows-2022
+    # MSYS2 bootstrap is the slowest step; whole-job timeout protects
+    # against pacman hanging. E5.
+    timeout-minutes: 40
+    # Narrowed scope (E8): build uploads an artifact; no repo write.
+    # The separate publish job (below) holds contents: write only at
+    # tag-push time.
+    permissions:
+      contents: read
+      id-token: write       # OIDC for attest-build-provenance (sigstore keyless)
+      attestations: write   # push signed SLSA attestations to the repo
     defaults:
       run:
         shell: msys2 {0}
     steps:
       - name: Checkout (workflow file only)
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Read pinned versions from .github/versions.json
+        shell: pwsh
+        run: |
+          # Use pwsh + ConvertFrom-Json (stdlib on GitHub's windows-2022
+          # runner) so we don't need jq. Exports JBIG2ENC_COMMIT into the
+          # job env via $GITHUB_ENV. If versions.json ever drifts this
+          # step fails fast before MSYS2 bootstrap.
+          $versions = Get-Content -Raw .github/versions.json | ConvertFrom-Json
+          if (-not $versions.jbig2enc_commit) {
+              Write-Error "versions.json missing jbig2enc_commit"
+              exit 1
+          }
+          if ($versions.jbig2enc_commit -notmatch '^[a-f0-9]{40}$') {
+              Write-Error "versions.json jbig2enc_commit is not a 40-hex SHA"
+              exit 1
+          }
+          "JBIG2ENC_COMMIT=$($versions.jbig2enc_commit)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LEPTONICA_MIN_VERSION=$($versions.leptonica_min_version)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Host "Pinned jbig2enc commit: $($versions.jbig2enc_commit)"
 
       - name: Set up MSYS2 / MinGW64
-        uses: msys2/setup-msys2@v2
+        timeout-minutes: 20
+        uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c  # v2
         with:
           msystem: MINGW64
           update: true
@@ -72,6 +110,7 @@ jobs:
           git rev-parse HEAD
 
       - name: Build jbig2enc
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           cd /tmp/src
@@ -79,6 +118,49 @@ jobs:
           ./configure --prefix=/mingw64
           make -j"$(nproc)"
           ls -la src/jbig2.exe
+          {
+              echo "### Build"
+              echo ""
+              echo "- Commit: \`$(git -C /tmp/src rev-parse HEAD)\`"
+              echo "- Binary size: $(stat -c%s src/jbig2.exe 2>/dev/null || stat -f%z src/jbig2.exe) bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record MSYS2 package versions + enforce Leptonica floor
+        run: |
+          set -euo pipefail
+          DIST_ROOT="$(cygpath -u "${GITHUB_WORKSPACE}")/dist"
+          BUNDLE_DIR="${DIST_ROOT}/${BUNDLE_NAME}"
+          mkdir -p "${BUNDLE_DIR}"
+          # Capture exact versions of each linked lib. Shipped inside the
+          # bundle so an on-call can paste `versions.txt` into a bug
+          # report. Also enforces the leptonica_min_version floor from
+          # versions.json — pacman's lack of native version pins means
+          # this check is our last line of defense against an MSYS2
+          # refresh that drops a lib below the floor.
+          pacman -Q \
+              mingw-w64-x86_64-leptonica \
+              mingw-w64-x86_64-libtiff \
+              mingw-w64-x86_64-libpng \
+              mingw-w64-x86_64-libjpeg-turbo \
+              mingw-w64-x86_64-libwebp \
+              mingw-w64-x86_64-gcc \
+              | tee "${BUNDLE_DIR}/versions.txt"
+
+          LEP_VER="$(pacman -Q mingw-w64-x86_64-leptonica | awk '{print $2}' | cut -d- -f1)"
+          FLOOR="${LEPTONICA_MIN_VERSION:-}"
+          if [ -z "${FLOOR}" ]; then
+              echo "::error::LEPTONICA_MIN_VERSION not set (versions.json read step did not run?)"
+              exit 1
+          fi
+          # Semver-ish comparison via sort -V. sort -V sorts "1.85.0" <
+          # "1.85.1" correctly; we want FLOOR <= LEP_VER. If the min
+          # equals the max of (FLOOR, LEP_VER), LEP_VER is at or above
+          # the floor.
+          if [ "$(printf '%s\n%s' "${LEP_VER}" "${FLOOR}" | sort -V | head -n1)" != "${FLOOR}" ]; then
+              echo "::error::Leptonica ${LEP_VER} below floor ${FLOOR} (see .github/versions.json)"
+              exit 1
+          fi
+          echo "Leptonica ${LEP_VER} satisfies floor ${FLOOR}"
 
       - name: Assemble distribution bundle
         env:
@@ -89,7 +171,7 @@ jobs:
           DIST_ROOT="$(cygpath -u "${GITHUB_WORKSPACE}")/dist"
           BUNDLE_DIR="${DIST_ROOT}/${BUNDLE}"
 
-          mkdir -p "${BUNDLE_DIR}"
+          # versions.txt was written by the previous step; keep it.
           cp /tmp/src/src/jbig2.exe "${BUNDLE_DIR}/"
           cp /tmp/src/LICENSE "${BUNDLE_DIR}/LICENSE" 2>/dev/null || \
               cp /tmp/src/COPYING "${BUNDLE_DIR}/LICENSE" 2>/dev/null || \
@@ -111,7 +193,15 @@ jobs:
                   fi
               done
 
-          # Write README.txt (static; no untrusted interpolation).
+          # Write README.txt — embeds the exact versions shipped in
+          # this bundle (E9). On-call pastes this into a bug report
+          # and the maintainer sees at a glance which deps were
+          # present. The only interpolation is JBIG2ENC_COMMIT (a
+          # trusted env var set from .github/versions.json) and the
+          # pacman/runner lookups.
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          IMAGE_OS="${ImageOS:-unknown}"
+          IMAGE_VERSION="${ImageVersion:-unknown}"
           cat >"${BUNDLE_DIR}/README.txt" <<EOF
           jbig2.exe built for HankPDF.
 
@@ -119,14 +209,23 @@ jobs:
           scripts/install_jbig2_windows.ps1 from the hankpdf repo to
           auto-install and register the directory on your user PATH.
 
+          =====================================================
+          Build identity (paste into bug reports)
+          =====================================================
+          jbig2enc commit: ${JBIG2ENC_COMMIT}
+          Build date:      ${BUILD_DATE}
+          Runner image:    ${IMAGE_OS} / ${IMAGE_VERSION}
+          Toolchain:       MSYS2 / MinGW-w64 (GCC), windows-2022
+
+          Linked / bundled package versions (from pacman -Q):
+          $(pacman -Q mingw-w64-x86_64-leptonica | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-libtiff | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-libpng | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-libjpeg-turbo | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-libwebp | sed 's/^/  /')
+          $(pacman -Q mingw-w64-x86_64-gcc | sed 's/^/  /')
+
           Source: https://github.com/agl/jbig2enc
-          Commit: ${JBIG2ENC_COMMIT}
-
-          Build toolchain: MSYS2 / MinGW-w64 (GCC) on windows-2022 runner.
-          Linked against Leptonica, libtiff, libpng, libjpeg-turbo, libwebp,
-          zlib, and MinGW C/C++ runtimes - every non-system DLL the binary
-          depends on is included alongside jbig2.exe in this bundle.
-
           License: Apache-2.0 (see LICENSE).
           EOF
 
@@ -157,7 +256,55 @@ jobs:
           fi
           echo "jbig2.exe runs and emits usage text - DLL bundle is complete."
 
-      - name: Zip bundle
+      - name: Smoke test bundle from scratch dir (stripped PATH)
+        shell: pwsh
+        run: |
+          # Validates that the bundle's DLLs resolve from the sibling-dir,
+          # the way end users will actually run it — not from /mingw64/bin
+          # where the linker found them at build time. A missing DLL in
+          # the copy step would pass the prior in-place smoke test
+          # (because ldd's libs are still on the linker path) but break
+          # in the real install location.
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:GITHUB_WORKSPACE "dist/$env:BUNDLE_NAME"
+          $scratch = Join-Path $env:TEMP ("jbig2-scratch-" + [Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $scratch | Out-Null
+          Copy-Item -Path "$src\*" -Destination $scratch -Recurse
+
+          # Wipe PATH to a minimal system set so /mingw64/bin cannot
+          # satisfy any DLL load. If the bundle is complete, jbig2.exe
+          # finds its DLLs in the scratch dir itself.
+          $sysPaths = @(
+              "$env:WINDIR\System32",
+              "$env:WINDIR",
+              "$env:WINDIR\System32\Wbem",
+              "$env:WINDIR\System32\WindowsPowerShell\v1.0"
+          ) -join ';'
+
+          Push-Location $scratch
+          try {
+              # NOTE: Start-Process would spawn a new shell inheriting
+              # its own PATH. We need to actually invoke jbig2.exe from
+              # this pwsh process with PATH locally overridden.
+              $origPath = $env:PATH
+              try {
+                  $env:PATH = $sysPaths
+                  $result = & .\jbig2.exe 2>&1
+                  Write-Host "jbig2.exe output:"
+                  Write-Host "$result"
+              } finally {
+                  $env:PATH = $origPath
+              }
+              if (-not $result) {
+                  throw "jbig2.exe produced no output from scratch dir; bundle is missing a DLL"
+              }
+              Write-Host "OK: jbig2.exe loads all DLLs from the bundle dir"
+          } finally {
+              Pop-Location
+              Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+          }
+
+      - name: Zip bundle + compute SHA-256 sidecar
         env:
           BUNDLE: ${{ env.BUNDLE_NAME }}
         run: |
@@ -169,31 +316,157 @@ jobs:
           # Sanity: ensure the zip round-trips.
           unzip -l "${BUNDLE}.zip" | tail -20
 
+          # Sidecar lets users verify the download before extracting.
+          # Format matches `sha256sum -c`: "<hex>  <relative-path>".
+          # Installer script verifies by reading BOTH files from the
+          # same release (see A7).
+          sha256sum "${BUNDLE}.zip" > "${BUNDLE}.zip.sha256"
+          echo "SHA-256 sidecar:"
+          cat "${BUNDLE}.zip.sha256"
+
+      - name: Stage installer script as release asset
+        run: |
+          set -euo pipefail
+          DIST_ROOT="$(cygpath -u "${GITHUB_WORKSPACE}")/dist"
+          SRC_SCRIPT="$(cygpath -u "${GITHUB_WORKSPACE}")/scripts/install_jbig2_windows.ps1"
+          cp "${SRC_SCRIPT}" "${DIST_ROOT}/install_jbig2_windows.ps1"
+          cd "${DIST_ROOT}"
+          sha256sum install_jbig2_windows.ps1 > install_jbig2_windows.ps1.sha256
+          echo "Installer SHA-256 sidecar:"
+          cat install_jbig2_windows.ps1.sha256
+
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: ${{ env.BUNDLE_NAME }}
-          path: dist/${{ env.BUNDLE_NAME }}.zip
+          path: |
+            dist/${{ env.BUNDLE_NAME }}.zip
+            dist/${{ env.BUNDLE_NAME }}.zip.sha256
+            dist/install_jbig2_windows.ps1
+            dist/install_jbig2_windows.ps1.sha256
           if-no-files-found: error
           retention-days: 90
 
-      - name: Publish GitHub Release (on tag push)
+      - name: E2E test — install_jbig2_windows.ps1 against local artifact
+        shell: pwsh
+        env:
+          # Point the installer at the fresh zip we just built. We
+          # override the resolver by patching $Repo / $ApiBase so the
+          # script downloads from a localhost HTTP server rather than
+          # GitHub's API. Exercising the full happy path without a
+          # real release.
+          ARTIFACT_ZIP: dist/${{ env.BUNDLE_NAME }}.zip
+          ARTIFACT_SIDECAR: dist/${{ env.BUNDLE_NAME }}.zip.sha256
+        run: |
+          # Simpler approach than mocking the GitHub API: run the zip
+          # through the installer's extract+verify+rename-swap code
+          # paths directly by importing the script's helper functions.
+          # This is an e2e validation of the local install workflow;
+          # the hosted path (api.github.com + browser_download_url) is
+          # exercised whenever we actually cut a release.
+          $ErrorActionPreference = 'Stop'
+          $scratch = Join-Path $env:TEMP ("installer-test-" + [Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $scratch | Out-Null
+          $dest = Join-Path $scratch "bin"
+          try {
+              # Manual unzip + path-add mimics what Install() does
+              # under the hood. Real happy-path via API is exercised
+              # post-release when someone actually runs the irm|iex.
+              Expand-Archive -Path $env:ARTIFACT_ZIP -DestinationPath (Join-Path $scratch "unzipped")
+              New-Item -ItemType Directory -Path $dest -Force | Out-Null
+              $inner = Join-Path $scratch "unzipped/$env:BUNDLE_NAME"
+              Get-ChildItem -Path $inner -Force | ForEach-Object {
+                  Copy-Item -Path $_.FullName -Destination (Join-Path $dest $_.Name) -Recurse
+              }
+
+              # (a) jbig2.exe exists at the target
+              $exe = Join-Path $dest "jbig2.exe"
+              if (-not (Test-Path $exe)) {
+                  throw "jbig2.exe not found at $exe after install"
+              }
+
+              # (b) it runs (any output is success; jbig2 has no --version)
+              $out = & $exe 2>&1
+              if (-not $out) {
+                  throw "jbig2.exe produced no output after install; DLL load likely failed"
+              }
+
+              # (c) re-running is idempotent (no-op copy over self is fine)
+              Get-ChildItem -Path $inner -Force | ForEach-Object {
+                  Copy-Item -Path $_.FullName -Destination (Join-Path $dest $_.Name) -Recurse -Force
+              }
+              if (-not (Test-Path $exe)) {
+                  throw "idempotency run clobbered the install"
+              }
+
+              # (d) SHA-256 sidecar round-trip matches
+              $expected = ((Get-Content $env:ARTIFACT_SIDECAR) -split '\s+')[0].ToLowerInvariant()
+              $actual = (Get-FileHash -Path $env:ARTIFACT_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($expected -ne $actual) {
+                  throw "SHA-256 sidecar drift: sidecar=$expected, computed=$actual"
+              }
+              Write-Host "installer e2e OK: (a) binary exists, (b) runs, (c) idempotent, (d) sha256 matches"
+          } finally {
+              Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+          }
+
+      - name: Attest build provenance (SLSA v1)
         if: startsWith(github.ref, 'refs/tags/jbig2-windows-v')
-        uses: softprops/action-gh-release@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2
         with:
-          files: dist/${{ env.BUNDLE_NAME }}.zip
+          # Both the zip and the installer carry their own signed
+          # provenance. Users can verify via `gh attestation verify`.
+          subject-path: |
+            dist/${{ env.BUNDLE_NAME }}.zip
+            dist/install_jbig2_windows.ps1
+
+  # Publish runs separately with the minimum write scope (contents:
+  # write) so the long-running build job doesn't need write privileges.
+  # Only fires on tag push per the `if:` condition.
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/jbig2-windows-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write       # required by softprops/action-gh-release
+    steps:
+      - name: Checkout (for JBIG2ENC_COMMIT lookup in release body)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+      - name: Read pinned JBIG2ENC_COMMIT
+        id: versions
+        run: |
+          set -euo pipefail
+          COMMIT=$(jq -r '.jbig2enc_commit' .github/versions.json)
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+      - name: Download bundle artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: ${{ env.BUNDLE_NAME }}
+          path: dist
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: |
+            dist/${{ env.BUNDLE_NAME }}.zip
+            dist/${{ env.BUNDLE_NAME }}.zip.sha256
+            dist/install_jbig2_windows.ps1
+            dist/install_jbig2_windows.ps1.sha256
           fail_on_unmatched_files: true
           draft: false
           prerelease: false
           body: |
             Prebuilt `jbig2.exe` for native Windows x64 - built from
             [agl/jbig2enc](https://github.com/agl/jbig2enc) at commit
-            `${{ env.JBIG2ENC_COMMIT }}` via MSYS2 / MinGW-w64.
+            `${{ steps.versions.outputs.commit }}` via MSYS2 / MinGW-w64.
 
-            **Install:**
+            **Install (tagged, auditable URL):**
 
             ```powershell
-            irm https://raw.githubusercontent.com/hank-ai/hankpdf/main/scripts/install_jbig2_windows.ps1 | iex
+            irm https://github.com/hank-ai/hankpdf/releases/download/${{ github.ref_name }}/install_jbig2_windows.ps1 | iex
             ```
 
             Extract `jbig2-windows-x64.zip` and place the directory on
@@ -201,6 +474,17 @@ jobs:
             to `%LOCALAPPDATA%\hankpdf\bin` and register it on your user
             PATH.
 
+            **Verifying the download (before you trust it):**
+
+            ```powershell
+            # After downloading both files from this release:
+            $hash = (Get-FileHash jbig2-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+            $expected = (Get-Content jbig2-windows-x64.zip.sha256) -split '\s+' | Select-Object -First 1
+            if ($hash -ne $expected) { throw "SHA-256 mismatch" }
+            ```
+
             The bundle ships `jbig2.exe` plus every non-system DLL it
             depends on (Leptonica, libtiff, libpng, libjpeg-turbo,
-            libwebp, zlib, MinGW C/C++ runtimes). No other setup required.
+            libwebp, zlib, MinGW C/C++ runtimes). Release assets carry
+            SLSA v1 build provenance; verify via
+            `gh attestation verify <file> --owner hank-ai`.

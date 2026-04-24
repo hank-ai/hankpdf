@@ -51,7 +51,13 @@ choco install tesseract qpdf -y
 # Prebuilt jbig2.exe (no apt/brew on Windows, so we publish our own).
 # Installs to %LOCALAPPDATA%\hankpdf\bin and adds to user PATH.
 # No administrator required. Open a new terminal after it runs.
-irm https://raw.githubusercontent.com/hank-ai/hankpdf/main/scripts/install_jbig2_windows.ps1 | iex
+#
+# IMPORTANT: pin to a tagged release — `main` is a mutable branch and
+# anyone with push access could swap the script between now and when
+# you `iex` it. The installer auto-verifies SHA-256 sidecars on every
+# asset, but the installer itself must come from an immutable URL.
+$tag = "jbig2-windows-v0.1.0"
+irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
 
 pip install pdf-smasher
 hankpdf --doctor

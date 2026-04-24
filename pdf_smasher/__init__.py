@@ -48,6 +48,7 @@ from pdf_smasher.exceptions import (
     TotalTimeoutError,
 )
 from pdf_smasher.types import (
+    BuildInfo,
     CompressOptions,
     CompressReport,
     ProgressEvent,
@@ -57,6 +58,7 @@ from pdf_smasher.types import (
 from pdf_smasher.utils.text import format_page_list_short
 
 __all__ = [
+    "BuildInfo",
     "CertifiedSignatureError",
     "CompressError",
     "CompressOptions",
@@ -198,6 +200,8 @@ def _build_passthrough_report(
     wall_ms: int,
     reason: str,
     warning_code: str,
+    *,
+    correlation_id: str | None = None,
 ) -> CompressReport:
     """Construct a CompressReport for a passthrough return (input unchanged).
 
@@ -216,7 +220,9 @@ def _build_passthrough_report(
 
     # Local import to avoid circular import at module load: engine.verifier
     # imports from pdf_smasher.types, and this module re-exports from types.
+    from pdf_smasher.audit import resolve_build_info
     from pdf_smasher.engine.verifier import _VerifierAggregator
+    from pdf_smasher.types import _new_correlation_id
 
     sha = hashlib.sha256(input_data).hexdigest()
     return CompressReport(
@@ -235,6 +241,8 @@ def _build_passthrough_report(
         canonical_input_sha256=None,
         warnings=(warning_code,),
         reason=reason,
+        build_info=resolve_build_info(),
+        correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),
     )
 
 
@@ -671,6 +679,7 @@ def compress(
     *,
     progress_callback: Callable[[ProgressEvent], None] | None = None,
     only_pages: set[int] | None = None,
+    correlation_id: str | None = None,
 ) -> tuple[bytes, CompressReport]:
     """Compress a PDF.
 
@@ -688,6 +697,12 @@ def compress(
     subset of pages. The output PDF contains only the selected pages in
     their original order. Pages outside the set are skipped entirely —
     no rasterization, no OCR, no verification. Useful for smoke tests.
+
+    ``correlation_id`` (Wave 5 / C2) is stamped into the returned
+    :class:`CompressReport` so callers can tie this report to the stderr
+    lines their own logger emits around the invocation. If omitted, a
+    fresh UUID4 is generated. Library callers who drive multiple pages
+    through one logger should pass the same id they prefix stderr with.
     """
     t0 = time.monotonic()
     options = options or CompressOptions()
@@ -805,6 +820,7 @@ def compress(
             wall_ms=wall_ms,
             reason=reason,
             warning_code="passthrough-min-input-mb",
+            correlation_id=correlation_id,
         )
 
     # --- Per-page recompress ---
@@ -1165,6 +1181,7 @@ def compress(
             wall_ms=wall_ms,
             reason=reason,
             warning_code="passthrough-ratio-floor",
+            correlation_id=correlation_id,
         )
 
     verifier_result = (
@@ -1212,6 +1229,13 @@ def compress(
     status: Literal["ok", "drift_aborted"] = "ok"
     exit_code = 0
 
+    # Build the audit-sidecar fields (Wave 5 / C2). build_info is cached
+    # across compress() calls in this process; correlation_id is whatever
+    # the caller passed or a fresh UUID4 via CompressReport's default
+    # factory.
+    from pdf_smasher.audit import resolve_build_info
+    from pdf_smasher.types import _new_correlation_id
+
     report = CompressReport(
         status=status,
         exit_code=exit_code,
@@ -1228,6 +1252,8 @@ def compress(
         canonical_input_sha256=canonical_sha,
         warnings=tuple(warnings_list),
         strategy_distribution=dict(strategy_counts),
+        build_info=resolve_build_info(),
+        correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),
     )
     return output_bytes, report
 

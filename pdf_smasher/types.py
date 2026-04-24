@@ -6,6 +6,7 @@ the source of truth; any change here is a public-API change.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
@@ -154,6 +155,37 @@ class ProgressEvent:
 
 
 @dataclass(frozen=True)
+class BuildInfo:
+    """Identity of the HankPDF binary that produced a report (Wave 5 / C2).
+
+    Populated from /etc/hankpdf/build-info.json (Docker image, B3) plus
+    at-runtime probes of native deps (qpdf --version, tesseract --version,
+    …). All fields are strings so the dataclass serializes cleanly through
+    ``json.dumps(asdict(report))``.
+
+    ``"?"`` is the sentinel for "not recorded" — chosen over None so the
+    JSON shape is stable for downstream tooling (no ``if field is not None``
+    per-field dance).
+    """
+
+    version: str
+    git_sha: str
+    build_date: str
+    jbig2enc_commit: str
+    qpdf_version: str
+    tesseract_version: str
+    leptonica_version: str
+    python_version: str
+    os_platform: str
+    base_image_digest: str = "?"
+
+
+def _new_correlation_id() -> str:
+    """UUID4 hex; short enough for log lines, unique enough for grepping."""
+    return uuid.uuid4().hex
+
+
+@dataclass(frozen=True)
 class CompressReport:
     """Result of a compression run. See docs/SPEC.md §2.3 for schema."""
 
@@ -173,14 +205,16 @@ class CompressReport:
     warnings: tuple[str, ...] = ()
     strips: tuple[str, ...] = ()
     reason: str | None = None
-    # Schema v2 since Wave 3 (2026-04-23). Readers that key on
-    # VerifierResult.status, CompressReport.warnings, or
-    # CompressReport.strategy_distribution must accept the broader surface
-    # described in SPEC.md §11. v2 additions:
-    #   - VerifierResult.status adds the "skipped" literal (was only
-    #     "pass"/"fail").
-    #   - CompressReport.warnings now uses kebab-case codes; verifier-skipped
-    #     appears for every skip_verify run.
-    #   - CompressReport.strategy_distribution is populated (was {} in v1).
-    schema_version: int = field(default=2)
+    # Schema v3 since Wave 5 (2026-04-23). v3 adds:
+    #   - CompressReport.build_info (BuildInfo | None) — identity of the
+    #     binary (git sha, build date, dep versions). None only on dev
+    #     checkouts that can't resolve importlib.metadata.version().
+    #   - CompressReport.correlation_id — a UUID4 hex string that also
+    #     appears in every stderr line emitted during this run, letting
+    #     on-call grep a batch log and tie each line back to its report.
+    # v2 (Wave 3) added the "skipped" verifier status, kebab-case warning
+    # codes, and populated strategy_distribution.
+    schema_version: int = field(default=3)
     strategy_distribution: Mapping[str, int] = field(default_factory=dict)
+    build_info: BuildInfo | None = None
+    correlation_id: str = field(default_factory=_new_correlation_id)

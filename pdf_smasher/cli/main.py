@@ -18,6 +18,7 @@ from pdf_smasher import (
     CertifiedSignatureError,
     CompressError,
     CompressOptions,
+    CompressReport,
     ContentDriftError,
     CorruptPDFError,
     DecompressionBombError,
@@ -28,7 +29,6 @@ from pdf_smasher import (
     PerPageTimeoutError,
     SignedPDFError,
     TotalTimeoutError,
-    __version__,
     _enforce_input_policy,
     compress,
     triage,
@@ -536,11 +536,28 @@ def _doctor_report() -> str:
     import shutil
     import subprocess
 
+    from pdf_smasher._version import build_info, version_line
+
     lines = [
-        f"hankpdf {__version__}",
-        f"python {platform.python_version()}",
+        version_line(),
         f"platform {platform.platform()}",
     ]
+    _info = build_info()
+    if _info is not None:
+        lines.append("build info (from /etc/hankpdf/build-info.json):")
+        for key in (
+            "git_sha",
+            "build_date",
+            "base_image_digest",
+            "jbig2enc_commit",
+            "qpdf_version",
+            "tesseract_version",
+            "leptonica_version",
+            "python_version",
+            "os_platform",
+        ):
+            val = _info.get(key, "?")
+            lines.append(f"  {key:20s} {val}")
     for tool in ("tesseract", "qpdf", "jbig2"):
         path = shutil.which(tool)
         if path:
@@ -586,6 +603,76 @@ def _doctor_report() -> str:
     else:
         lines.append(f"  {'jbig2enc':12s} available")
     return "\n".join(lines)
+
+
+def _write_correlation_sidecar(
+    output_path: Path,
+    report: CompressReport,
+    run_id: str,
+) -> None:
+    """Write ``{output_stem}_correlation.json`` next to the compressed output.
+
+    Wave 5 / C3: the file maps the process-wide correlation_id (also
+    stamped on every stderr line) to the input SHA-256 so an on-call
+    can tie a batch-log slice back to the input without us ever
+    recording the input filename in plaintext.
+
+    Shape (single-entry — batched CLI invocations are a future
+    ROADMAP item, but the schema is already array-shaped for forward
+    compatibility):
+
+    .. code-block:: json
+
+        {
+            "run_id": "<uuid4-hex>",
+            "started_at": "<iso-8601-utc>",
+            "build_info": { ... } | null,
+            "entries": [
+                {
+                    "correlation_id": "<uuid4-hex-first-8>",
+                    "input_sha256": "sha256:<hex>",
+                    "input_size": 12345,
+                    "exit_code": 0,
+                    "output_path": "out.pdf"
+                }
+            ]
+        }
+
+    Failures to write the sidecar are swallowed — the output PDF is the
+    user's primary artifact; a missing sidecar only degrades the
+    on-call recovery workflow, not the correctness of the output.
+    """
+    import dataclasses
+    import datetime
+
+    sidecar_path = output_path.parent / f"{output_path.stem}_correlation.json"
+    try:
+        build_info_dict: dict[str, str] | None = None
+        if report.build_info is not None:
+            build_info_dict = dataclasses.asdict(report.build_info)
+        payload = {
+            "run_id": run_id,
+            "started_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            "build_info": build_info_dict,
+            "entries": [
+                {
+                    "correlation_id": report.correlation_id,
+                    "input_sha256": f"sha256:{report.input_sha256}",
+                    "input_size": report.input_bytes,
+                    "exit_code": report.exit_code,
+                    "output_path": output_path.name,
+                },
+            ],
+        }
+        _atomic_write_bytes(sidecar_path, json.dumps(payload, indent=2).encode("utf-8"))
+    except OSError:
+        # Sidecar write failed (disk full, permissions). The main output
+        # already landed; surface a warning but don't fail the run.
+        print(
+            f"[hankpdf] warning: could not write correlation sidecar to "
+            f"{sidecar_path}; on-call recovery via correlation_id may be harder",
+            file=sys.stderr,
+        )
 
 
 def _format_report(report, fmt: str) -> str:  # type: ignore[no-untyped-def]
@@ -861,8 +948,25 @@ def _run_image_export(
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
 
+    # Generate a correlation id for this invocation and register it with
+    # the audit module so every warning_codes stderr line gets stamped.
+    # Wave 5 / C2: on-call can grep a batch log for `corr=<id>` and tie
+    # the log slice back to the structured CompressReport whose
+    # `correlation_id` matches.
+    import uuid as _uuid
+
+    from pdf_smasher.audit import set_correlation_id
+
+    _run_correlation_id = _uuid.uuid4().hex
+    set_correlation_id(_run_correlation_id)
+
     if args.version:
-        print(f"hankpdf {__version__}")
+        # version_line() embeds git_sha + build_date + image digest when
+        # running from a Docker image that wrote /etc/hankpdf/build-info.json
+        # at build time (B3). Dev installs just print version + python.
+        from pdf_smasher._version import version_line
+
+        print(version_line())
         return EXIT_OK
 
     if args.doctor:
@@ -1015,6 +1119,7 @@ def main(argv: list[str] | None = None) -> int:
                 options=options,
                 progress_callback=_progress,
                 only_pages=only_pages,
+                correlation_id=_run_correlation_id,
             )
         except EncryptedPDFError as e:
             print(
@@ -1229,6 +1334,18 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         file=sys.stderr,
                     )
+
+    # Correlation sidecar (Wave 5 / C3). Emits {output_stem}_correlation.json
+    # alongside the output whenever output is a file. Maps the run's
+    # correlation_id to the input SHA-256 so an on-call can:
+    #   1. grep the batch log for `corr=<id>` to find the stderr slice
+    #   2. open {output}_correlation.json to get the input_sha256
+    #   3. cross-reference with the user's separate input-sha mapping
+    #      to identify the original filename (filenames stay redacted
+    #      per THREAT_MODEL.md §5).
+    # See docs/TROUBLESHOOTING.md for the full recovery playbook.
+    if str(args.output) != "-":
+        _write_correlation_sidecar(args.output, report, _run_correlation_id)
 
     # Verifier-status banner. Default skip_verify=True is a UX trap:
     # users see a clean text report and assume the output was content-

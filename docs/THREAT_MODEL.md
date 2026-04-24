@@ -86,9 +86,12 @@ Attacker compromises our PyPI / GHCR / GitHub release → ships malicious wheel
 
 **Mitigations:**
 - **PyPI trusted publishing via GitHub OIDC** — no long-lived API tokens that could leak.
-- **GHCR publishes via GitHub OIDC**.
+- **GHCR publishes via GitHub OIDC**. Each pushed image is cosign-signed (keyless, same OIDC issuer) and carries a SLSA v1 build-provenance attestation + SPDX SBOM. Consumers pin by digest and verify via `cosign verify` + `gh attestation verify`.
+- **Dockerfile pins the base image by digest** (`python:3.14-slim-trixie@sha256:…`). Every apt package is pinned to an explicit version. Dependabot's docker + github-actions + pip ecosystems propose bumps.
+- **Workflows pin every action by commit SHA** (not tag) so a compromised tag on `actions/*` can't silently change what we run.
+- **Windows release assets** ship SHA-256 sidecars next to every download, plus SLSA provenance. The installer script refuses to install if the sidecar is missing or mismatched.
+- **`.github/versions.json` is the single source of truth** for native-dep pins (jbig2enc commit, qpdf floor, Leptonica floor). CI fails if the SHA appears anywhere else in the repo (grep-and-fail).
 - **GitHub Releases include SHA-256 checksums** for every artifact + image digests; users can verify.
-- No separate code-signing infrastructure because we don't ship platform binaries — OIDC provenance is the integrity chain.
 
 ### 7. Supply chain: hostile dependency upgrade
 

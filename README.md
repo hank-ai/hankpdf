@@ -102,6 +102,30 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/data" \
     /data/in.pdf -o /data/out.pdf
 ```
 
+**For production use, pin to an immutable tag or digest:**
+
+```bash
+# Immutable — a specific release:
+docker pull ghcr.io/hank-ai/hankpdf:v0.0.1
+
+# Immutable — a specific commit SHA:
+docker pull ghcr.io/hank-ai/hankpdf@sha256:<digest>
+
+# `:latest` is MUTABLE — it floats with every main-branch merge.
+# Fine for local dev; never for production batch jobs where you
+# want to know exactly what bytes ran.
+```
+
+Every pushed image is signed with cosign (keyless, via GitHub OIDC)
+and carries a SLSA v1 build-provenance attestation. Verify before
+running in production:
+
+```bash
+cosign verify ghcr.io/hank-ai/hankpdf:v0.0.1 \
+    --certificate-identity-regexp 'https://github\.com/hank-ai/hankpdf/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 See [docker/README.md](docker/README.md) for tag semantics, uid
 rationale, and local-build instructions.
 
@@ -184,8 +208,11 @@ winget install Python.Python.3.14
 choco install tesseract qpdf -y
 irm https://astral.sh/uv/install.ps1 | iex
 
-# Install jbig2.exe for full MRC compression (optional; CCITT G4 fallback works without it)
-irm https://raw.githubusercontent.com/hank-ai/hankpdf/main/scripts/install_jbig2_windows.ps1 | iex
+# Install jbig2.exe for full MRC compression (optional; CCITT G4 fallback works without it).
+# Tagged URL — main is a mutable branch, so we pin to a specific release.
+# Replace the tag with whatever "jbig2-windows-v*" tag you want to install.
+$tag = "jbig2-windows-v0.1.0"
+irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
 
 git clone git@github.com:hank-ai/hankpdf.git
 cd hankpdf

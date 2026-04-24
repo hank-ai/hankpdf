@@ -22,8 +22,9 @@
     "latest" which resolves via the GitHub API.
 
 .EXAMPLE
-    # One-liner install from the repo (recommended):
-    irm https://raw.githubusercontent.com/hank-ai/hankpdf/main/scripts/install_jbig2_windows.ps1 | iex
+    # One-liner install from a TAGGED release (recommended):
+    # main is a mutable branch — pin to a specific release tag.
+    irm https://github.com/hank-ai/hankpdf/releases/download/jbig2-windows-v0.1.0/install_jbig2_windows.ps1 | iex
 
 .EXAMPLE
     # Offline / manual install:
@@ -48,12 +49,30 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# --- TLS / network hardening (E3) ------------------------------------
+#
+# PS 5.1's default SecurityProtocol is SSL3 + TLS 1.0, both of which
+# GitHub has disabled. Force TLS 1.2, and also TLS 1.3 where the .NET
+# framework on the box supports it (PS 7+ / .NET 4.8+). If we don't
+# do this, `Invoke-WebRequest` fails with an opaque "underlying
+# connection was closed" that users read as "the internet is broken".
+[Net.ServicePointManager]::SecurityProtocol =
+    [Net.ServicePointManager]::SecurityProtocol -bor
+    [Net.SecurityProtocolType]::Tls12
+if ([Net.SecurityProtocolType]::Tls13 -as [Net.SecurityProtocolType]) {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor
+        [Net.SecurityProtocolType]::Tls13
+}
+
 # --- constants --------------------------------------------------------
 
 $Repo      = 'hank-ai/hankpdf'
 $AssetName = 'jbig2-windows-x64.zip'
 $ApiBase   = 'https://api.github.com'
 $UserAgent = 'hankpdf-install-jbig2/1.0 (+https://github.com/hank-ai/hankpdf)'
+$HttpTimeoutSec = 120
+$HttpMaxRetries = 3
 
 # --- helpers ----------------------------------------------------------
 
@@ -72,6 +91,40 @@ function Write-Warn2 {
     Write-Warning $Message
 }
 
+function Invoke-WithRetry {
+    <#
+    .SYNOPSIS
+        Run a script block with exponential-backoff retry on transient
+        network failures (E3).
+    #>
+    param(
+        [scriptblock]$ScriptBlock,
+        [int]$MaxAttempts = $HttpMaxRetries,
+        [string]$OpName = 'HTTP request'
+    )
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            return & $ScriptBlock
+        } catch [System.Net.WebException] {
+            $status = $null
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            # 4xx (except 408/429) aren't retryable — no amount of
+            # waiting fixes a missing resource.
+            if ($status -ge 400 -and $status -lt 500 -and $status -ne 408 -and $status -ne 429) {
+                throw
+            }
+            if ($attempt -ge $MaxAttempts) {
+                throw
+            }
+            $sleep = [math]::Pow(2, $attempt)  # 2s, 4s, 8s
+            Write-Host "    ${OpName} attempt ${attempt}/${MaxAttempts} failed: $($_.Exception.Message); retrying in ${sleep}s..."
+            Start-Sleep -Seconds $sleep
+        }
+    }
+}
+
 function Invoke-GitHubApi {
     param([string]$Url)
     $headers = @{
@@ -82,7 +135,9 @@ function Invoke-GitHubApi {
     # GitHub caps unauthenticated requests at 60/hr/IP; bubble up a
     # clear message instead of dumping the raw exception.
     try {
-        return Invoke-RestMethod -Uri $Url -Headers $headers -UseBasicParsing
+        return Invoke-WithRetry -OpName "GitHub API" -ScriptBlock {
+            Invoke-RestMethod -Uri $Url -Headers $headers -UseBasicParsing -TimeoutSec $HttpTimeoutSec
+        }
     }
     catch {
         $resp = $_.Exception.Response
@@ -126,11 +181,45 @@ function Resolve-ReleaseAsset {
     }
 
     Write-Ok "Found $AssetName in release $($release.tag_name)"
-    return [PSCustomObject]@{
-        Tag         = $release.tag_name
-        DownloadUrl = $asset.browser_download_url
-        Size        = $asset.size
+
+    # Also locate the SHA-256 sidecar. This is required — without it we
+    # have no way to verify the zip we downloaded is the one CI produced.
+    # If the release is missing the sidecar, refuse the install rather
+    # than silently skip the check (degrades-open is worse than degrades-
+    # closed for supply-chain).
+    $sidecarName = "$AssetName.sha256"
+    $sidecar = $release.assets | Where-Object { $_.name -eq $sidecarName } | Select-Object -First 1
+    if (-not $sidecar) {
+        throw "Release $($release.tag_name) is missing '$sidecarName'. Refusing to install without a SHA-256 sidecar (supply-chain hygiene). Re-run the Windows release workflow with A7 or newer, or pass -Version to pin to a release that has one."
     }
+
+    return [PSCustomObject]@{
+        Tag             = $release.tag_name
+        DownloadUrl     = $asset.browser_download_url
+        Size            = $asset.size
+        SidecarUrl      = $sidecar.browser_download_url
+    }
+}
+
+function Get-ExpectedSha256 {
+    param([string]$SidecarUrl)
+
+    # Sidecar is GNU sha256sum format: "<64 hex chars>  <filename>". We
+    # only trust the hex; the filename is informational. Strip whitespace
+    # and lowercase for case-insensitive comparison against Get-FileHash.
+    $ua = $UserAgent
+    $timeoutSec = $HttpTimeoutSec
+    $content = (Invoke-WithRetry -OpName "sidecar fetch" -ScriptBlock {
+        Invoke-WebRequest -Uri $SidecarUrl `
+            -UseBasicParsing `
+            -Headers @{ 'User-Agent' = $ua } `
+            -TimeoutSec $timeoutSec
+    }).Content
+    $firstToken = ($content -split '\s+', 2)[0].Trim().ToLowerInvariant()
+    if ($firstToken -notmatch '^[a-f0-9]{64}$') {
+        throw "Sidecar did not contain a 64-hex-char SHA-256 digest. Got: $firstToken"
+    }
+    return $firstToken
 }
 
 function Add-ToUserPath {
@@ -175,8 +264,19 @@ try {
         Write-Step "Downloading $AssetName"
         # Invoke-WebRequest honors system proxy; UseBasicParsing keeps
         # it working on Server Core / constrained PowerShell installs.
+        # Wrapped in retry (E3): transient 500/503/timeouts retry up
+        # to 3 times with exponential backoff; 4xx fails fast.
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $info.DownloadUrl -OutFile $zipPath -UseBasicParsing -Headers @{ 'User-Agent' = $UserAgent }
+        $downloadUrl = $info.DownloadUrl
+        $ua = $UserAgent
+        $timeoutSec = $HttpTimeoutSec
+        Invoke-WithRetry -OpName "download" -ScriptBlock {
+            Invoke-WebRequest -Uri $downloadUrl `
+                -OutFile $zipPath `
+                -UseBasicParsing `
+                -Headers @{ 'User-Agent' = $ua } `
+                -TimeoutSec $timeoutSec
+        }
 
         $fi = Get-Item $zipPath -ErrorAction Stop
         if ($fi.Length -le 0) {
@@ -184,30 +284,116 @@ try {
         }
         Write-Ok "Downloaded $($fi.Length) bytes"
 
-        # 3. Ensure destination exists and extract.
-        if (-not (Test-Path -Path $Destination)) {
-            New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        # 2a. Verify SHA-256 against the sidecar published alongside the
+        #     zip. Any mismatch means either (a) the download was
+        #     corrupted/MITM'd, or (b) the release was tampered with
+        #     post-publish. Fail hard — do NOT install. The user's
+        #     existing install (if any) is untouched.
+        Write-Step "Verifying SHA-256 against release sidecar"
+        $expected = Get-ExpectedSha256 -SidecarUrl $info.SidecarUrl
+        $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "[E-SHA256-MISMATCH] SHA-256 mismatch on $AssetName. Expected $expected, got $actual. Refusing to install a download that doesn't match the release sidecar; your existing install (if any) is unchanged."
+        }
+        Write-Ok "SHA-256 verified: $actual"
+
+        # 3. Atomic install via rename-swap (E4).
+        #
+        # Previously we extracted to staging and copy-item'd each file
+        # into $Destination one by one — a crash mid-copy left the user
+        # with a half-populated install directory, corrupt from the
+        # perspective of any tool that had already picked the stale
+        # binary up via PATH. Per-file Copy-Item is also O(files)
+        # expensive when the bundle has 15+ DLLs.
+        #
+        # New flow:
+        #   1. Build the full new install in "$Destination.new"
+        #   2. Move any existing "$Destination" to "$Destination.old"
+        #   3. Rename "$Destination.new" -> "$Destination"
+        #   4. rm -rf "$Destination.old"
+        # Between steps 2 and 3 there's a microsecond window where
+        # neither path exists, but no concurrent consumer can hit a
+        # half-populated state. On Windows, Move-Item within the same
+        # filesystem is atomic (NTFS rename).
+        Write-Step "Extracting to $Destination (atomic rename-swap)"
+        $destNew = "$Destination.new"
+        $destOld = "$Destination.old"
+        # Clean up lingering "$.new" or "$.old" from a prior failed run.
+        if (Test-Path $destNew) { Remove-Item -Recurse -Force $destNew }
+        if (Test-Path $destOld) { Remove-Item -Recurse -Force $destOld }
+        New-Item -ItemType Directory -Path $destNew -Force | Out-Null
+
+        $stagingDir = Join-Path $tempDir 'extracted'
+        New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+        # Use System.IO.Compression instead of Expand-Archive so we can
+        # defend against zip-slip (../ escape) — Expand-Archive on PS 5.1
+        # silently follows path-traversal sequences in zip entries and
+        # writes outside $stagingDir. Each entry's destination is
+        # resolved and compared to the staging root; any entry outside
+        # that tree is refused.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $stagingFull = [System.IO.Path]::GetFullPath($stagingDir).TrimEnd('\')
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+        try {
+            foreach ($entry in $archive.Entries) {
+                $target = [System.IO.Path]::GetFullPath(
+                    [System.IO.Path]::Combine($stagingDir, $entry.FullName))
+                if (-not $target.StartsWith($stagingFull + [System.IO.Path]::DirectorySeparatorChar) `
+                    -and $target -ne $stagingFull) {
+                    throw "[E-EXTRACT] Zip-slip attempt detected: entry '$($entry.FullName)' resolves outside the staging dir; refusing to extract."
+                }
+                $parent = Split-Path -Parent $target
+                if ($parent) {
+                    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+                }
+                if ($entry.FullName.EndsWith('/')) {
+                    # Directory entry; already created above.
+                    continue
+                }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+            }
+        } finally {
+            $archive.Dispose()
         }
 
-        Write-Step "Extracting to $Destination"
-        $stagingDir = Join-Path $tempDir 'extracted'
-        Expand-Archive -Path $zipPath -DestinationPath $stagingDir -Force
-
-        # The zip contains a top-level 'jbig2-windows-x64/' directory;
-        # flatten it into $Destination so jbig2.exe lives at the root.
+        # Zip contains a top-level 'jbig2-windows-x64/' directory;
+        # flatten into $destNew so jbig2.exe lives at the root.
         $inner = Join-Path $stagingDir 'jbig2-windows-x64'
         $sourceRoot = if (Test-Path $inner) { $inner } else { $stagingDir }
 
         Get-ChildItem -Path $sourceRoot -Force | ForEach-Object {
-            $target = Join-Path $Destination $_.Name
+            $target = Join-Path $destNew $_.Name
             Copy-Item -Path $_.FullName -Destination $target -Recurse -Force
+        }
+
+        $newExe = Join-Path $destNew 'jbig2.exe'
+        if (-not (Test-Path $newExe)) {
+            throw "Extraction completed but $newExe was not created. Zip contents may be malformed."
+        }
+
+        # Atomic swap.
+        if (Test-Path $Destination) {
+            Move-Item -Path $Destination -Destination $destOld -Force
+        }
+        try {
+            Move-Item -Path $destNew -Destination $Destination -Force
+        } catch {
+            # Rollback: restore the old install if the new-rename failed.
+            if (Test-Path $destOld) {
+                Move-Item -Path $destOld -Destination $Destination -Force
+            }
+            throw
+        }
+        if (Test-Path $destOld) {
+            Remove-Item -Recurse -Force $destOld -ErrorAction SilentlyContinue
         }
 
         $exe = Join-Path $Destination 'jbig2.exe'
         if (-not (Test-Path $exe)) {
-            throw "Extraction completed but $exe was not created. Zip contents may be malformed."
+            throw "Atomic swap completed but $exe is missing. Filesystem consistency issue."
         }
-        Write-Ok "Installed jbig2.exe and bundled DLLs"
+        Write-Ok "Installed jbig2.exe and bundled DLLs (atomic swap)"
     }
     finally {
         if (Test-Path $tempDir) {
@@ -246,9 +432,40 @@ try {
         Write-Host "    PATH already contained $Destination; no change."
     }
 }
-catch {
+catch [System.Net.WebException] {
+    # Network / DNS / TLS / proxy failures. HTTP 403/404 from the
+    # GitHub API are translated to more specific exceptions inside
+    # Invoke-GitHubApi so we don't land here for those.
     Write-Host ""
-    Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[E-NETWORK] Network request failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Hint: check proxy/VPN, corporate firewall, or re-run in a minute."
+    exit 2
+}
+catch [System.IO.InvalidDataException] {
+    # Expand-Archive throws this for malformed zips.
+    Write-Host ""
+    Write-Host "[E-EXTRACT] Archive extraction failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Hint: the download may have been truncated; re-run to retry."
+    exit 3
+}
+catch [System.UnauthorizedAccessException] {
+    # Target dir / PATH key not writable by the current user.
+    Write-Host ""
+    Write-Host "[E-PERMISSIONS] Permission denied: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Hint: pick a different -Destination or run from a user with write access."
+    exit 4
+}
+catch {
+    # Everything else — SHA-256 mismatch (our own throw), missing
+    # sidecar, etc. We explicitly label the common cases so on-call
+    # logs are greppable by [E-*] code.
+    $msg = $_.Exception.Message
+    Write-Host ""
+    if ($msg -match '\[E-SHA256-MISMATCH\]') {
+        Write-Host "[E-SHA256-MISMATCH] $msg" -ForegroundColor Red
+        exit 5
+    }
+    Write-Host "[E-UNKNOWN] $msg" -ForegroundColor Red
     Write-Host ""
     Write-Host "Fallback: HankPDF still works without jbig2.exe - the MRC"
     Write-Host "pipeline falls back to CCITT G4, which produces outputs"
