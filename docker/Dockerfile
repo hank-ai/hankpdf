@@ -26,10 +26,25 @@
 # in the runtime stage fails the image build if the floor ever regresses.
 FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033 AS builder
 
+# Pin every apt package to the exact version currently in trixie/main
+# (as of Wave 5). Pinning matters for reproducibility: without `=<version>`,
+# a future security update can change the bits we build jbig2 against.
+# Dependabot's docker ecosystem proposes bumps as trixie refreshes.
+# Discover versions via `apt-cache policy <pkg>` inside the builder stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential autoconf automake libtool pkg-config \
-        libleptonica-dev libpng-dev libjpeg-dev libtiff-dev \
-        libwebp-dev zlib1g-dev ca-certificates git \
+        build-essential=12.12 \
+        autoconf=2.72-3.1 \
+        automake=1:1.17-4 \
+        libtool=2.5.4-4 \
+        pkg-config=1.8.1-4 \
+        libleptonica-dev=1.84.1-4 \
+        libpng-dev=1.6.48-1+deb13u4 \
+        libjpeg-dev=1:2.1.5-4 \
+        libtiff-dev=4.7.0-3+deb13u2 \
+        libwebp-dev=1.5.0-0.1 \
+        zlib1g-dev=1:1.3.dfsg+really1.3.1-1+b1 \
+        ca-certificates=20250419 \
+        git=1:2.47.3-0+deb13u1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -87,10 +102,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # names as bookworm. If any of these names drifts in a future release,
 # apt's "unable to locate" error will be explicit and greppable.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        tesseract-ocr tesseract-ocr-eng \
-        qpdf \
-        libleptonica-dev \
-        libpng16-16 libjpeg62-turbo libtiff6 libwebp7 \
+        tesseract-ocr=5.5.0-1+b1 \
+        tesseract-ocr-eng=1:4.1.0-2 \
+        qpdf=12.2.0-1 \
+        libleptonica-dev=1.84.1-4 \
+        libpng16-16t64=1.6.48-1+deb13u4 \
+        libjpeg62-turbo=1:2.1.5-4 \
+        libtiff6=4.7.0-3+deb13u2 \
+        libwebp7=1.5.0-0.1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
