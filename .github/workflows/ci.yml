@@ -52,10 +52,11 @@ jobs:
     permissions:
       contents: read
       # zizmor uploads its SARIF report to GitHub Code Scanning so
-      # findings show up in the Security tab; that API needs
-      # security-events: write. The default GITHUB_TOKEN covers it
-      # but the job's own permissions block must grant the scope.
+      # findings show up in the Security tab; that needs security-events:
+      # write. The uploader additionally calls the workflow-runs API to
+      # fetch run metadata for SARIF annotations, which needs actions: read.
       security-events: write
+      actions: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: zizmor
