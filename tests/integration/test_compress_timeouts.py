@@ -44,6 +44,7 @@ def test_total_timeout_fires_on_long_run() -> None:
     pdf = _make_pdf(2)
 
     import pdf_smasher as _pkg
+
     _real = _pkg._process_single_page  # noqa: SLF001 — accessing to re-dispatch in test
 
     def _slow_worker(w: object) -> object:
@@ -151,9 +152,7 @@ def test_min_ratio_passthrough_when_ratio_below_floor() -> None:
     )
     out, report = compress(pdf, options=opts)
     assert out == pdf, "below-floor ratio must passthrough"
-    assert report.status == "passed_through", (
-        f"expected passed_through; got {report.status}"
-    )
+    assert report.status == "passed_through", f"expected passed_through; got {report.status}"
     assert "passthrough-ratio-floor" in report.warnings
 
 
@@ -187,9 +186,7 @@ def test_min_input_mb_below_floor_passthrough() -> None:
     opts = CompressOptions(min_input_mb=10.0, skip_verify=True)
     out, report = compress(pdf, options=opts)
     assert out == pdf, "passthrough must return input bytes unchanged"
-    assert report.status == "passed_through", (
-        f"expected status=passed_through; got {report.status}"
-    )
+    assert report.status == "passed_through", f"expected status=passed_through; got {report.status}"
     assert "passthrough-min-input-mb" in report.warnings, (
         f"expected passthrough-min-input-mb warning; got {report.warnings}"
     )
@@ -211,7 +208,5 @@ def test_min_input_mb_at_zero_disables_floor() -> None:
         accept_drift=True,
     )
     _out, report = compress(pdf, options=opts)
-    assert report.status != "passed_through", (
-        "min_input_mb=0 must not trigger passthrough"
-    )
+    assert report.status != "passed_through", "min_input_mb=0 must not trigger passthrough"
     assert "passthrough-min-input-mb" not in report.warnings

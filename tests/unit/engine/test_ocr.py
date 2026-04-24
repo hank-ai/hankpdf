@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import shutil
+
+import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from pdf_smasher.engine.ocr import WordBox, tesseract_word_boxes
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("tesseract") is None,
+    reason="tesseract binary not on PATH (install per docs/INSTALL.md)",
+)
 
 
 def _make_text_image(

@@ -57,6 +57,7 @@ def _input_label(input_path: Path | None) -> str | Path | None:
         return None
     return input_path
 
+
 # Keep CLI cap in lockstep with the library cap (which is the real
 # enforcer). The CLI layer just fails fast with a nicer argparse
 # message instead of raising ValueError deep inside the generator.
@@ -402,8 +403,7 @@ def _parser() -> argparse.ArgumentParser:
         default=6,
         choices=range(10),
         help=(
-            "PNG zlib compression level 0-9. 0=no compression, 9=max. "
-            "Default: 6 (Pillow standard)."
+            "PNG zlib compression level 0-9. 0=no compression, 9=max. Default: 6 (Pillow standard)."
         ),
     )
     p.add_argument(
@@ -629,8 +629,7 @@ def _run_image_export(
         print(
             _warn(
                 "W-MAX-OUTPUT-MB-IMAGE-MODE",
-                "--max-output-mb applies only to PDF output; "
-                "ignored in image-export mode",
+                "--max-output-mb applies only to PDF output; ignored in image-export mode",
                 input_name=_label,
             ),
             file=sys.stderr,
@@ -643,10 +642,15 @@ def _run_image_export(
     try:
         tri = triage(input_bytes)
     except MaliciousPDFError as e:
-        print(_refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label), file=sys.stderr)
+        print(
+            _refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label), file=sys.stderr
+        )
         return EXIT_MALICIOUS
     except DecompressionBombError as e:
-        print(_refuse("E-INPUT-DECOMPRESSION-BOMB", f"decompression bomb ({e})", input_name=_label), file=sys.stderr)
+        print(
+            _refuse("E-INPUT-DECOMPRESSION-BOMB", f"decompression bomb ({e})", input_name=_label),
+            file=sys.stderr,
+        )
         return EXIT_DECOMPRESSION_BOMB
     except CompressError as e:
         print(_refuse("E-INPUT-CORRUPT", str(e), input_name=_label), file=sys.stderr)
@@ -657,10 +661,16 @@ def _run_image_export(
     try:
         _enforce_input_policy(tri, _build_options(args), input_bytes)
     except EncryptedPDFError as e:
-        print(_refuse("E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label), file=sys.stderr)
+        print(
+            _refuse("E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label),
+            file=sys.stderr,
+        )
         return EXIT_ENCRYPTED
     except CertifiedSignatureError as e:
-        print(_refuse("E-INPUT-CERTIFIED", f"certifying signature ({e})", input_name=_label), file=sys.stderr)
+        print(
+            _refuse("E-INPUT-CERTIFIED", f"certifying signature ({e})", input_name=_label),
+            file=sys.stderr,
+        )
         return EXIT_CERTIFIED_SIG
     except SignedPDFError as e:
         print(_refuse("E-INPUT-SIGNED", f"signed PDF ({e})", input_name=_label), file=sys.stderr)
@@ -719,9 +729,7 @@ def _run_image_export(
     # Keep the user's image extension only if it matches the resolved
     # format; else replace it with the canonical one for image_format.
     requested_ext = args.output.suffix.lower()
-    ext_matches_format = (
-        ext_to_format.get(requested_ext.lstrip(".")) == image_format
-    )
+    ext_matches_format = ext_to_format.get(requested_ext.lstrip(".")) == image_format
     final_ext = requested_ext if ext_matches_format else out_ext
 
     # Progress: tqdm bar ticks on each encoded page, so a 400-page PNG
@@ -764,11 +772,7 @@ def _run_image_export(
             if str(args.output) == "-":
                 sys.stdout.buffer.write(blob)
                 return EXIT_OK
-            target = (
-                args.output
-                if ext_matches_format
-                else parent / f"{base}{final_ext}"
-            )
+            target = args.output if ext_matches_format else parent / f"{base}{final_ext}"
             _atomic_write_bytes(target, blob)
             if not args.quiet:
                 print(
@@ -801,16 +805,14 @@ def _run_image_export(
                 print(
                     _warn_error(
                         "W-IMAGE-EXPORT-PARTIAL-FAILURE",
-                        f"image export failed after writing "
-                        f"{len(written_paths)}/{n} pages: {exc}",
+                        f"image export failed after writing {len(written_paths)}/{n} pages: {exc}",
                         input_name=_label,
                     ),
                     file=sys.stderr,
                 )
                 if written_paths:
                     print(
-                        f"{_prefix} wrote these before failure: "
-                        f"{[p.name for p in written_paths]}",
+                        f"{_prefix} wrote these before failure: {[p.name for p in written_paths]}",
                         file=sys.stderr,
                     )
                 return EXIT_MALICIOUS
@@ -818,16 +820,14 @@ def _run_image_export(
                 print(
                     _warn_error(
                         "W-IMAGE-EXPORT-PARTIAL-FAILURE",
-                        f"image export failed after writing "
-                        f"{len(written_paths)}/{n} pages: {exc}",
+                        f"image export failed after writing {len(written_paths)}/{n} pages: {exc}",
                         input_name=_label,
                     ),
                     file=sys.stderr,
                 )
                 if written_paths:
                     print(
-                        f"{_prefix} wrote these before failure: "
-                        f"{[p.name for p in written_paths]}",
+                        f"{_prefix} wrote these before failure: {[p.name for p in written_paths]}",
                         file=sys.stderr,
                     )
                 return EXIT_DECOMPRESSION_BOMB
@@ -835,16 +835,14 @@ def _run_image_export(
                 print(
                     _warn_error(
                         "W-IMAGE-EXPORT-PARTIAL-FAILURE",
-                        f"image export failed after writing "
-                        f"{len(written_paths)}/{n} pages: {exc}",
+                        f"image export failed after writing {len(written_paths)}/{n} pages: {exc}",
                         input_name=_label,
                     ),
                     file=sys.stderr,
                 )
                 if written_paths:
                     print(
-                        f"{_prefix} wrote these before failure: "
-                        f"{[p.name for p in written_paths]}",
+                        f"{_prefix} wrote these before failure: {[p.name for p in written_paths]}",
                         file=sys.stderr,
                     )
                 return EXIT_ENGINE_ERROR
@@ -935,11 +933,7 @@ def main(argv: list[str] | None = None) -> int:
             "webp": "webp",
             "pdf": "pdf",
         }.get(o_ext)
-        if (
-            implicit_format is not None
-            and implicit_format != resolved_format
-            and not args.quiet
-        ):
+        if implicit_format is not None and implicit_format != resolved_format and not args.quiet:
             print(
                 _warn(
                     "W-OUTPUT-FORMAT-EXTENSION-OVERRIDE",
@@ -1023,25 +1017,47 @@ def main(argv: list[str] | None = None) -> int:
                 only_pages=only_pages,
             )
         except EncryptedPDFError as e:
-            print(_refuse("E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label), file=sys.stderr)
+            print(
+                _refuse(
+                    "E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label
+                ),
+                file=sys.stderr,
+            )
             return EXIT_ENCRYPTED
         except CertifiedSignatureError as e:
-            print(_refuse("E-INPUT-CERTIFIED", f"certifying signature ({e})", input_name=_label), file=sys.stderr)
+            print(
+                _refuse("E-INPUT-CERTIFIED", f"certifying signature ({e})", input_name=_label),
+                file=sys.stderr,
+            )
             return EXIT_CERTIFIED_SIG
         except SignedPDFError as e:
-            print(_refuse("E-INPUT-SIGNED", f"signed PDF ({e})", input_name=_label), file=sys.stderr)
+            print(
+                _refuse("E-INPUT-SIGNED", f"signed PDF ({e})", input_name=_label), file=sys.stderr
+            )
             return EXIT_SIGNED
         except OversizeError as e:
-            print(_refuse("E-INPUT-OVERSIZE", f"oversize ({e})", input_name=_label), file=sys.stderr)
+            print(
+                _refuse("E-INPUT-OVERSIZE", f"oversize ({e})", input_name=_label), file=sys.stderr
+            )
             return EXIT_OVERSIZE
         except DecompressionBombError as e:
-            print(_refuse("E-INPUT-DECOMPRESSION-BOMB", f"decompression bomb ({e})", input_name=_label), file=sys.stderr)
+            print(
+                _refuse(
+                    "E-INPUT-DECOMPRESSION-BOMB", f"decompression bomb ({e})", input_name=_label
+                ),
+                file=sys.stderr,
+            )
             return EXIT_DECOMPRESSION_BOMB
         except CorruptPDFError as e:
-            print(_refuse("E-INPUT-CORRUPT", f"corrupt PDF ({e})", input_name=_label), file=sys.stderr)
+            print(
+                _refuse("E-INPUT-CORRUPT", f"corrupt PDF ({e})", input_name=_label), file=sys.stderr
+            )
             return EXIT_CORRUPT
         except MaliciousPDFError as e:
-            print(_refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label), file=sys.stderr)
+            print(
+                _refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label),
+                file=sys.stderr,
+            )
             return EXIT_MALICIOUS
         except ContentDriftError as e:
             print(
@@ -1066,7 +1082,9 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_ENGINE_ERROR
         except TotalTimeoutError as e:
             print(
-                _warn_error("E-TIMEOUT-TOTAL", f"total wall-clock timeout ({e})", input_name=_label),
+                _warn_error(
+                    "E-TIMEOUT-TOTAL", f"total wall-clock timeout ({e})", input_name=_label
+                ),
                 file=sys.stderr,
             )
             return EXIT_ENGINE_ERROR
@@ -1087,8 +1105,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 _warn(
                     "W-MAX-OUTPUT-MB-STDOUT",
-                    "--max-output-mb is ignored when -o - (stdout); "
-                    "wrote merged output",
+                    "--max-output-mb is ignored when -o - (stdout); wrote merged output",
                     input_name=_label,
                 ),
                 file=sys.stderr,

@@ -39,18 +39,23 @@ def test_stale_chunks_warning_not_silenced_by_quiet(
     # Seed a stale file with a high index.
     stale = tmp_path / "smol_099.pdf"
     stale.write_bytes(b"%PDF-1.7\n%stale\n")
-    rc = main([
-        str(in_path), "-o", str(out_path),
-        "--max-output-mb", "0.005",
-        "--accept-drift",
-        "--min-ratio", "0",
-        "--quiet",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "0.005",
+            "--accept-drift",
+            "--min-ratio",
+            "0",
+            "--quiet",
+        ]
+    )
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err
     assert "[W-STALE-CHUNK-FILES]" in err, (
-        "stale-chunk warning must survive --quiet (correctness invariant); "
-        f"stderr was:\n{err!r}"
+        f"stale-chunk warning must survive --quiet (correctness invariant); stderr was:\n{err!r}"
     )
     # Sanity: other chunk summary chrome IS suppressed under --quiet. The
     # 'wrote N chunks' line must NOT appear.

@@ -152,9 +152,7 @@ def test_compress_skip_verify_reports_status_skipped() -> None:
     a 'verifier-skipped' warning."""
     pdf_in = _make_fake_scan(["HELLO"])
     _, report = compress(pdf_in, options=CompressOptions(skip_verify=True))
-    assert report.verifier.status == "skipped", (
-        f"expected skipped, got {report.verifier.status}"
-    )
+    assert report.verifier.status == "skipped", f"expected skipped, got {report.verifier.status}"
     assert any(w == "verifier-skipped" for w in report.warnings), (
         f"expected 'verifier-skipped' in warnings; got {report.warnings}"
     )
@@ -213,16 +211,16 @@ def test_worker_warnings_propagate_to_report_serial() -> None:
     _, report = compress(
         pdf_in,
         options=CompressOptions(
-            force_monochrome=True, skip_verify=True, max_workers=1,
+            force_monochrome=True,
+            skip_verify=True,
+            max_workers=1,
         ),
     )
     combined = " ".join(report.warnings)
     assert (
         "force-monochrome-discarded-color" in combined
         or "color-detected-in-monochrome-mode" in combined
-    ), (
-        f"expected a force-monochrome color warning; got {report.warnings!r}"
-    )
+    ), f"expected a force-monochrome color warning; got {report.warnings!r}"
 
 
 def test_worker_warnings_propagate_to_report_parallel() -> None:
@@ -241,17 +239,16 @@ def test_worker_warnings_propagate_to_report_parallel() -> None:
     _, report = compress(
         two_page,
         options=CompressOptions(
-            force_monochrome=True, skip_verify=True, max_workers=2,
+            force_monochrome=True,
+            skip_verify=True,
+            max_workers=2,
         ),
     )
     combined = " ".join(report.warnings)
     assert (
         "force-monochrome-discarded-color" in combined
         or "color-detected-in-monochrome-mode" in combined
-    ), (
-        f"expected a force-monochrome color warning from workers; "
-        f"got {report.warnings!r}"
-    )
+    ), f"expected a force-monochrome color warning from workers; got {report.warnings!r}"
 
 
 def test_verifier_fail_warning_code_is_normalized() -> None:
@@ -328,6 +325,5 @@ def test_progress_event_verifier_passed_is_none_when_skipped() -> None:
     assert page_done, "expected at least one page_done event"
     for e in page_done:
         assert e.verifier_passed is None, (
-            f"expected verifier_passed=None under skip_verify, got "
-            f"{e.verifier_passed!r}"
+            f"expected verifier_passed=None under skip_verify, got {e.verifier_passed!r}"
         )

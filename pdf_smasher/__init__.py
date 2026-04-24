@@ -533,8 +533,8 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
 
             verdict = _PageVerdict(
                 page_index=-1,
-                passed=True,           # don't add to failing_pages
-                lev=1.0,               # sentinel: max drift
+                passed=True,  # don't add to failing_pages
+                lev=1.0,  # sentinel: max drift
                 ssim_global=0.0,
                 ssim_tile_min=0.0,
                 digits_match=False,
@@ -575,7 +575,8 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             per_page_input_estimate = raster.width * raster.height * 3
             per_page_pixel_ratio = per_page_input_estimate / max(1, len(composed))
             anomalous = (
-                per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD and strategy != PageStrategy.TEXT_ONLY
+                per_page_pixel_ratio > _ANOMALY_RATIO_THRESHOLD
+                and strategy != PageStrategy.TEXT_ONLY
             )
             if strategy == PageStrategy.MIXED:
                 page_tile_ssim_floor = (
@@ -704,10 +705,7 @@ def compress(
             return
         elapsed = time.monotonic() - t0
         if elapsed > budget:
-            msg = (
-                f"total_timeout_seconds={budget} exceeded after {phase}: "
-                f"{elapsed:.2f}s elapsed"
-            )
+            msg = f"total_timeout_seconds={budget} exceeded after {phase}: {elapsed:.2f}s elapsed"
             raise TotalTimeoutError(msg)
 
     def _emit(
@@ -800,9 +798,7 @@ def compress(
     input_mb = len(input_data) / (1024 * 1024)
     if options.min_input_mb > 0 and input_mb < options.min_input_mb:
         wall_ms = int((time.monotonic() - t0) * 1000)
-        reason = (
-            f"input {input_mb:.3f} MB below min_input_mb={options.min_input_mb} MB"
-        )
+        reason = f"input {input_mb:.3f} MB below min_input_mb={options.min_input_mb} MB"
         return input_data, _build_passthrough_report(
             input_data,
             pages=tri.pages,
@@ -1041,9 +1037,7 @@ def compress(
             except FuturesTimeoutError as e:
                 ex.shutdown(wait=False, cancel_futures=True)
                 _pending = [
-                    fw.page_index + 1
-                    for fut, fw in future_to_winput.items()
-                    if not fut.done()
+                    fw.page_index + 1 for fut, fw in future_to_winput.items() if not fut.done()
                 ]
                 _pending_display = _format_verifier_failing_pages(
                     tuple(_pending),

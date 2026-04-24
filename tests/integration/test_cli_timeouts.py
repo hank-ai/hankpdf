@@ -20,7 +20,8 @@ from pdf_smasher.cli.main import main
 
 
 @pytest.mark.parametrize(
-    "flag", ["--per-page-timeout-seconds", "--total-timeout-seconds"],
+    "flag",
+    ["--per-page-timeout-seconds", "--total-timeout-seconds"],
 )
 @pytest.mark.parametrize("bad", ["0", "-1", "-100"])
 def test_timeout_flag_rejects_non_positive(flag: str, bad: str) -> None:
@@ -32,7 +33,8 @@ def test_timeout_flag_rejects_non_positive(flag: str, bad: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "flag", ["--per-page-timeout-seconds", "--total-timeout-seconds"],
+    "flag",
+    ["--per-page-timeout-seconds", "--total-timeout-seconds"],
 )
 def test_timeout_flag_rejects_non_integer(flag: str) -> None:
     """Argparse must reject non-integer values (e.g., floats) with SystemExit(2)."""
@@ -50,11 +52,16 @@ def test_timeout_flags_accept_positive_int() -> None:
     """
     from pdf_smasher.cli.main import _parser
 
-    ns = _parser().parse_args([
-        "/dev/null",
-        "-o", "/tmp/nope.pdf",
-        "--per-page-timeout-seconds", "60",
-        "--total-timeout-seconds", "600",
-    ])
+    ns = _parser().parse_args(
+        [
+            "/dev/null",
+            "-o",
+            "/tmp/nope.pdf",
+            "--per-page-timeout-seconds",
+            "60",
+            "--total-timeout-seconds",
+            "600",
+        ]
+    )
     assert ns.per_page_timeout_seconds == 60
     assert ns.total_timeout_seconds == 600

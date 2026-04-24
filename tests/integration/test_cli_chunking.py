@@ -37,13 +37,18 @@ def test_chunked_output_uses_zero_padded_1_indexed_names(tmp_path) -> None:  # t
     """
     in_path = _make_big_pdf(tmp_path, n_pages=4)
     out_path = tmp_path / "smol.pdf"
-    rc = main([
-        str(in_path),
-        "-o", str(out_path),
-        "--max-output-mb", "0.005",
-        "--accept-drift",
-        "--min-ratio", "0",  # blank-PDF test fixtures compress <1.5x
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "0.005",
+            "--accept-drift",
+            "--min-ratio",
+            "0",  # blank-PDF test fixtures compress <1.5x
+        ]
+    )
     assert rc == 0, f"expected EXIT_OK=0, got {rc}"
     chunks = sorted(tmp_path.glob("smol_*.pdf"))
     assert len(chunks) >= 2, f"expected chunking; got {chunks}"
@@ -53,9 +58,7 @@ def test_chunked_output_uses_zero_padded_1_indexed_names(tmp_path) -> None:  # t
         assert suffix_chunk.isdigit(), f"expected numeric suffix, got {stem}"
         assert len(suffix_chunk) == 3, f"expected 3-digit zero-pad, got {stem}"
     first_chunks = [p for p in chunks if p.stem.endswith("_001")]
-    assert len(first_chunks) == 1, (
-        f"expected one _001 chunk; got chunks={chunks}"
-    )
+    assert len(first_chunks) == 1, f"expected one _001 chunk; got chunks={chunks}"
 
 
 @pytest.mark.integration
@@ -66,18 +69,21 @@ def test_chunked_output_warns_on_stale_siblings(tmp_path, capsys) -> None:  # ty
     in_path = _make_big_pdf(tmp_path, n_pages=3)
     (tmp_path / "smol_099.pdf").write_bytes(b"stale data")
     out_path = tmp_path / "smol.pdf"
-    rc = main([
-        str(in_path),
-        "-o", str(out_path),
-        "--max-output-mb", "0.005",
-        "--accept-drift",
-        "--min-ratio", "0",  # blank-PDF test fixtures compress <1.5x
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "0.005",
+            "--accept-drift",
+            "--min-ratio",
+            "0",  # blank-PDF test fixtures compress <1.5x
+        ]
+    )
     assert rc == 0
     err = capsys.readouterr().err
-    assert "stale" in err.lower(), (
-        f"expected 'stale' in stderr warning; got: {err!r}"
-    )
+    assert "stale" in err.lower(), f"expected 'stale' in stderr warning; got: {err!r}"
 
 
 @pytest.mark.integration
@@ -147,18 +153,25 @@ def test_chunk_pad_width_scales_beyond_999(tmp_path, monkeypatch) -> None:  # ty
     # Avoid interfering with chunking.split_pdf_by_size's other callers;
     # cli_main holds the direct reference used in main().
 
-    rc = main([
-        str(in_path),
-        "-o", str(out_path),
-        "--max-output-mb", "0.1",
-        "--accept-drift",
-        "--min-ratio", "0",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "0.1",
+            "--accept-drift",
+            "--min-ratio",
+            "0",
+        ]
+    )
     assert rc == 0
     # Expect 4-digit padded names (len(str(1200))==4): smol_0001.pdf ... smol_1200.pdf
     first = tmp_path / "smol_0001.pdf"
     last = tmp_path / "smol_1200.pdf"
-    assert first.exists(), f"expected zero-padded 4-digit names; listing: {sorted(p.name for p in tmp_path.iterdir())[:5]}"
+    assert first.exists(), (
+        f"expected zero-padded 4-digit names; listing: {sorted(p.name for p in tmp_path.iterdir())[:5]}"
+    )
     assert last.exists()
 
 
@@ -173,18 +186,21 @@ def test_single_chunk_oversize_warns(tmp_path, capsys) -> None:  # type: ignore[
     out_path = tmp_path / "smol.pdf"
     # 0.001 MB = 1024 bytes. A compressed single page is ~15 KB, so the
     # single chunk will exceed the cap.
-    rc = main([
-        str(in_path),
-        "-o", str(out_path),
-        "--max-output-mb", "0.001",
-        "--accept-drift",
-        "--min-ratio", "0",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "0.001",
+            "--accept-drift",
+            "--min-ratio",
+            "0",
+        ]
+    )
     assert rc == 0, f"expected EXIT_OK=0, got {rc}"
     err = capsys.readouterr().err
-    assert "--max-output-mb" in err, (
-        f"expected --max-output-mb in warning; got: {err!r}"
-    )
+    assert "--max-output-mb" in err, f"expected --max-output-mb in warning; got: {err!r}"
     assert "exceed" in err.lower() or "over" in err.lower(), (
         f"expected 'exceed' or 'over' in warning; got: {err!r}"
     )

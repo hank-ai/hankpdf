@@ -39,9 +39,7 @@ def test_stderr_warning_lines_include_redacted_input_name(
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err
     tag = redact_filename(in_path)
-    assert tag in err, (
-        f"expected redacted filename {tag!r} in stderr; got:\n{err}"
-    )
+    assert tag in err, f"expected redacted filename {tag!r} in stderr; got:\n{err}"
     # Must appear specifically on the W-VERIFIER-SKIPPED warning line.
     lines = [ln for ln in err.splitlines() if "[W-VERIFIER-SKIPPED]" in ln]
     assert lines, "no verifier-skipped line in stderr"
@@ -90,12 +88,11 @@ def test_stderr_stdin_input_has_plain_prefix(
     _inner = type("_I", (), {"read": lambda self: in_path.read_bytes()})()
 
     import sys as _sys
+
     monkeypatch.setattr(_sys, "stdin", _StdinBytes())  # type: ignore[arg-type]
 
     rc = main(["-", "-o", str(out_path)])
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err
     # No empty hash pattern like "[hankpdf] …:" with an empty middle.
-    assert "[hankpdf] :" not in err, (
-        f"stdin input produced empty hash; stderr:\n{err}"
-    )
+    assert "[hankpdf] :" not in err, f"stdin input produced empty hash; stderr:\n{err}"

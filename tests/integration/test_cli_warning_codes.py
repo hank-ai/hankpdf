@@ -28,15 +28,11 @@ def _make_pdf(tmp_path, n_pages: int = 2):  # type: ignore[no-untyped-def]
 
 
 def _assert_code(code: CliWarningCode, text: str) -> None:
-    assert f"[{code}]" in text, (
-        f"expected stable code [{code}] in stderr; got:\n{text}"
-    )
+    assert f"[{code}]" in text, f"expected stable code [{code}] in stderr; got:\n{text}"
 
 
 def _assert_error_code(code: CliErrorCode, text: str) -> None:
-    assert f"[{code}]" in text, (
-        f"expected stable error code [{code}] in stderr; got:\n{text}"
-    )
+    assert f"[{code}]" in text, f"expected stable error code [{code}] in stderr; got:\n{text}"
 
 
 @pytest.mark.integration
@@ -44,10 +40,15 @@ def test_w_max_output_mb_image_mode(tmp_path, capsys) -> None:  # type: ignore[n
     """--max-output-mb + image format → W-MAX-OUTPUT-MB-IMAGE-MODE."""
     in_path = _make_pdf(tmp_path, n_pages=1)
     out_path = tmp_path / "out.jpg"
-    rc = main([
-        str(in_path), "-o", str(out_path),
-        "--max-output-mb", "1",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "1",
+        ]
+    )
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err
     _assert_code("W-MAX-OUTPUT-MB-IMAGE-MODE", err)
@@ -58,10 +59,15 @@ def test_w_output_format_extension_override(tmp_path, capsys) -> None:  # type: 
     """--output-format contradicts -o extension → W-OUTPUT-FORMAT-EXTENSION-OVERRIDE."""
     in_path = _make_pdf(tmp_path, n_pages=1)
     out_path = tmp_path / "out.pdf"
-    rc = main([
-        str(in_path), "-o", str(out_path),
-        "--output-format", "jpeg",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--output-format",
+            "jpeg",
+        ]
+    )
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err
     _assert_code("W-OUTPUT-FORMAT-EXTENSION-OVERRIDE", err)
@@ -74,19 +80,25 @@ def test_w_chunks_exceed_cap(tmp_path, capsys) -> None:  # type: ignore[no-untyp
     # most (or all) exceed the cap since realistic pages are ~5-15 KB.
     in_path = _make_pdf(tmp_path, n_pages=3)
     out_path = tmp_path / "smol.pdf"
-    rc = main([
-        str(in_path), "-o", str(out_path),
-        "--max-output-mb", "0.005",
-        "--accept-drift",
-        "--min-ratio", "0",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "0.005",
+            "--accept-drift",
+            "--min-ratio",
+            "0",
+        ]
+    )
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err
     # This combo reliably fires both the per-chunk exceed warning (multi-chunk)
     # or the single-chunk oversize warning. Accept either.
-    assert (
-        "[W-CHUNKS-EXCEED-CAP]" in err or "[W-SINGLE-CHUNK-OVERSIZE]" in err
-    ), f"expected a chunk-cap code; got:\n{err}"
+    assert "[W-CHUNKS-EXCEED-CAP]" in err or "[W-SINGLE-CHUNK-OVERSIZE]" in err, (
+        f"expected a chunk-cap code; got:\n{err}"
+    )
 
 
 @pytest.mark.integration
@@ -97,12 +109,18 @@ def test_w_stale_chunk_files(tmp_path, capsys) -> None:  # type: ignore[no-untyp
     # Seed a stale file with a high index (> any new chunk count).
     stale = tmp_path / "smol_099.pdf"
     stale.write_bytes(b"%PDF-1.7\n%stale\n")
-    rc = main([
-        str(in_path), "-o", str(out_path),
-        "--max-output-mb", "0.005",
-        "--accept-drift",
-        "--min-ratio", "0",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "0.005",
+            "--accept-drift",
+            "--min-ratio",
+            "0",
+        ]
+    )
     assert rc == 0, f"rc={rc}"
     err = capsys.readouterr().err
     _assert_code("W-STALE-CHUNK-FILES", err)
@@ -139,10 +157,15 @@ def test_w_max_output_mb_stdout(tmp_path, monkeypatch) -> None:  # type: ignore[
     monkeypatch.setattr(_sys, "stdout", _FakeStdout())  # type: ignore[arg-type]
     monkeypatch.setattr(_sys, "stderr", fake_stderr)
     try:
-        rc = main([
-            str(in_path), "-o", "-",
-            "--max-output-mb", "0.000001",  # ensures output exceeds cap
-        ])
+        rc = main(
+            [
+                str(in_path),
+                "-o",
+                "-",
+                "--max-output-mb",
+                "0.000001",  # ensures output exceeds cap
+            ]
+        )
     finally:
         _sys.stdout = real_stdout
         _sys.stderr = real_stderr
@@ -192,10 +215,15 @@ def test_e_input_oversize_code(tmp_path, capsys) -> None:  # type: ignore[no-unt
     pdf.save(in_path)
     out_path = tmp_path / "out.pdf"
     # Set a tiny max to guarantee a refusal.
-    rc = main([
-        str(in_path), "-o", str(out_path),
-        "--max-input-mb", "0.0001",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-input-mb",
+            "0.0001",
+        ]
+    )
     assert rc == 12, f"expected EXIT_OVERSIZE=12, got {rc}"
     err = capsys.readouterr().err
     _assert_error_code("E-INPUT-OVERSIZE", err)

@@ -44,6 +44,5 @@ def test_pil_max_image_pixels_is_set_on_import() -> None:
     # _MAX_BOMB_PIXELS). Keep this exact so docs stay accurate.
     expected = 2 * 1024 * 1024 * 1024 // 3  # ~715 Mpx, matches _MAX_BOMB_PIXELS
     assert expected == PIL.Image.MAX_IMAGE_PIXELS, (
-        f"expected MAX_IMAGE_PIXELS={expected:,} (~715 Mpx); "
-        f"got {PIL.Image.MAX_IMAGE_PIXELS!r}"
+        f"expected MAX_IMAGE_PIXELS={expected:,} (~715 Mpx); got {PIL.Image.MAX_IMAGE_PIXELS!r}"
     )

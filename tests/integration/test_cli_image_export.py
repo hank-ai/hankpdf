@@ -64,7 +64,8 @@ def test_image_export_refuses_signed_pdf(tmp_path) -> None:  # type: ignore[no-u
     pdf = pikepdf.new()
     pdf.add_blank_page(page_size=(612, 792))
     pdf.Root["/AcroForm"] = pikepdf.Dictionary(
-        SigFlags=3, Fields=pikepdf.Array([]),
+        SigFlags=3,
+        Fields=pikepdf.Array([]),
     )
     in_path = tmp_path / "signed.pdf"
     pdf.save(in_path)
@@ -116,19 +117,19 @@ def test_image_export_warns_on_max_output_mb(tmp_path, capsys) -> None:  # type:
     warning so the user knows their cap isn't honored."""
     in_path = _make_pdf(tmp_path, n_pages=1)
     out_path = tmp_path / "out.jpg"
-    rc = main([
-        str(in_path),
-        "-o", str(out_path),
-        "--max-output-mb", "5",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "5",
+        ]
+    )
     assert rc == 0
     err = capsys.readouterr().err
-    assert "--max-output-mb" in err, (
-        f"expected '--max-output-mb' in stderr; got: {err!r}"
-    )
-    assert "image" in err.lower(), (
-        f"expected 'image' in stderr warning; got: {err!r}"
-    )
+    assert "--max-output-mb" in err, f"expected '--max-output-mb' in stderr; got: {err!r}"
+    assert "image" in err.lower(), f"expected 'image' in stderr warning; got: {err!r}"
 
 
 @pytest.mark.integration
@@ -144,11 +145,15 @@ def test_output_format_suffix_mismatch_warns(tmp_path, capsys) -> None:  # type:
     neutral_dir = tmp_path / "neutral"
     neutral_dir.mkdir()
     out_path = neutral_dir / "out.pdf"
-    rc = main([
-        str(in_path),
-        "-o", str(out_path),
-        "--output-format", "jpeg",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--output-format",
+            "jpeg",
+        ]
+    )
     assert rc == 0
     err = capsys.readouterr().err
     assert "extension" in err.lower() or "overrides" in err.lower(), (
@@ -170,9 +175,7 @@ def test_output_format_override_corrects_extension(tmp_path) -> None:  # type: i
         f"should not have written .jpeg when format is png; found: {out_path}"
     )
     actual = tmp_path / "out.png"
-    assert actual.exists(), (
-        f"expected out.png to exist; got: {list(tmp_path.iterdir())}"
-    )
+    assert actual.exists(), f"expected out.png to exist; got: {list(tmp_path.iterdir())}"
     assert actual.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", "must be PNG bytes"
 
 
@@ -273,6 +276,7 @@ def test_image_export_partial_failure_emits_summary(tmp_path, capsys, monkeypatc
 
     # Monkeypatch rasterize_page to fail on page index 2 (1-indexed page 3).
     original = ie.rasterize_page
+
     def flaky(pdf_bytes, *, page_index, dpi):  # type: ignore[no-untyped-def]
         if page_index == 2:
             msg = "synthetic pdfium failure on page 3"
@@ -301,11 +305,15 @@ def test_output_format_override_corrects_extension_multipage(tmp_path) -> None: 
     out_003.webp — not .jpg."""
     in_path = _make_pdf(tmp_path, n_pages=3)
     out_path = tmp_path / "out.jpg"
-    rc = main([
-        str(in_path),
-        "-o", str(out_path),
-        "--output-format", "webp",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--output-format",
+            "webp",
+        ]
+    )
     assert rc == 0
     jpgs = sorted(tmp_path.glob("out_*.jpg"))
     assert not jpgs, f"no .jpg files should exist; got {jpgs}"

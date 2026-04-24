@@ -60,12 +60,18 @@ def test_chunk_write_failure_leaves_no_partial_final_file(
 
     monkeypatch.setattr(pathlib.Path, "write_bytes", flaky)
 
-    rc = main([
-        str(in_path), "-o", str(out_path),
-        "--max-output-mb", "0.005",
-        "--accept-drift",
-        "--min-ratio", "0",
-    ])
+    rc = main(
+        [
+            str(in_path),
+            "-o",
+            str(out_path),
+            "--max-output-mb",
+            "0.005",
+            "--accept-drift",
+            "--min-ratio",
+            "0",
+        ]
+    )
     # We forced an OSError → CLI returns EXIT_ENGINE_ERROR.
     assert rc != 0, f"expected non-zero rc on synthetic OSError; got {rc}"
 
@@ -73,9 +79,7 @@ def test_chunk_write_failure_leaves_no_partial_final_file(
     # a COMPLETE chunk. Truncated partials live under `.partial`.
     final_files = sorted(tmp_path.glob("smol_*.pdf"))
     for p in final_files:
-        assert p.stat().st_size > 0, (
-            f"final-named file {p} is empty — atomic invariant violated"
-        )
+        assert p.stat().st_size > 0, f"final-named file {p} is empty — atomic invariant violated"
     # No {base}_NNN.pdf file for the chunk that failed should exist at
     # its final name (atomic replace wasn't reached).
     # The atomic helper's .partial file may or may not remain on disk
@@ -109,14 +113,18 @@ def test_image_export_partial_write_is_atomic(
 
     # Force multi-page so the helper is hit multiple times.
     with pytest.raises(OSError, match=r"disk-full"):
-        main([
-            str(in_path), "-o", str(out_path),
-            "--output-format", "jpeg",
-            "--image-dpi", "72",
-        ])
+        main(
+            [
+                str(in_path),
+                "-o",
+                str(out_path),
+                "--output-format",
+                "jpeg",
+                "--image-dpi",
+                "72",
+            ]
+        )
 
     final_files = sorted(tmp_path.glob("page_*.jpg"))
     for p in final_files:
-        assert p.stat().st_size > 0, (
-            f"final-named image {p} is empty — atomic invariant violated"
-        )
+        assert p.stat().st_size > 0, f"final-named image {p} is empty — atomic invariant violated"
