@@ -60,7 +60,8 @@ jobs:
             mingw-w64-x86_64-libpng
             mingw-w64-x86_64-libjpeg-turbo
             mingw-w64-x86_64-libwebp
-            mingw-w64-x86_64-zip
+            zip
+            unzip
 
       - name: Clone jbig2enc at pinned commit
         run: |
