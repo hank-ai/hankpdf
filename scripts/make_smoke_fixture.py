@@ -110,7 +110,7 @@ def generate_text_heavy(target: pathlib.Path) -> int:
 
     We use pikepdf rather than PIL's save(..., format="PDF") because
     Pillow picks DCT (JPEG) compression by default, which pre-shrinks
-    the raster to the point that MRC can only squeeze another 1.5–2x
+    the raster to the point that MRC can only squeeze another 1.5-2x
     out of it. An uncompressed input is what a typical scanner
     produces before anyone's touched it.
     """
