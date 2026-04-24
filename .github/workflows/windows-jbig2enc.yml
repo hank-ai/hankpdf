@@ -57,6 +57,8 @@ jobs:
     steps:
       - name: Checkout (workflow file only)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
 
       - name: Read pinned versions from .github/versions.json
         shell: pwsh
@@ -432,6 +434,8 @@ jobs:
     steps:
       - name: Checkout (for JBIG2ENC_COMMIT lookup in release body)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
       - name: Read pinned JBIG2ENC_COMMIT
         id: versions
         run: |
