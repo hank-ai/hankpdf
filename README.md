@@ -91,12 +91,19 @@ Zero host setup. Works on macOS, Linux, and Windows with Docker Desktop.
 
 ```bash
 docker pull ghcr.io/hank-ai/hankpdf:latest
+
+# macOS / Windows (Docker Desktop handles uid mapping):
 docker run --rm -v "$PWD:/data" ghcr.io/hank-ai/hankpdf:latest \
+    /data/in.pdf -o /data/out.pdf
+
+# Linux (pass -u so the container can write to your bind mount):
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/data" \
+    ghcr.io/hank-ai/hankpdf:latest \
     /data/in.pdf -o /data/out.pdf
 ```
 
-See [docker/README.md](docker/README.md) for tag semantics and local-build
-instructions.
+See [docker/README.md](docker/README.md) for tag semantics, uid
+rationale, and local-build instructions.
 
 ### Manual setup — macOS
 
