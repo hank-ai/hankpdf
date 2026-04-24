@@ -13,11 +13,18 @@
 # Base image pinned by digest for reproducibility (supply-chain hygiene).
 # Both stages MUST share the same digest so the runtime libc matches what we
 # linked jbig2 against. Regenerate via:
-#   docker pull python:3.14-slim-bookworm && \
-#     docker inspect --format='{{index .RepoDigests 0}}' python:3.14-slim-bookworm
+#   docker pull python:3.14-slim-trixie && \
+#     docker inspect --format='{{index .RepoDigests 0}}' python:3.14-slim-trixie
 # or via the registry HTTP API; Dependabot's `docker` ecosystem will also
 # propose bumps when a new sha appears.
-FROM python:3.14-slim-bookworm@sha256:2e256d0381371566ed96980584957ed31297f437569b79b0e5f7e17f2720e53a AS builder
+#
+# Switched from slim-bookworm to slim-trixie in Wave 5: bookworm ships
+# qpdf 11.3.0, which has qpdf #1050 — a silent character-drop bug in
+# 11.0.0–11.6.2 affecting /ID, XMP in encrypted files, bookmark names,
+# form-field values, and encryption keys. SECURITY.md and docs/ROADMAP.md
+# mandate qpdf >= 11.6.3; trixie ships qpdf 12.2.0. The build-time assert
+# in the runtime stage fails the image build if the floor ever regresses.
+FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential autoconf automake libtool pkg-config \
@@ -43,7 +50,7 @@ RUN git clone https://github.com/agl/jbig2enc.git /src/jbig2enc \
 # -----------------------------------------------------------------------------
 # Same base + digest as the builder — see note above. If you regenerate the
 # digest, update BOTH FROM lines in lockstep.
-FROM python:3.14-slim-bookworm@sha256:2e256d0381371566ed96980584957ed31297f437569b79b0e5f7e17f2720e53a AS runtime
+FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033 AS runtime
 
 ARG HANKPDF_VERSION=0.0.0
 
@@ -59,9 +66,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Runtime-only deps (no -dev packages, no compilers).
-# libleptonica-dev is kept because bookworm does not ship a standalone
+# libleptonica-dev is kept because Debian does not ship a standalone
 # libleptonica runtime package; the dev metapackage pulls in libleptonica6
 # without the bulk of build headers being used at runtime.
+#
+# Trixie still ships libtiff6 / libwebp7 / libjpeg62-turbo under the same
+# names as bookworm. If any of these names drifts in a future release,
+# apt's "unable to locate" error will be explicit and greppable.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr tesseract-ocr-eng \
         qpdf \
@@ -69,6 +80,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpng16-16 libjpeg62-turbo libtiff6 libwebp7 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# qpdf version floor (SECURITY.md + docs/ROADMAP.md): pre-11.6.3 has a
+# silent character-drop bug (qpdf #1050) affecting /ID, XMP in encrypted
+# files, bookmark names, form fields, and encryption keys. Fail the build
+# if the installed qpdf ever regresses below the floor — far cheaper to
+# catch in CI than in production on a signed document. The regex allows
+# qpdf >= 11.6.3 (any 11.6.x where x>=3, any 11.7+, any 11.10+, any 12+).
+RUN qpdf --version | head -1 | grep -qE '^qpdf version (1[2-9]|11\.(6\.[3-9]|6\.[1-9][0-9]+|[7-9]|1[0-9]+))' \
+    || (echo "FATAL: qpdf floor >= 11.6.3 violated. See SECURITY.md / qpdf #1050." >&2; \
+        qpdf --version >&2; exit 1)
 
 # Copy the vendored jbig2 binary from the builder stage.
 COPY --from=builder /usr/local/bin/jbig2 /usr/local/bin/jbig2
