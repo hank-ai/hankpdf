@@ -60,12 +60,12 @@ Option B — **use Docker Desktop instead**. Simpler on Windows.
 Zero host setup. All native deps baked in.
 
 ```bash
-docker pull ghcr.io/ourorg/pdf-smasher:latest
+docker pull ghcr.io/hank-ai/hankpdf:latest
 
 docker run --rm \
   -v "$PWD:/data" \
   --user "$(id -u):$(id -g)" \
-  ghcr.io/ourorg/pdf-smasher:latest \
+  ghcr.io/hank-ai/hankpdf:latest \
   /data/input.pdf -o /data/output.pdf
 ```
 
@@ -78,7 +78,7 @@ docker run --rm \
   --tmpfs /tmp:rw,size=4g \
   -v "$PWD:/data" \
   --user "$(id -u):$(id -g)" \
-  ghcr.io/ourorg/pdf-smasher:latest \
+  ghcr.io/hank-ai/hankpdf:latest \
   /data/input.pdf -o /data/output.pdf
 ```
 
@@ -97,7 +97,7 @@ If anything is missing or out of date, `--doctor` exits 41 with a specific remed
 ```bash
 pip install -U pdf-smasher
 # or for Docker:
-docker pull ghcr.io/ourorg/pdf-smasher:latest
+docker pull ghcr.io/hank-ai/hankpdf:latest
 ```
 
 No auto-update mechanism. You control when to upgrade.
