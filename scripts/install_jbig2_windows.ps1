@@ -22,8 +22,9 @@
     "latest" which resolves via the GitHub API.
 
 .EXAMPLE
-    # One-liner install from the repo (recommended):
-    irm https://raw.githubusercontent.com/hank-ai/hankpdf/main/scripts/install_jbig2_windows.ps1 | iex
+    # One-liner install from a TAGGED release (recommended):
+    # main is a mutable branch — pin to a specific release tag.
+    irm https://github.com/hank-ai/hankpdf/releases/download/jbig2-windows-v0.1.0/install_jbig2_windows.ps1 | iex
 
 .EXAMPLE
     # Offline / manual install:
