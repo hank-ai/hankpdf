@@ -208,3 +208,39 @@ jobs:
               exit 1
           fi
           echo "ratio >= 2x OK"
+
+      - name: Smoke test (uid-mismatch — entrypoint hint path, E1)
+        if: github.event_name != 'pull_request'
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          # Runs WITHOUT --user override so the container is uid 1000
+          # (image default) while the bind mount is owned by the
+          # runner's uid. The entrypoint wrapper (E1) must detect
+          # this, print a clear hint, and exit 2 — NOT crash with a
+          # raw EACCES from pikepdf/pdfium deep in the engine.
+          SHORT_SHA="${GITHUB_SHA::7}"
+          mkdir -p "${WORKSPACE}/tests/fixtures/uid-mismatch-dir"
+          # Chmod so only the runner uid can write; uid 1000 will be
+          # refused.
+          chmod 700 "${WORKSPACE}/tests/fixtures/uid-mismatch-dir"
+          set +e
+          OUTPUT=$(docker run --rm \
+              -v "${WORKSPACE}/tests/fixtures/uid-mismatch-dir:/data" \
+              "ghcr.io/hank-ai/hankpdf:sha-${SHORT_SHA}" \
+              /data/placeholder.pdf -o /data/out.pdf 2>&1)
+          RC=$?
+          set -e
+          echo "exit code: ${RC}"
+          echo "output:"
+          echo "${OUTPUT}"
+          # Entrypoint-detected mismatch must exit 2 and include a hint.
+          if [ "${RC}" != "2" ]; then
+              echo "::error::uid-mismatch path did NOT exit 2 as expected (got ${RC}); E1 entrypoint wrapper regression?"
+              exit 1
+          fi
+          if ! echo "${OUTPUT}" | grep -q -- "--user"; then
+              echo "::error::uid-mismatch error did not mention --user hint; E1 entrypoint wrapper regression?"
+              exit 1
+          fi
+          echo "uid-mismatch entrypoint hint OK"
