@@ -57,17 +57,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate smoke fixture
+      - name: Generate smoke fixtures
         run: |
-          python3 -m pip install --quiet pikepdf
-          python3 - <<'PY'
-          import pathlib
-          import pikepdf
-          pathlib.Path("tests/fixtures").mkdir(parents=True, exist_ok=True)
-          pdf = pikepdf.new()
-          pdf.add_blank_page(page_size=(612, 792))
-          pdf.save("tests/fixtures/smoke.pdf")
-          PY
+          # Generates both smoke.pdf (blank, used for the version path)
+          # and smoke_text.pdf (rendered-text, exercises the MRC/jbig2
+          # compression pipeline). The text fixture must compress
+          # >2x or the smoke test fails — catches regressions in the
+          # mask/foreground/JBIG2 pipeline end to end.
+          python3 -m pip install --quiet pikepdf pillow
+          python3 scripts/make_smoke_fixture.py
 
       - name: Metadata
         id: meta
@@ -168,7 +166,7 @@ jobs:
           docker pull "ghcr.io/hank-ai/hankpdf:sha-${SHORT_SHA}"
           docker run --rm "ghcr.io/hank-ai/hankpdf:sha-${SHORT_SHA}" --version
 
-      - name: Smoke test (compress)
+      - name: Smoke test (compress blank fixture — uid-matched)
         if: github.event_name != 'pull_request'
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -183,3 +181,30 @@ jobs:
               "ghcr.io/hank-ai/hankpdf:sha-${SHORT_SHA}" \
               /data/smoke.pdf -o /data/smoke_out.pdf
           test -s tests/fixtures/smoke_out.pdf
+
+      - name: Smoke test (compress text fixture — assert ratio > 2x)
+        if: github.event_name != 'pull_request'
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          # Text fixture exercises the full MRC pipeline: mask + JBIG2
+          # on the foreground, FlateDecode on the background. A
+          # regression in any of those paths drops the ratio below 2x.
+          docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -v "${WORKSPACE}/tests/fixtures:/data" \
+              "ghcr.io/hank-ai/hankpdf:sha-${SHORT_SHA}" \
+              /data/smoke_text.pdf -o /data/smoke_text_out.pdf
+          test -s tests/fixtures/smoke_text_out.pdf
+
+          IN_SIZE=$(stat -c%s tests/fixtures/smoke_text.pdf)
+          OUT_SIZE=$(stat -c%s tests/fixtures/smoke_text_out.pdf)
+          echo "input:  ${IN_SIZE} bytes"
+          echo "output: ${OUT_SIZE} bytes"
+          # Bash integer math for ratio check; *100 so we compare ints.
+          if [ "$((IN_SIZE * 100))" -lt "$((OUT_SIZE * 200))" ]; then
+              echo "::error::MRC smoke fixture compressed below 2x (in=${IN_SIZE}, out=${OUT_SIZE}); jbig2/mask/foreground regression suspected"
+              exit 1
+          fi
+          echo "ratio >= 2x OK"
