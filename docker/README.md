@@ -47,6 +47,33 @@ osxfs/virtiofs/WSL, so `-u` is unnecessary there.
 - `:vX.Y.Z` — released versions
 - `:sha-<short>` — specific commit
 
+## Verifying the image
+
+Every pushed image is signed with cosign (keyless, via GitHub's OIDC issuer)
+and carries a SLSA v1 build-provenance attestation. Verify before running
+in production:
+
+```bash
+# Requires cosign >= 2.0 (https://docs.sigstore.dev/cosign/installation/).
+cosign verify ghcr.io/hank-ai/hankpdf:latest \
+    --certificate-identity-regexp 'https://github\.com/hank-ai/hankpdf/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Verify the SLSA provenance attestation:
+
+```bash
+gh attestation verify oci://ghcr.io/hank-ai/hankpdf:latest \
+    --owner hank-ai
+```
+
+Inspect the SBOM (ships as an attestation on the image manifest):
+
+```bash
+docker buildx imagetools inspect ghcr.io/hank-ai/hankpdf:latest \
+    --format "{{ json .SBOM }}"
+```
+
 ## Build locally
 
 ```bash
