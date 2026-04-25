@@ -22,6 +22,7 @@ Expect 245 passed. This is the green baseline.
 
 **Create:**
 - `pdf_smasher/engine/_render_safety.py` — shared `check_render_size()`
+- `tests/unit/engine/__init__.py` (only if missing)
 - `tests/unit/engine/test_render_safety.py`
 - `tests/unit/engine/test_password_plumbing.py`
 - `tests/unit/test_atomic_nofollow.py`
@@ -34,19 +35,22 @@ Expect 245 passed. This is the green baseline.
 - `.github/ISSUE_TEMPLATE/config.yml`
 - `.github/PULL_REQUEST_TEMPLATE.md`
 - `CODE_OF_CONDUCT.md`
+- `CHANGELOG.md`
 
 **Modify:**
-- `pyproject.toml`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/TROUBLESHOOTING.md`, `SECURITY.md`, `CONTRIBUTING.md`, `README.md`, `.gitignore`, `.github/dependabot.yml`
+- `pyproject.toml`, `docs/ARCHITECTURE.md` (URL fix + render-safety section), `docs/ROADMAP.md`, `docs/TROUBLESHOOTING.md`, `SECURITY.md`, `CONTRIBUTING.md`, `README.md`, `.gitignore`, `.github/dependabot.yml`
 - `tests/STRATEGY.md`, `scripts/fetch_corpus.py`
-- `pdf_smasher/types.py` (defaults)
-- `pdf_smasher/cli/main.py` (defaults, password file read, stat-before-read)
-- `pdf_smasher/__init__.py` (password threading)
-- `pdf_smasher/engine/triage.py` (password kwarg, depth-cap fail-closed)
-- `pdf_smasher/engine/rasterize.py` (use `_render_safety`, accept password)
-- `pdf_smasher/engine/image_export.py` (use `_render_safety`, accept password)
+- `tests/unit/test_types.py` (assert tightened defaults)
+- `pdf_smasher/types.py` (defaults; `max_pages: int | None = 10000`)
+- `pdf_smasher/cli/main.py` (defaults, password file read, stat-before-read in `else:` branch)
+- `pdf_smasher/__init__.py` (password threading into public `triage` shim, `compress` triage call, per-page split; enriched refusal messages)
+- `pdf_smasher/engine/triage.py` (password kwarg; depth-cap fail-closed at 64)
+- `pdf_smasher/engine/rasterize.py` (use `_render_safety`)
+- `pdf_smasher/engine/image_export.py` (use `_render_safety`; keep `_MAX_BOMB_PIXELS` alias)
 - `pdf_smasher/utils/atomic.py` (`O_NOFOLLOW` on POSIX)
 - `pdf_smasher/_pillow_hardening.py` (idempotent `ensure_capped()`)
-- `pdf_smasher/engine/codecs/jbig2.py`, `pdf_smasher/audit.py` (absolute binary paths)
+- `pdf_smasher/engine/{rasterize,image_export,compose,verifier,background,foreground,mask,ocr,strategy}.py` (call `ensure_capped()` after PIL import)
+- `pdf_smasher/engine/codecs/jbig2.py`, `pdf_smasher/audit.py` (absolute binary paths via cached `shutil.which`)
 
 ---
 
@@ -95,10 +99,12 @@ In `.gitignore`, add `.claude/` directly under the existing `.firecrawl/` line.
 - [ ] **Step 1.7: Verify**
 
 ```bash
-grep -rn "ourorg\|TBD.example\|shartzog" --include="*.md" --include="*.toml" --include="*.py" --include="*.yml" .
+grep -rn "ourorg\|TBD.example\|shartzog" \
+  --include="*.md" --include="*.toml" --include="*.py" --include="*.yml" \
+  --exclude-dir=.claude --exclude-dir=.git --exclude-dir=docs/superpowers/specs .
 ```
 
-Expected output: no matches outside `docs/superpowers/specs/` and `.git/`. (The spec file references these strings explicitly.)
+Expected output: no matches. (The spec file under `docs/superpowers/specs/` and any local-only `.claude/` checkpoint files reference these strings; both are excluded.)
 
 ```bash
 grep -E "^\.claude/" .gitignore
@@ -181,7 +187,21 @@ git commit -m "chore(corpus): rename s3_mirror→mirror_url, document storage-ag
 - Modify: `pdf_smasher/engine/rasterize.py:34-44`
 - Modify: `pdf_smasher/engine/image_export.py` (replace inline check around line 208)
 
-- [ ] **Step 3.1: Write the failing test**
+- [ ] **Step 3.1: Make sure `tests/unit/engine/__init__.py` exists**
+
+Run:
+
+```bash
+ls tests/unit/engine/__init__.py
+```
+
+If absent, create an empty file:
+
+```bash
+touch tests/unit/engine/__init__.py
+```
+
+- [ ] **Step 3.1b: Write the failing tests**
 
 Create `tests/unit/engine/test_render_safety.py`:
 
@@ -210,9 +230,21 @@ def test_modest_dpi_on_small_page_passes() -> None:
     check_render_size(width_pt=612.0, height_pt=792.0, dpi=72.0)
 
 
-def test_zero_dpi_does_not_underflow() -> None:
-    # Zero DPI -> zero pixels; not useful but must not raise.
-    check_render_size(width_pt=612.0, height_pt=792.0, dpi=0.0)
+def test_zero_or_negative_dimensions_refuse_with_value_error() -> None:
+    with pytest.raises(ValueError):
+        check_render_size(width_pt=0.0, height_pt=792.0, dpi=300.0)
+    with pytest.raises(ValueError):
+        check_render_size(width_pt=-1.0, height_pt=792.0, dpi=300.0)
+
+
+def test_max_pixels_override_lets_callers_opt_in_to_higher_cap() -> None:
+    # Default cap refuses 30000x30000 = 900 Mpx, but caller passes 2 Gpx ceiling.
+    check_render_size(
+        width_pt=72.0 * 1000.0,
+        height_pt=72.0 * 1000.0,
+        dpi=30.0,
+        max_pixels=2_000_000_000,
+    )
 ```
 
 - [ ] **Step 3.2: Run test, see it fail**
@@ -235,6 +267,11 @@ must check that a page's pixel count fits before asking pdfium to
 allocate the bitmap. Without this check on the compress path, a PDF
 with an oversized MediaBox triggers a multi-GB allocation inside
 pdfium before any of our own guards fire.
+
+Canonical home of the cap is ``pdf_smasher._limits.MAX_BOMB_PIXELS`` —
+this module imports it and exposes ``check_render_size`` plus an opt-in
+``max_pixels`` override for callers that knowingly want a higher ceiling
+(e.g., a future ``render-page`` CLI dealing with engineering drawings).
 """
 
 from __future__ import annotations
@@ -245,18 +282,35 @@ from pdf_smasher.exceptions import DecompressionBombError
 _POINTS_PER_INCH: float = 72.0
 
 
-def check_render_size(width_pt: float, height_pt: float, dpi: float) -> None:
-    """Refuse if rasterizing the page at ``dpi`` would exceed the pixel cap.
+def check_render_size(
+    width_pt: float,
+    height_pt: float,
+    dpi: float,
+    *,
+    max_pixels: int = MAX_BOMB_PIXELS,
+) -> None:
+    """Refuse if rasterizing the page at ``dpi`` would exceed ``max_pixels``.
 
     ``DecompressionBombError`` is raised before any allocation happens.
     The CLI maps the exception to ``EXIT_DECOMPRESSION_BOMB=16``.
+
+    Pass ``max_pixels`` higher than the default only when the caller has
+    bounded the allocation by some other means (rare).
     """
+    if width_pt <= 0 or height_pt <= 0:
+        raise ValueError(
+            f"invalid page size: width_pt={width_pt!r}, height_pt={height_pt!r}; "
+            "non-positive values often indicate a locked/encrypted pdfium handle "
+            "fell back to a stub document"
+        )
     target_w = round(width_pt * dpi / _POINTS_PER_INCH)
     target_h = round(height_pt * dpi / _POINTS_PER_INCH)
-    if target_w * target_h > MAX_BOMB_PIXELS:
+    if target_w * target_h > max_pixels:
         raise DecompressionBombError(
             f"page would render to {target_w}x{target_h} pixels "
-            f"({target_w * target_h:,} px), exceeding cap of {MAX_BOMB_PIXELS:,}"
+            f"({target_w * target_h:,} px), exceeding cap of {max_pixels:,} "
+            f"(~2 GiB raw RGB; override via check_render_size(max_pixels=N) "
+            f"if you have bounded the allocation by other means)"
         )
 ```
 
@@ -266,7 +320,7 @@ def check_render_size(width_pt: float, height_pt: float, dpi: float) -> None:
 uv run pytest tests/unit/engine/test_render_safety.py -v
 ```
 
-Expected: 4 passed.
+Expected: 5 passed.
 
 - [ ] **Step 3.5: Wire helper into `rasterize.py`**
 
@@ -281,11 +335,13 @@ check_render_size(width_pt=width_pt, height_pt=height_pt, dpi=dpi)
 
 Use the existing `width_pt, height_pt = page.get_size()` and `dpi` parameter already in scope.
 
-- [ ] **Step 3.6: Wire helper into `image_export.py` and remove the inline check**
+- [ ] **Step 3.6: Wire helper into `image_export.py` (keep the `_MAX_BOMB_PIXELS` alias)**
 
-In `pdf_smasher/engine/image_export.py`, find the existing inline check (around line 208) that compares `target_w * target_h > _MAX_BOMB_PIXELS`. Replace it with a call to `check_render_size(width_pt=..., height_pt=..., dpi=...)` using the same inputs that produced `target_w` and `target_h`. Drop the now-unused `_MAX_BOMB_PIXELS` local if it's no longer referenced (the canonical home is `pdf_smasher._limits.MAX_BOMB_PIXELS`).
+In `pdf_smasher/engine/image_export.py`:
 
-Add `from pdf_smasher.engine._render_safety import check_render_size` at the top.
+1. Add `from pdf_smasher.engine._render_safety import check_render_size` at the top.
+2. Find the existing inline check (around line 208) that compares `target_w * target_h > _MAX_BOMB_PIXELS`. Replace just the `if … > _MAX_BOMB_PIXELS: raise DecompressionBombError(...)` block with a call to `check_render_size(width_pt=..., height_pt=..., dpi=...)` using the same inputs.
+3. **Keep** the existing `_MAX_BOMB_PIXELS = MAX_BOMB_PIXELS` (or equivalent) module-level alias. `tests/unit/test_pillow_hardening.py` imports `_MAX_BOMB_PIXELS` from `image_export` and asserts it equals `PIL.Image.MAX_IMAGE_PIXELS`; removing it breaks that test.
 
 - [ ] **Step 3.7: Run baseline + new tests**
 
@@ -309,22 +365,22 @@ _render_safety module."
 
 ---
 
-## Task 4: Password threading through PDF-open sites
+## Task 4: Password threading through pikepdf open sites
+
+**Scope decision (from design review):** the per-page split in `compress()` opens the source via `pikepdf.open(...)` and writes each page out as an UNENCRYPTED single-page slice (pikepdf re-saves without encryption by default). Downstream `pdfium.PdfDocument` and `pypdfium2.PdfDocument` calls in `rasterize.py` and `image_export.py` therefore receive plaintext bytes — they do **NOT** need a password kwarg. Threading the password into them was over-engineering and risks introducing a stub-document silent-misclassify class of bug. We only thread the password into the two `pikepdf.open` sites that touch the user's original encrypted bytes: `triage()` and the per-page split in `compress()`. (`image_export._run_image_export` opens via `pypdfium2.PdfDocument` from the SAME plaintext slice the compress engine produces — see Step 4.5b for the verification grep.)
 
 **Files:**
 - Modify: `pdf_smasher/engine/triage.py:164` (signature) and line 171 (open call)
-- Modify: `pdf_smasher/__init__.py` (call site to triage; per-page split via pikepdf.open near line 847)
-- Modify: `pdf_smasher/engine/rasterize.py` (accept password kwarg, pass to `pdfium.PdfDocument`)
-- Modify: `pdf_smasher/engine/image_export.py` (accept password kwarg, pass to `pypdfium2.PdfDocument`)
+- Modify: `pdf_smasher/__init__.py:669` (public `triage` shim) and the per-page split via `pikepdf.open` near line 847
 - Modify: `pdf_smasher/cli/main.py:498-501` (password-file read encoding)
 - Create: `tests/unit/engine/test_password_plumbing.py`
 
 - [ ] **Step 4.1: Write the failing test**
 
-Create `tests/unit/engine/test_password_plumbing.py`:
+Make sure `tests/unit/engine/__init__.py` exists (Step 3.1 created it). Create `tests/unit/engine/test_password_plumbing.py`:
 
 ```python
-"""Verify --password-file plumbs through to every PDF-open site."""
+"""Verify --password-file plumbs through to every pikepdf-open site."""
 
 from __future__ import annotations
 
@@ -333,16 +389,13 @@ import io
 import pikepdf
 import pytest
 
-import pdf_smasher
-from pdf_smasher import compress, triage
-from pdf_smasher.exceptions import EncryptedPDFError
-from pdf_smasher.types import CompressOptions
+from pdf_smasher import triage
 
 
-def _make_encrypted_pdf(password: str) -> bytes:
-    """Build a 1-page encrypted PDF in memory."""
+def _make_encrypted_pdf(password: str, *, pages: int = 1) -> bytes:
     pdf = pikepdf.new()
-    pdf.add_blank_page(page_size=(612, 792))
+    for _ in range(pages):
+        pdf.add_blank_page(page_size=(612, 792))
     buf = io.BytesIO()
     pdf.save(buf, encryption=pikepdf.Encryption(owner=password, user=password, R=6))
     return buf.getvalue()
@@ -362,25 +415,17 @@ def test_triage_with_wrong_password_classifies_require_password() -> None:
 
 
 def test_triage_with_no_password_classifies_require_password() -> None:
+    # Regression coverage: existing behavior still works.
     pdf_bytes = _make_encrypted_pdf("hunter2")
     report = triage(pdf_bytes)
     assert report.classification == "require-password"
 
 
-def test_compress_passes_password_through_to_engine() -> None:
-    pdf_bytes = _make_encrypted_pdf("hunter2")
-    options = CompressOptions(password="hunter2", skip_verify=True)
-    # This should NOT raise EncryptedPDFError; it should proceed past triage.
-    # We don't care about the final ratio for this test — only that the
-    # password reached the engine.
-    try:
-        compress(pdf_bytes, options=options)
-    except pdf_smasher.CompressError as exc:
-        # Acceptable: a tiny blank-page PDF may fail downstream gates.
-        # The point is it didn't fail at the password gate.
-        assert not isinstance(exc, EncryptedPDFError), (
-            f"password should have unlocked the PDF: {exc}"
-        )
+def test_triage_multipage_with_correct_password_returns_correct_page_count() -> None:
+    pdf_bytes = _make_encrypted_pdf("hunter2", pages=5)
+    report = triage(pdf_bytes, password="hunter2")
+    assert report.classification != "require-password"
+    assert report.pages == 5
 ```
 
 - [ ] **Step 4.2: Run, see it fail**
@@ -389,11 +434,13 @@ def test_compress_passes_password_through_to_engine() -> None:
 uv run pytest tests/unit/engine/test_password_plumbing.py -v
 ```
 
-Expected: FAIL with `TypeError: triage() got an unexpected keyword argument 'password'`.
+Expected:
+- `test_triage_with_correct_password_succeeds` and `test_triage_with_wrong_password_classifies_require_password` and `test_triage_multipage_with_correct_password_returns_correct_page_count` FAIL with `TypeError: triage() got an unexpected keyword argument 'password'`.
+- `test_triage_with_no_password_classifies_require_password` PASSES (pre-existing behavior).
 
-- [ ] **Step 4.3: Add `password` kwarg to `triage()`**
+- [ ] **Step 4.3: Add `password` kwarg to engine `triage()`**
 
-In `pdf_smasher/engine/triage.py`, change the signature from:
+In `pdf_smasher/engine/triage.py:164`, change the signature from:
 
 ```python
 def triage(pdf_bytes: bytes) -> TriageReport:
@@ -405,27 +452,45 @@ to:
 def triage(pdf_bytes: bytes, *, password: str | None = None) -> TriageReport:
 ```
 
-Inside the function, change the line that opens the PDF (currently `pdf = pikepdf.open(io.BytesIO(pdf_bytes))` around line 171) to:
+Inside the function, change line 171 from:
+
+```python
+pdf = pikepdf.open(io.BytesIO(pdf_bytes))
+```
+
+to:
 
 ```python
 pdf = pikepdf.open(io.BytesIO(pdf_bytes), password=password or "")
 ```
 
-- [ ] **Step 4.4: Pass password from `compress()` to `triage()`**
+- [ ] **Step 4.4: Update the public `triage` shim and the `compress()` triage call**
 
-In `pdf_smasher/__init__.py`, find the `triage(input_data)` call inside `compress()`. Change it to `triage(input_data, password=options.password)`.
+In `pdf_smasher/__init__.py:669`, change the public re-export from:
 
-In the same file, find the per-page split site that calls `pikepdf.open(io.BytesIO(input_data))` (around line 847). Change it to `pikepdf.open(io.BytesIO(input_data), password=options.password or "")`.
+```python
+def triage(input_data: bytes) -> TriageReport:
+    """Cheap structural scan. Never decodes image streams. See SPEC.md §4."""
+    from pdf_smasher.engine.triage import triage as _triage
 
-- [ ] **Step 4.5: Pass password to pdfium-based render call sites**
+    return _triage(input_data)
+```
 
-In `pdf_smasher/engine/rasterize.py`, change `rasterize_page` signature to accept `*, password: str | None = None` and pass it as `pdfium.PdfDocument(pdf_bytes, password=password)`.
+to:
 
-In `pdf_smasher/engine/image_export.py`, find the `pypdfium2.PdfDocument(...)` call (around line 159) and pass `password=options.password` into it (the `options` parameter is already in scope).
+```python
+def triage(input_data: bytes, *, password: str | None = None) -> TriageReport:
+    """Cheap structural scan. Never decodes image streams. See SPEC.md §4."""
+    from pdf_smasher.engine.triage import triage as _triage
 
-Update the call site in `pdf_smasher/__init__.py` that calls `rasterize_page` to forward `options.password`.
+    return _triage(input_data, password=password)
+```
 
-- [ ] **Step 4.6: Fix CLI password-file read**
+Then find the `triage(input_data)` call inside `compress()` (search for `tri = triage(`) and change it to `tri = triage(input_data, password=options.password)`.
+
+Per-page split: find the line near 847 that reads `pikepdf.open(io.BytesIO(input_data))` and change to `pikepdf.open(io.BytesIO(input_data), password=options.password or "")`. (Once split, downstream slices are plaintext — see scope-decision note above.)
+
+- [ ] **Step 4.5: Fix CLI password-file read (Windows CRLF safe)**
 
 In `pdf_smasher/cli/main.py`, find `_read_password` (around line 498). Change:
 
@@ -437,10 +502,25 @@ to:
 
 ```python
 content = args.password_file.read_text(encoding="utf-8")
-return content.removesuffix("\n") or None
+# Strip exactly one trailing newline (CR, LF, or CRLF). Don't use
+# .strip() — that would also eat leading/trailing spaces inside the
+# password itself.
+if content.endswith("\r\n"):
+    content = content[:-2]
+elif content.endswith(("\n", "\r")):
+    content = content[:-1]
+return content or None
 ```
 
-- [ ] **Step 4.7: Run new + baseline tests**
+- [ ] **Step 4.5b: Verify no other PDF-open site needs password**
+
+```bash
+grep -rn 'pikepdf\.open(\|pdfium\.PdfDocument(\|pypdfium2\.PdfDocument(' pdf_smasher/
+```
+
+Expected: every `pikepdf.open(` either takes `password=` (the two we just edited) OR opens an in-memory plaintext slice produced by the per-page split. `pdfium.PdfDocument(` and `pypdfium2.PdfDocument(` calls receive only plaintext slices — leave them alone. If you find a `pikepdf.open(` call that reads user-supplied bytes WITHOUT a password kwarg, add `password=options.password or ""` to it and document the new site here.
+
+- [ ] **Step 4.6: Run new + baseline tests**
 
 ```bash
 uv run pytest tests/unit -q
@@ -448,16 +528,20 @@ uv run pytest tests/unit -q
 
 Expected: all green.
 
-- [ ] **Step 4.8: Commit**
+- [ ] **Step 4.7: Commit**
 
 ```bash
-git add pdf_smasher/engine/triage.py pdf_smasher/engine/rasterize.py pdf_smasher/engine/image_export.py pdf_smasher/__init__.py pdf_smasher/cli/main.py tests/unit/engine/test_password_plumbing.py
-git commit -m "feat(security): plumb --password-file through every PDF-open site
+git add pdf_smasher/engine/triage.py pdf_smasher/__init__.py pdf_smasher/cli/main.py tests/unit/engine/test_password_plumbing.py
+git commit -m "feat(security): plumb --password-file through pikepdf-open sites
 
-triage() now accepts password=. compress() forwards options.password
-to triage() and to per-page pikepdf.open + pdfium.PdfDocument calls.
-CLI password-file read uses utf-8 + removesuffix instead of locale +
-strip."
+The two sites that touch user-supplied encrypted bytes — engine.triage
+and the per-page split in __init__.compress — now accept password=.
+The public triage() re-export forwards the kwarg. Downstream pdfium
+calls operate on plaintext slices and don't need the password.
+
+CLI password-file read switches from locale-decoded + .strip() to
+utf-8-decoded + targeted CRLF/LF/CR strip so passwords with internal
+whitespace are preserved and Windows-line-ending password files work."
 ```
 
 ---
@@ -515,7 +599,7 @@ uv run pytest tests/unit/test_input_size_limits.py -v
 
 Expected: FAIL on the new defaults.
 
-- [ ] **Step 5.3: Update `CompressOptions` defaults**
+- [ ] **Step 5.3: Update `CompressOptions` defaults (preserve `None` as escape hatch)**
 
 In `pdf_smasher/types.py`, change:
 
@@ -527,23 +611,22 @@ max_input_mb: float = 2000.0
 to:
 
 ```python
-max_pages: int = 10000
+max_pages: int | None = 10000  # None disables the gate (programmatic-only escape hatch)
 max_input_mb: float = 250.0
 ```
 
-In `pdf_smasher/__init__.py:273`, simplify the guard from:
+The type stays `int | None` so a programmatic caller doing `CompressOptions(max_pages=None)` can still opt into "unlimited". The CLI flag (Step 5.4) sets the default to `10000`, so flag users get the safer behavior; library users keep the existing escape hatch. Leave the `pdf_smasher/__init__.py:273` guard `if options.max_pages is not None and tri.pages > options.max_pages:` UNCHANGED — it still works correctly.
+
+Also update `tests/unit/test_types.py:24` (currently asserts `opts.max_input_mb == 2000.0`) to:
 
 ```python
-if options.max_pages is not None and tri.pages > options.max_pages:
+def test_default_max_input_mb_is_tightened() -> None:
+    opts = CompressOptions()
+    assert opts.max_input_mb == 250.0
+    assert opts.max_pages == 10000
 ```
 
-to:
-
-```python
-if tri.pages > options.max_pages:
-```
-
-(The `is not None` check was the only consumer of the Optional type. After this change, mypy is happy and the guard fires whenever the flag value — default 10000 — is exceeded.)
+(Replace whatever the existing assertion looks like; preserve any surrounding test name. If the existing test is named `test_default_max_input_mb_is_2000` or similar, rename it.)
 
 - [ ] **Step 5.4: Update CLI argparse defaults**
 
@@ -561,22 +644,47 @@ p.add_argument("--max-pages", type=int, default=10000)
 p.add_argument("--max-input-mb", type=float, default=250.0)
 ```
 
-- [ ] **Step 5.5: Stat-before-read**
+- [ ] **Step 5.5: Stat-before-read (file-input branch only)**
 
-In `pdf_smasher/cli/main.py`, find the line `input_bytes = args.input.read_bytes()` (around line 984). Insert a stat-check before it:
+In `pdf_smasher/cli/main.py:980-984`, the existing code is:
 
 ```python
-size_mb = args.input.stat().st_size / (1024 * 1024)
-if size_mb > args.max_input_mb:
-    print(
-        f"refused: input is {size_mb:.1f} MB, exceeds --max-input-mb={args.max_input_mb}",
-        file=sys.stderr,
-    )
-    return EXIT_OVERSIZE  # use whatever the existing oversize exit code is named
-input_bytes = args.input.read_bytes()
+if str(args.input) == "-":
+    input_bytes = sys.stdin.buffer.read()
+else:
+    input_bytes = args.input.read_bytes()
 ```
 
-The oversize exit code is `EXIT_OVERSIZE = 12` (defined at `pdf_smasher/cli/main.py:191`).
+Modify ONLY the `else:` branch to stat first. Do NOT add the stat call to the stdin branch (`Path("-").stat()` raises `FileNotFoundError`):
+
+```python
+if str(args.input) == "-":
+    input_bytes = sys.stdin.buffer.read()
+else:
+    size_mb = args.input.stat().st_size / (1024 * 1024)
+    if size_mb > args.max_input_mb:
+        print(
+            f"refused: input is {size_mb:.1f} MB, exceeds --max-input-mb={args.max_input_mb} "
+            f"(default lowered from 2000.0 in v0.1.0; pass --max-input-mb 2000 to restore "
+            f"the previous behavior)",
+            file=sys.stderr,
+        )
+        return EXIT_OVERSIZE
+    input_bytes = args.input.read_bytes()
+```
+
+`EXIT_OVERSIZE = 12` is defined at `pdf_smasher/cli/main.py:191`.
+
+- [ ] **Step 5.5b: Enrich the in-engine refusal messages with override hint**
+
+In `pdf_smasher/__init__.py`, find the two refusal messages introduced/touched here:
+
+- Line ~274: `f"input has {tri.pages} pages; max_pages={options.max_pages}"` →
+  `f"input has {tri.pages} pages; max_pages={options.max_pages} (default lowered from unlimited in v0.1.0; pass --max-pages 100000 or set CompressOptions(max_pages=None) to relax)"`
+- Line ~279: `f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb}"` →
+  `f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb} (default lowered from 2000.0 in v0.1.0; pass --max-input-mb 2000 to relax)"`
+
+Both messages survive into the `OversizeError` exception text and are user-facing.
 
 - [ ] **Step 5.6: Run all tests**
 
@@ -589,12 +697,16 @@ Expected: all green.
 - [ ] **Step 5.7: Commit**
 
 ```bash
-git add pdf_smasher/types.py pdf_smasher/cli/main.py tests/unit/test_input_size_limits.py
+git add pdf_smasher/types.py pdf_smasher/cli/main.py pdf_smasher/__init__.py \
+        tests/unit/test_input_size_limits.py tests/unit/test_types.py
 git commit -m "feat(security): tighten input-size defaults and stat-before-read
 
-max_input_mb default 2000.0 → 250.0; max_pages default None → 10000.
-CLI now stats the input file before slurping it into memory and
-refuses with EXIT_OVERSIZE if it exceeds the cap."
+CompressOptions.max_input_mb 2000.0 → 250.0; CLI --max-pages default
+None → 10000 (CompressOptions still accepts None as the unlimited
+escape hatch). CLI stats the input file before slurping it into memory
+and refuses with EXIT_OVERSIZE if it exceeds the cap. Refusal messages
+include the override flag so users hitting the new cap know how to
+restore the previous behavior."
 ```
 
 ---
@@ -607,6 +719,8 @@ refuses with EXIT_OVERSIZE if it exceeds the cap."
 
 - [ ] **Step 6.1: Write the failing test**
 
+The actual signature is `_walk_dict_for_names(obj, target_names: frozenset[str], visited: set[int], depth=0, max_depth=12)` — `target_names` is positional, `visited` is REQUIRED, and keys are compared without the leading slash (`bare = str(key).lstrip("/")` at triage.py:53). The test must match.
+
 Create `tests/unit/engine/test_triage_depth_cap.py`:
 
 ```python
@@ -614,34 +728,40 @@ Create `tests/unit/engine/test_triage_depth_cap.py`:
 
 from __future__ import annotations
 
-import io
-
-import pikepdf
 import pytest
 
 from pdf_smasher.exceptions import MaliciousPDFError
 from pdf_smasher.engine.triage import _walk_dict_for_names
 
 
-def _build_nested_dict(depth: int) -> dict:
-    inner: dict = {}
-    cur = inner
+def _build_nested_dict(depth: int) -> dict[str, object]:
+    """Build a chain dict 'depth' levels deep: {'nested': {'nested': {...}}}."""
+    leaf: dict[str, object] = {}
+    root = leaf
     for _ in range(depth):
-        nxt: dict = {}
-        cur["nested"] = nxt
-        cur = nxt
-    return inner
+        new_leaf: dict[str, object] = {}
+        leaf["nested"] = new_leaf
+        leaf = new_leaf
+    return root
 
 
-def test_walk_dict_under_cap_succeeds() -> None:
+def test_walk_dict_under_cap_returns_silently() -> None:
+    # Plain dicts aren't pikepdf Dictionary instances, so they yield no
+    # hits — but the call must not raise as long as depth is within cap.
     d = _build_nested_dict(20)
-    list(_walk_dict_for_names(d, target_names={"/JS"}))
+    result = _walk_dict_for_names(d, frozenset({"JS"}), set())
+    assert result == set()
 
 
 def test_walk_dict_over_cap_raises_malicious() -> None:
-    d = _build_nested_dict(64)
+    # Plain Python dicts are not traversed (not pikepdf Dictionary), so to
+    # exercise the depth-cap path we use a pikepdf-like nested structure.
+    # _walk_dict_for_names only descends into pikepdf.Dictionary / Array;
+    # dicts past the cap never reach the raise. We therefore test against
+    # the raise path via a recursion-counter helper instead — exercise the
+    # cap by calling the function directly with a high starting depth.
     with pytest.raises(MaliciousPDFError):
-        list(_walk_dict_for_names(d, target_names={"/JS"}))
+        _walk_dict_for_names({}, frozenset({"JS"}), set(), depth=99, max_depth=64)
 ```
 
 - [ ] **Step 6.2: Run, see it fail**
@@ -650,11 +770,13 @@ def test_walk_dict_over_cap_raises_malicious() -> None:
 uv run pytest tests/unit/engine/test_triage_depth_cap.py -v
 ```
 
-Expected: the under-cap test passes (current `max_depth=12` is too low — adjust if it fails). The over-cap test fails because the function returns silently instead of raising.
+Expected:
+- `test_walk_dict_under_cap_returns_silently` PASSES (no exception under existing code).
+- `test_walk_dict_over_cap_raises_malicious` FAILS — current `if depth > max_depth: return hits` early-returns silently instead of raising.
 
 - [ ] **Step 6.3: Update `_walk_dict_for_names`**
 
-In `pdf_smasher/engine/triage.py`, find `_walk_dict_for_names`. Change the default `max_depth` from `12` to `32`. At the depth-cap branch (where the function currently early-returns past `max_depth`), raise instead:
+In `pdf_smasher/engine/triage.py:36`, change the default `max_depth` from `12` to `64`. At line 45, replace `if depth > max_depth: return hits` with:
 
 ```python
 if depth > max_depth:
@@ -663,7 +785,9 @@ if depth > max_depth:
     )
 ```
 
-Add `from pdf_smasher.exceptions import MaliciousPDFError` if not already imported.
+Add `from pdf_smasher.exceptions import MaliciousPDFError` near the top of the file if not already imported.
+
+The bump from 12 → 64 gives more headroom for legitimate deeply-nested PDFs (heavy form trees, tagged accessibility PDFs) while still bounding a recursion-bomb attempt.
 
 - [ ] **Step 6.4: Run new + baseline**
 
@@ -719,6 +843,16 @@ def test_atomic_write_refuses_symlinked_partial_path(tmp_path) -> None:
     with pytest.raises(OSError):
         _atomic_write_bytes(final, b"hello")
     assert bait.read_text() == "untouched"
+
+
+def test_atomic_write_happy_path_overwrites_pre_existing_partial(tmp_path) -> None:
+    """Regression: a pre-existing NON-symlink partial gets overwritten cleanly."""
+    final = tmp_path / "out.pdf"
+    partial = tmp_path / f"out.pdf{PARTIAL_SUFFIX}"
+    partial.write_bytes(b"stale")
+    _atomic_write_bytes(final, b"fresh")
+    assert final.read_bytes() == b"fresh"
+    assert not partial.exists()
 ```
 
 - [ ] **Step 7.2: Run, see it fail**
@@ -791,9 +925,9 @@ existing tmp.write_bytes (no NOFOLLOW equivalent without ctypes)."
 - Modify: `pdf_smasher/engine/codecs/jbig2.py` (around line 56)
 - Modify: `pdf_smasher/audit.py` (around line 37)
 
-- [ ] **Step 8.1: Add a path-resolution helper**
+- [ ] **Step 8.1: Add a cached path-resolution helper that preserves the `None` fallback**
 
-In `pdf_smasher/engine/codecs/jbig2.py`, replace the module-level `_JBIG2_BIN = "jbig2"` constant pattern with a cached resolver:
+In `pdf_smasher/engine/codecs/jbig2.py`, replace the module-level `_JBIG2_BIN = "jbig2"` constant pattern with a cached resolver that returns `Optional[str]` so callers can keep the existing graceful fallback behavior (the engine warns and uses Flate instead of crashing when jbig2enc is absent — see `pdf_smasher/__init__.py:864` `jbig2enc-unavailable-using-flate-fallback`):
 
 ```python
 import shutil
@@ -801,18 +935,39 @@ from functools import cache
 
 
 @cache
-def _resolve_jbig2_bin() -> str:
-    found = shutil.which("jbig2")
-    if not found:
-        raise FileNotFoundError("jbig2 not found on PATH; install jbig2enc")
-    return found
+def _resolve_jbig2_bin() -> str | None:
+    """Resolve the jbig2 binary's absolute path once. None if not on PATH.
+
+    Cached so subsequent subprocess calls skip the re-walk; cache is
+    process-lifetime, which is fine because installing jbig2enc mid-
+    process is not a supported scenario.
+    """
+    return shutil.which("jbig2")
 ```
 
-Replace every `subprocess.run([_JBIG2_BIN, ...])` with `subprocess.run([_resolve_jbig2_bin(), ...])`.
+Update every existing call site that uses the bare basename. For each `subprocess.run([_JBIG2_BIN, ...], ...)` (or equivalent), check the resolved path first:
+
+```python
+binary = _resolve_jbig2_bin()
+if binary is None:
+    raise FileNotFoundError("jbig2 not found on PATH; install jbig2enc")
+subprocess.run([binary, ...], ...)
+```
+
+Existing callers that ALREADY check for absence (e.g., the warning-fallback path) should switch to `if _resolve_jbig2_bin() is None: ...` so the cached lookup is the single source of truth.
 
 - [ ] **Step 8.2: Same pattern in `pdf_smasher/audit.py`**
 
-In `audit.py`, the `_probe(binary, ...)` helper takes a basename. Change it to resolve via `shutil.which(binary)` first and pass the resolved absolute path to `subprocess.run`. If `which` returns None, return `"?"` (the existing not-found behavior).
+In `pdf_smasher/audit.py`, the helper is `_probe_tool_version(binary)` (around line 26), not `_probe`. It already calls `shutil.which(binary)` to existence-check at line 34 and returns `"?"` if absent. Tighten line 38 from `subprocess.run([binary, "--version"], ...)` to:
+
+```python
+resolved = shutil.which(binary)
+if resolved is None:
+    return "?"
+out = subprocess.run([resolved, "--version"], capture_output=True, check=False, ...)
+```
+
+(Move the existing `which` check into a single resolution step, then pass the resolved absolute path to `subprocess.run`. Net behavior is identical for the present-and-absent cases; the only change is that the running subprocess uses the absolute path.)
 
 - [ ] **Step 8.3: Run baseline**
 
@@ -895,15 +1050,25 @@ def ensure_capped() -> None:
 ensure_capped()
 ```
 
-- [ ] **Step 9.4: Call `ensure_capped()` from engine modules**
+- [ ] **Step 9.4: Call `ensure_capped()` from every engine module that imports PIL**
 
-At the top of each of `rasterize.py`, `image_export.py`, `compose.py`, `verifier.py`, after the imports, add:
+Identify the modules first:
+
+```bash
+grep -l "^import PIL\|^from PIL" pdf_smasher/engine/*.py
+```
+
+Expected matches (all of these): `background.py`, `compose.py`, `foreground.py`, `image_export.py`, `mask.py`, `ocr.py`, `rasterize.py`, `strategy.py`, `verifier.py`.
+
+At the top of each matched module, after the existing PIL import line, add:
 
 ```python
 from pdf_smasher._pillow_hardening import ensure_capped
 
 ensure_capped()
 ```
+
+Place the import + call AFTER the `import PIL.Image` line so the cap is installed at module-load time on the same `PIL.Image` reference the module uses.
 
 - [ ] **Step 9.5: Run all tests**
 
@@ -968,10 +1133,12 @@ jobs:
       - name: Build sdist + wheel
         run: uv build
       - name: Publish to PyPI via Trusted Publisher
+        # TODO(human): verify this SHA matches the latest pypa/gh-action-pypi-publish
+        # release before merging. `gh api repos/pypa/gh-action-pypi-publish/releases/latest --jq .tag_name`
         uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc  # v1.12.4
 ```
 
-(Pin the `pypa/gh-action-pypi-publish` SHA to a current release; verify with `gh api repos/pypa/gh-action-pypi-publish/releases/latest --jq .tag_name`.)
+The `actions/checkout` and `astral-sh/setup-uv` SHAs are taken verbatim from `.github/workflows/ci.yml` so the cross-workflow pins stay aligned (the `versions-single-source` job in ci.yml only enforces the jbig2enc commit, but matching action pins by hand keeps the supply-chain story consistent). If the executing subagent has network access, `gh api repos/pypa/gh-action-pypi-publish/releases/latest --jq .tag_name` confirms the latest release tag — bump the pin if the comment date drifts. If offline, leave the pin and the `TODO(human)` marker in place; Jack will verify pre-merge.
 
 - [ ] **Step 10.2: Reference from SECURITY.md**
 
@@ -1113,8 +1280,8 @@ body:
   - type: textarea
     id: hankpdf-version
     attributes:
-      label: hankpdf --version output
-      description: Paste the full output of `hankpdf --version`.
+      label: hankpdf --version + hankpdf --doctor output
+      description: Paste both. --doctor includes native dep versions (tesseract, jbig2enc, qpdf) which are critical for diagnosis.
       render: shell
     validations:
       required: true
@@ -1237,14 +1404,23 @@ If the package exists with versions: in the status line, change "Not yet publish
 
 If the package does not exist yet: keep "Not yet published to PyPI or GHCR" but add an inline parenthetical "(GHCR pushes are wired up in `docker.yml` and run on the next merge to `main`)".
 
-- [ ] **Step 14.3: Fix Docker image tag example**
+- [ ] **Step 14.3: Fix Docker image tag examples (both occurrences)**
 
-Find the README block that references `ghcr.io/hank-ai/hankpdf:v0.0.1` (around line 109). Change the version tag to `latest` so the example is runnable today regardless of whether a tagged release has been cut.
+Find ALL occurrences of `ghcr.io/hank-ai/hankpdf:v0.0.1` in `README.md`:
+
+```bash
+grep -n "v0\.0\.1" README.md
+```
+
+Two occurrences are expected (around lines 109 and 124 — the `docker pull` example and the `cosign verify` example). Change both to `:latest` (for the docker pull) or to a placeholder `:<your-tag>` (for cosign verify, since cosign without a real tag fails). Pragmatic split:
+
+- Line 109 (docker pull) → `:latest`.
+- Line 124 (cosign verify) → keep `:latest` if Step 14.2 confirms GHCR is publishing on every main merge; otherwise replace with a comment noting "swap `:latest` for the tag you're verifying."
 
 - [ ] **Step 14.4: Verify**
 
 ```bash
-grep -n "327 tests\|v0.0.1" README.md
+grep -n "327 tests\|v0\.0\.1" README.md
 ```
 
 Expected: no matches.
@@ -1253,7 +1429,95 @@ Expected: no matches.
 
 ```bash
 git add README.md
-git commit -m "docs(readme): update test count, reconcile GHCR claim, fix docker tag example"
+git commit -m "docs(readme): update test count, reconcile GHCR claim, fix docker tag examples"
+```
+
+---
+
+## Task 15: CHANGELOG + ARCHITECTURE render-safety section
+
+**Files:**
+- Create: `CHANGELOG.md`
+- Modify: `docs/ARCHITECTURE.md`
+
+- [ ] **Step 15.1: Create `CHANGELOG.md`**
+
+Create `CHANGELOG.md` at repo root (Keep a Changelog format):
+
+```markdown
+# Changelog
+
+All notable changes to `pdf-smasher` (HankPDF) are documented here. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows pre-1.0 SemVer (anything may break between minor versions until 1.0).
+
+## [Unreleased]
+
+### Added
+- Shared render-size cap helper (`pdf_smasher.engine._render_safety.check_render_size`) used by both the compress (`rasterize.py`) and image-export (`image_export.py`) paths. Closes a decompression-bomb gap on the compress path.
+- `--password-file` now plumbs the password through to every PDF-open site that touches user-supplied encrypted bytes (`engine.triage.triage`, public `pdf_smasher.triage`, and the per-page split in `compress`).
+- `_walk_dict_for_names` in triage now fails closed past its depth cap (raises `MaliciousPDFError` instead of silently early-returning); cap raised from 12 to 64 for legitimate-PDF headroom.
+- POSIX `O_NOFOLLOW` on the partial-write path in `pdf_smasher.utils.atomic._atomic_write_bytes`. A pre-placed symlink at the partial path is now refused. Windows path is unchanged (no `O_NOFOLLOW` equivalent without ctypes).
+- Idempotent `pdf_smasher._pillow_hardening.ensure_capped()`. Engine modules that import PIL now self-install the cap so programmatic callers using only an engine submodule still get the protection.
+- Native binary paths (`jbig2`, `tesseract`, `qpdf`) resolved to absolute paths once via cached `shutil.which`.
+- `.github/workflows/release.yml` — dormant PyPI release workflow with OIDC trusted publishing. Triggered only by published GitHub Releases. No `PYPI_API_TOKEN` secret is introduced. Configure the publisher entry on pypi.org once before cutting the first release.
+- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1).
+- `.github/ISSUE_TEMPLATE/{bug_report,feature_request,config}.yml` and `.github/PULL_REQUEST_TEMPLATE.md`.
+- `pre-commit` ecosystem in `.github/dependabot.yml`.
+- `docs/ARCHITECTURE.md` — new "Render-size protection" section documenting the two-tier cap (`_render_safety.check_render_size` pre-allocation + Pillow `MAX_IMAGE_PIXELS` post-decode).
+
+### Changed
+- **BREAKING (CLI):** `--max-input-mb` default lowered from `2000.0` to `250.0`. To restore previous behavior: `--max-input-mb 2000`.
+- **BREAKING (CLI):** `--max-pages` default lowered from "unlimited" to `10000`. To restore previous behavior: `--max-pages 100000` (or higher).
+- **Library API note:** `CompressOptions.max_input_mb` default also tightened to `250.0`. `CompressOptions.max_pages` default tightened from `None` to `10000`; the type stays `int | None`, so programmatic callers can still pass `max_pages=None` to opt into the previous unlimited behavior.
+- CLI `--password-file` read switched from locale-default decoding + `.strip()` to UTF-8 decoding with targeted CR/LF/CRLF stripping. Passwords with internal whitespace are now preserved; Windows-line-ending password files now work.
+- Refusal messages for both `max_input_mb` and `max_pages` now include the override flag so users hitting the new caps know how to relax them.
+
+### Security
+- New POSIX `O_NOFOLLOW` defense (see Added).
+- Triage depth-cap walker now fails closed (see Added).
+- Decompression-bomb pre-allocation cap now applied on the compress path (previously only the image-export path).
+
+### Repository
+- Replaced placeholder `ourorg/pdf-smasher` URLs with the real `hank-ai/hankpdf` URLs across `pyproject.toml`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`.
+- Removed placeholder `security@TBD.example` from `SECURITY.md`. GitHub Security Advisories is now the sole reporting channel.
+- Storage-agnostic corpus mirror story (`s3_mirror` field renamed to `mirror_url`; docs no longer assume S3).
+- README test count and Docker-image tag examples updated to reflect reality.
+```
+
+- [ ] **Step 15.2: Add a "Render-size protection" section to `docs/ARCHITECTURE.md`**
+
+Append (or splice into the appropriate Engine / Safety subsection of) `docs/ARCHITECTURE.md`:
+
+```markdown
+### Render-size protection (two-tier)
+
+Two independent caps protect against decompression-bomb PDFs that would
+allocate billions of pixels:
+
+1. **Pre-allocation pixel-count guard.** `pdf_smasher.engine._render_safety.check_render_size(width_pt, height_pt, dpi)` is called BEFORE pdfium allocates the bitmap. It computes the target pixel dimensions from the page geometry and refuses with `pdf_smasher.exceptions.DecompressionBombError` if the product would exceed `pdf_smasher._limits.MAX_BOMB_PIXELS` (~715 Mpx, sized so an RGB raster fits in 2 GiB). Both the compress path (`rasterize.rasterize_page`) and the image-export path (`image_export._iter_pages_impl`) call this helper. Tests in `tests/unit/engine/test_render_safety.py`.
+2. **Post-decode Pillow guard.** `PIL.Image.MAX_IMAGE_PIXELS` is set to the SAME value by `pdf_smasher._pillow_hardening.ensure_capped()` so any image opened through Pillow (e.g., a per-page raster being re-encoded) hits the same ceiling. Pillow raises `PIL.Image.DecompressionBombError`, which our engine modules re-raise as our typed `DecompressionBombError` for consistent CLI exit-code mapping (`EXIT_DECOMPRESSION_BOMB=16`).
+
+Both caps share `pdf_smasher._limits.MAX_BOMB_PIXELS` as the canonical numeric value — the `tests/unit/test_pillow_hardening.py` suite asserts they don't drift apart.
+
+Callers that knowingly need a higher ceiling (e.g., a future per-page render CLI for engineering drawings) can pass `max_pixels=N` to `check_render_size` for a per-call override; there is intentionally no override for the Pillow cap (it's a global SECURITY boundary, not a tuning knob).
+```
+
+- [ ] **Step 15.3: Verify and commit**
+
+```bash
+test -f CHANGELOG.md && grep -q "Render-size protection" docs/ARCHITECTURE.md && echo "ok"
+```
+
+Expected: `ok`.
+
+```bash
+git add CHANGELOG.md docs/ARCHITECTURE.md
+git commit -m "docs: changelog + ARCHITECTURE render-safety section
+
+Captures the user-facing breaking changes (--max-input-mb,
+--max-pages defaults) with override hints, and documents the
+two-tier render-size protection (pre-allocation pixel guard +
+Pillow post-decode cap) so future contributors don't get
+confused by overlapping DecompressionBombError types."
 ```
 
 ---
@@ -1282,21 +1546,35 @@ Expected: green.
 
 ```bash
 grep -rn "ourorg\|TBD.example\|shartzog\|s3_mirror\|our-corpus-bucket" \
-  --include="*.md" --include="*.toml" --include="*.py" --include="*.yml" --include="*.json" .
+  --include="*.md" --include="*.toml" --include="*.py" --include="*.yml" --include="*.json" \
+  --exclude-dir=.git --exclude-dir=.claude --exclude-dir=docs/superpowers/specs .
 ```
 
-Expected: only matches inside `docs/superpowers/specs/` and `.git/`.
+Expected: no matches. (The spec under `docs/superpowers/specs/` and any local-only `.claude/` checkpoints are excluded; both legitimately reference these strings.)
+
+```bash
+git log --all -p | grep -E "shartzog|TBD\.example" | head -5 || true
+```
+
+Note: the `0a966fe` commit body contains the `shartzog` reference. Per spec §6, we accept this — rewriting commit-message bodies via force-push is louder than the leak. This is informational only; do not block on it.
 
 - [ ] **Confirm new files exist**
 
 ```bash
-ls CODE_OF_CONDUCT.md \
+ls CHANGELOG.md \
+   CODE_OF_CONDUCT.md \
    .github/workflows/release.yml \
    .github/PULL_REQUEST_TEMPLATE.md \
    .github/ISSUE_TEMPLATE/bug_report.yml \
    .github/ISSUE_TEMPLATE/feature_request.yml \
    .github/ISSUE_TEMPLATE/config.yml \
-   pdf_smasher/engine/_render_safety.py
+   pdf_smasher/engine/_render_safety.py \
+   tests/unit/engine/test_render_safety.py \
+   tests/unit/engine/test_password_plumbing.py \
+   tests/unit/engine/test_triage_depth_cap.py \
+   tests/unit/test_atomic_nofollow.py \
+   tests/unit/test_input_size_limits.py \
+   tests/unit/test_pillow_cap_idempotent.py
 ```
 
 Expected: all listed.
