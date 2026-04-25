@@ -46,7 +46,7 @@ Expect 245 passed. This is the green baseline.
 - `pdf_smasher/__init__.py` (password threading into public `triage` shim, `compress` triage call, page-sizing pdfium open at line 834, per-page split; enriched refusal messages)
 - `pdf_smasher/engine/triage.py` (password kwarg; `is_encrypted` reflects real state on success path; depth-cap fail-closed at 64)
 - `pdf_smasher/engine/canonical.py` (password kwarg on `canonical_input_sha256`)
-- `pdf_smasher/engine/rasterize.py` (use `_render_safety`)
+- `pdf_smasher/engine/rasterize.py` (use `_render_safety`; add `password` kwarg, used by both compress route — pass `None` — and image-export route — forward user password)
 - `pdf_smasher/engine/image_export.py` (use `_render_safety`; keep `_MAX_BOMB_PIXELS` alias; password kwarg on user-input pdfium open)
 - `pdf_smasher/utils/atomic.py` (`O_NOFOLLOW` on POSIX)
 - `pdf_smasher/_pillow_hardening.py` (idempotent `ensure_capped()`)
@@ -366,7 +366,12 @@ _render_safety module."
 
 ## Task 4: Password threading through pikepdf open sites
 
-**Scope decision (from design review):** the per-page split in `compress()` opens the source via `pikepdf.open(...)` and writes each page out as an UNENCRYPTED single-page slice (pikepdf re-saves without encryption by default). Downstream `pdfium.PdfDocument` and `pypdfium2.PdfDocument` calls in `rasterize.py` and `image_export.py` therefore receive plaintext bytes — they do **NOT** need a password kwarg. Threading the password into them was over-engineering and risks introducing a stub-document silent-misclassify class of bug. We only thread the password into the two `pikepdf.open` sites that touch the user's original encrypted bytes: `triage()` and the per-page split in `compress()`. (`image_export._run_image_export` opens via `pypdfium2.PdfDocument` from the SAME plaintext slice the compress engine produces — see Step 4.5b for the verification grep.)
+**Scope decision (from design review):** there are two distinct routes that open user-supplied PDF bytes:
+
+- **Compress route** (`compress()`): the per-page split opens the source via `pikepdf.open(...)` and writes each page as an unencrypted single-page slice. Downstream `rasterize_page` receives plaintext slices via `__init__.py:371` and `:552` — those callers pass `password=None`.
+- **Image-export route** (`_run_image_export` → `iter_pages_as_images` → `_iter_pages_impl` → `_page_size_points` AND `rasterize_page`): operates directly on the user input bytes, never goes through the per-page split. Every layer in this chain must accept and forward `password`.
+
+This is why `rasterize_page` itself needs a `password` kwarg (defaults to `None`): both routes call it. The compress callers pass `None` (slice is plaintext), the image-export caller forwards the user-supplied password. Same for `pdfium.PdfDocument`/`pypdfium2.PdfDocument` in `image_export.py`.
 
 **Files:**
 - Modify: `pdf_smasher/engine/triage.py:164` (signature) and line 171 (open call)
@@ -425,7 +430,43 @@ def test_triage_multipage_with_correct_password_returns_correct_page_count() -> 
     report = triage(pdf_bytes, password="hunter2")
     assert report.classification != "require-password"
     assert report.pages == 5
+
+
+def test_canonical_hash_with_correct_password_succeeds() -> None:
+    """Forwarder: canonical_input_sha256 uses the password to open."""
+    from pdf_smasher.engine.canonical import canonical_input_sha256
+
+    pdf_bytes = _make_encrypted_pdf("hunter2")
+    digest = canonical_input_sha256(pdf_bytes, password="hunter2")
+    assert isinstance(digest, str) and len(digest) == 64
+
+
+def test_image_export_with_correct_password_succeeds() -> None:
+    """Image-export route: encrypted input + correct password → JPEG bytes out.
+
+    Regression guard for the rasterize_page / _iter_pages_impl password
+    threading. Without password threading on the image-export route,
+    this fails inside _page_size_points or rasterize_page on the
+    encrypted PDF.
+    """
+    from pdf_smasher.engine.image_export import iter_pages_as_images
+
+    pdf_bytes = _make_encrypted_pdf("hunter2", pages=2)
+    blobs = list(
+        iter_pages_as_images(
+            pdf_bytes,
+            page_indexes=(0, 1),
+            image_format="jpeg",
+            dpi=72,
+            password="hunter2",
+        )
+    )
+    assert len(blobs) == 2
+    # JPEG SOI marker
+    assert all(b[:3] == b"\xff\xd8\xff" for b in blobs)
 ```
+
+(Adjust the `iter_pages_as_images` call signature in the test to match the actual function — `page_indexes` may be named `pages` or similar in the real code. Read `pdf_smasher/engine/image_export.py:58` to confirm the parameter name and JPEG-format constant before writing the test.)
 
 - [ ] **Step 4.2: Run, see it fail**
 
@@ -463,7 +504,7 @@ to:
 pdf = pikepdf.open(io.BytesIO(pdf_bytes), password=password or "")
 ```
 
-After the success-open (around line 195, just before `pages = len(pdf.pages)`), add a single line so the `TriageReport.is_encrypted` field reflects reality when a password successfully unlocked the PDF:
+As the first statement of the inner `try:` block (line 195 in the current file), immediately before `pages = len(pdf.pages)` (line 196), insert a single line so the `TriageReport.is_encrypted` field reflects reality when a password successfully unlocked the PDF:
 
 ```python
 is_encrypted = bool(pdf.is_encrypted)
@@ -519,15 +560,48 @@ def canonical_input_sha256(pdf_bytes: bytes, *, password: str | None = None) -> 
 
 Then update its caller in `pdf_smasher/__init__.py` (search for `canonical_input_sha256(input_data)`) to forward `options.password`. (This caller currently soft-fails to `None` on `pikepdf.PdfError`; with the password threaded, encrypted-with-correct-password input will succeed.)
 
-**(f) Image-export route triage** — `pdf_smasher/cli/main.py:730`. The `_run_image_export` path currently calls `tri = triage(input_bytes)` with no password — `--password-file image.pdf -o page.jpg` would always exit `EXIT_ENCRYPTED`. Change to:
+**(f) Image-export route — `_run_image_export`** — `pdf_smasher/cli/main.py:698-`. The function currently takes `(args, input_bytes, only_pages, image_format)` and does not look at the password. Inside the function body, near the top (before the `triage(input_bytes)` call at line 730), add:
 
 ```python
-tri = triage(input_bytes, password=_read_password(args))
+password = _read_password(args)
 ```
 
-Then ensure the `_run_image_export(...)` call below this `triage` block also receives the password (either by adding a `password: str | None = None` kwarg to `_run_image_export` and forwarding it, or by reading the password from `args` again inside `_run_image_export` — pick whichever matches the function's existing parameter style).
+Pass it to BOTH downstream calls inside the function:
 
-**(g) Image-export pdfium open** — `pdf_smasher/engine/image_export.py` opens the user bytes via `pypdfium2.PdfDocument(...)`. Add `password: str | None = None` to whichever helper holds the open call (`_page_size_points` and the main render path). Pass `password=password` to every `pypdfium2.PdfDocument(...)` call. The caller (`_run_image_export` in cli/main.py from step f) forwards the password.
+- The `triage(input_bytes)` call at line 730 → `tri = triage(input_bytes, password=password)`
+- The `iter_pages_as_images(...)` call (around line 843) → add `password=password` to the kwargs
+
+**(g) Image-export pdfium chain** — `pdf_smasher/engine/image_export.py` has a four-layer chain that all sees the user bytes. Thread the kwarg through every layer:
+
+1. **`iter_pages_as_images(...)` line 58** — add `password: str | None = None` (kw-only) to the public signature; forward it to `_iter_pages_impl`.
+2. **`_iter_pages_impl(...)` line 171** — add the same kwarg; forward to BOTH `_page_size_points` and `rasterize_page` (line 220).
+3. **`_page_size_points(pdf_bytes, page_index)` line 155** — add `*, password: str | None = None`; pass to `pdfium.PdfDocument(pdf_bytes, password=password)` at line 159.
+4. **`rasterize_page` is not in this file** — see (h) below.
+
+**(h) Shared `rasterize_page` (used by BOTH routes)** — `pdf_smasher/engine/rasterize.py:15`. Change the signature from:
+
+```python
+def rasterize_page(pdf_bytes: bytes, *, page_index: int, dpi: int) -> Image.Image:
+```
+
+to:
+
+```python
+def rasterize_page(
+    pdf_bytes: bytes,
+    *,
+    page_index: int,
+    dpi: int,
+    password: str | None = None,
+) -> Image.Image:
+```
+
+Pass it through to `pdfium.PdfDocument(pdf_bytes, password=password)` at line 34.
+
+Update the existing callers:
+
+- `pdf_smasher/__init__.py:371` and `:552` (compress-route callers, which receive plaintext per-page slices) — pass `password=None` explicitly. Adding the explicit kwarg makes the plaintext-vs-encrypted invariant readable at the call site.
+- `pdf_smasher/engine/image_export.py:220` — change to `rasterize_page(pdf_bytes, page_index=page_index, dpi=dpi, password=password)` so the image-export route forwards the user-supplied password.
 
 - [ ] **Step 4.5: Fix CLI password-file read (Windows CRLF safe)**
 
@@ -568,8 +642,8 @@ Expect 9 matches (verified 2026-04-25). Each must fall into exactly one of these
 | `pdf_smasher/engine/canonical.py:21` | **EDIT** — Step 4.4e adds `password=password or ""` |
 | `pdf_smasher/engine/chunking.py:49` | **SAFE** — operates on composed output PDF bytes |
 | `pdf_smasher/engine/text_layer.py:87` | **SAFE** — receives composed plaintext bytes |
-| `pdf_smasher/engine/rasterize.py:34` (`pdfium.PdfDocument(pdf_bytes)`) | **SAFE** — per-page plaintext slice from Step 4.4c |
-| `pdf_smasher/engine/image_export.py:159` (`pdfium.PdfDocument(pdf_bytes)`) | **EDIT** — Step 4.4g adds `password=password` |
+| `pdf_smasher/engine/image_export.py:159` (`pdfium.PdfDocument(pdf_bytes)`) | **EDIT** — Step 4.4g adds `password=password` (image-export route receives encrypted user bytes here) |
+| `pdf_smasher/engine/rasterize.py:34` (`pdfium.PdfDocument(pdf_bytes)`) | **EDIT** — Step 4.4h adds `password=password`; called by BOTH routes (compress callers pass `None`, image-export forwards the user password) |
 
 If the grep returns a number other than 9, or any new site appears, stop and audit each one before continuing. Add a new row to the table and pick a disposition.
 
@@ -584,7 +658,10 @@ Expected: all green.
 - [ ] **Step 4.7: Commit**
 
 ```bash
-git add pdf_smasher/engine/triage.py pdf_smasher/engine/canonical.py pdf_smasher/engine/image_export.py pdf_smasher/__init__.py pdf_smasher/cli/main.py tests/unit/engine/test_password_plumbing.py
+git add pdf_smasher/engine/triage.py pdf_smasher/engine/canonical.py \
+        pdf_smasher/engine/image_export.py pdf_smasher/engine/rasterize.py \
+        pdf_smasher/__init__.py pdf_smasher/cli/main.py \
+        tests/unit/engine/test_password_plumbing.py
 git commit -m "feat(security): plumb --password-file through every user-input PDF-open site
 
 Every site that opens user-supplied PDF bytes — engine.triage,
@@ -676,16 +753,20 @@ max_input_mb: float = 250.0
 
 The type stays `int | None` so a programmatic caller doing `CompressOptions(max_pages=None)` can still opt into "unlimited". The CLI flag (Step 5.4) sets the default to `10000`, so flag users get the safer behavior; library users keep the existing escape hatch. Leave the `pdf_smasher/__init__.py:273` guard `if options.max_pages is not None and tri.pages > options.max_pages:` UNCHANGED — it still works correctly.
 
-Also update `tests/unit/test_types.py:24` (currently asserts `opts.max_input_mb == 2000.0`) to:
+Update `tests/unit/test_types.py:24` in-place. The existing assertion lives inside the broader `test_compress_options_defaults` function (covers `engine`, `mode`, `target_bg_dpi`, etc.). Do NOT rename the function or extract it. Just edit line 24 from:
 
 ```python
-def test_default_max_input_mb_is_tightened() -> None:
-    opts = CompressOptions()
+    assert opts.max_input_mb == 2000.0
+```
+
+to:
+
+```python
     assert opts.max_input_mb == 250.0
     assert opts.max_pages == 10000
 ```
 
-(Replace whatever the existing assertion looks like; preserve any surrounding test name. If the existing test is named `test_default_max_input_mb_is_2000` or similar, rename it.)
+(Adds one line after line 24; the broader test keeps its name and other assertions.)
 
 - [ ] **Step 5.4: Update CLI argparse defaults**
 
@@ -724,7 +805,7 @@ else:
     if size_mb > args.max_input_mb:
         print(
             f"refused: input is {size_mb:.1f} MB, exceeds --max-input-mb={args.max_input_mb} "
-            f"(default lowered from 2000.0 in v0.1.0; pass --max-input-mb 2000 to restore "
+            f"(default tightened from 2000.0; pass --max-input-mb 2000 to restore "
             f"the previous behavior)",
             file=sys.stderr,
         )
@@ -739,9 +820,9 @@ else:
 In `pdf_smasher/__init__.py`, find the two refusal messages introduced/touched here:
 
 - Line ~274: `f"input has {tri.pages} pages; max_pages={options.max_pages}"` →
-  `f"input has {tri.pages} pages; max_pages={options.max_pages} (default lowered from unlimited in v0.1.0; pass --max-pages 100000 or set CompressOptions(max_pages=None) to relax)"`
+  `f"input has {tri.pages} pages; max_pages={options.max_pages} (default tightened from unlimited; pass --max-pages 100000 or set CompressOptions(max_pages=None) to relax)"`
 - Line ~279: `f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb}"` →
-  `f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb} (default lowered from 2000.0 in v0.1.0; pass --max-input-mb 2000 to relax)"`
+  `f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb} (default tightened from 2000.0; pass --max-input-mb 2000 to relax)"`
 
 Both messages survive into the `OversizeError` exception text and are user-facing.
 
