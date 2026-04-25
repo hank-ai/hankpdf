@@ -519,13 +519,29 @@ to:
 pdf = pikepdf.open(io.BytesIO(pdf_bytes), password=password or "")
 ```
 
-As the first statement of the inner `try:` block (line 195 in the current file), immediately before `pages = len(pdf.pages)` (line 196), insert a single line so the `TriageReport.is_encrypted` field reflects reality when a password successfully unlocked the PDF:
+**Important variable-reuse trap:** the existing local `is_encrypted` (line 169, init `False`) is fed into `_classify(is_encrypted=is_encrypted, ...)` at line 207-208. `_classify` returns `"require-password"` when `is_encrypted=True` (line 157). If we reuse the same local name to record "yes the input was encrypted but we got in", classification flips to `"require-password"` on the success path and breaks every test.
+
+Use a SEPARATE local variable for the report-only field. As the first statement of the inner `try:` block (line 195 in the current file), immediately before `pages = len(pdf.pages)` (line 196), insert:
 
 ```python
-is_encrypted = bool(pdf.is_encrypted)
+report_is_encrypted = bool(pdf.is_encrypted)
 ```
 
-The pre-existing local `is_encrypted = False` at line 169 stays as the initialization for the still-encrypted-and-no-password branch. The `pikepdf.PasswordError` branch at lines 172-190 keeps `is_encrypted=True` literally. The new line above only fires on the success path. Net behavior:
+Then change the `TriageReport(...)` construction at line 215 from:
+
+```python
+is_encrypted=is_encrypted,
+```
+
+to:
+
+```python
+is_encrypted=report_is_encrypted,
+```
+
+Leave the `_classify(is_encrypted=is_encrypted, ...)` call at line 207-208 UNCHANGED — `is_encrypted` stays `False` on the success path so `_classify` returns "proceed" (or whatever non-`require-password` classification is appropriate).
+
+Net behavior:
 
 | Input | Password supplied? | Correct? | `is_encrypted` |
 |---|---|---|---|
@@ -548,7 +564,13 @@ def triage(input_data: bytes, *, password: str | None = None) -> TriageReport:
     return _triage(input_data, password=password)
 ```
 
-**(b) `compress()` triage call** — search for `tri = triage(` inside `compress()`. Change to `tri = triage(input_data, password=options.password)`.
+**(b) `compress()` triage call** — `pdf_smasher/__init__.py:766` aliases `from pdf_smasher.engine.triage import triage as _triage`, and the call at line 771 reads `tri = _triage(input_data)`. Change to:
+
+```python
+tri = _triage(input_data, password=options.password)
+```
+
+(Use the `_triage` alias name verbatim — searching for `tri = triage(` would find no match because of the local rename.)
 
 **(c) Per-page split via pikepdf.open** — `pdf_smasher/__init__.py:847`:
 

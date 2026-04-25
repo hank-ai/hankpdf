@@ -108,7 +108,7 @@ Both remain user-overridable via the existing CLI flags. Document in README and 
 ### W4. MEDIUM hardening
 
 **W4a. Depth-cap fail-closed in triage.**
-`pdf_smasher/engine/triage.py` `_walk_dict_for_names` returns "no hits" past `max_depth=12`. Change: when `depth > max_depth`, raise `MaliciousPDFError("nested resource tree exceeds inspection depth; refusing")`. Bump max_depth to 32 (large enough for any legitimate PDF; deep-nesting attacks are now refused loudly instead of silently waved through). Existing test for the JS-detection path needs an extension.
+`pdf_smasher/engine/triage.py` `_walk_dict_for_names` returns "no hits" past `max_depth=12`. Change: when `depth > max_depth`, raise `MaliciousPDFError("nested resource tree exceeds inspection depth; refusing")`. Bump max_depth to 64 (large enough for legitimate heavily-nested PDFs — heavy form trees, tagged accessibility — while still bounding recursion-bomb attempts). The plan tuned this from 32 → 64 during round-1 review for more headroom. Existing test for the JS-detection path needs an extension.
 
 **W4b. `O_NOFOLLOW` in `_atomic_write_bytes`.**
 `pdf_smasher/utils/atomic.py:24-38` — replace `tmp.write_bytes(data)` with `os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)` then `os.write` + `os.close`. Refuses to follow a pre-placed symlink at the partial-write path. Document in `SECURITY.md` that the output directory is assumed to be writable only by the running user.
