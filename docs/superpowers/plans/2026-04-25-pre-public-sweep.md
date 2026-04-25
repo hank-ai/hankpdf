@@ -323,16 +323,14 @@ Expected: 5 passed.
 
 - [ ] **Step 3.5: Wire helper into `rasterize.py`**
 
-In `pdf_smasher/engine/rasterize.py`, after the `page = pdf[page_index]` line and before `bitmap = page.render(...)`, add:
+In `pdf_smasher/engine/rasterize.py`, the existing function already binds `width_pt, height_pt = page.get_size()` (line 40) before computing the target raster size. Insert the new check **after** that binding and **before** `bitmap = page.render(...)`. Concretely: insert immediately before the `target_w = ...` calculation on line 41, so `width_pt`/`height_pt`/`dpi` are all in scope.
 
 ```python
 from pdf_smasher.engine._render_safety import check_render_size  # at top of file
 
-# inside the function, before page.render:
+# inside the function, after `width_pt, height_pt = page.get_size()`:
 check_render_size(width_pt=width_pt, height_pt=height_pt, dpi=dpi)
 ```
-
-Use the existing `width_pt, height_pt = page.get_size()` and `dpi` parameter already in scope.
 
 - [ ] **Step 3.6: Wire helper into `image_export.py` (keep the `_MAX_BOMB_PIXELS` alias)**
 
@@ -348,7 +346,7 @@ In `pdf_smasher/engine/image_export.py`:
 uv run pytest tests/unit -q
 ```
 
-Expected: all green (was 245 + 4 new = 249).
+Expected: all green (was 245 + 5 new = 250).
 
 - [ ] **Step 3.8: Commit**
 
