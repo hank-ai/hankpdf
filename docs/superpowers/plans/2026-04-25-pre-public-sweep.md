@@ -43,10 +43,11 @@ Expect 245 passed. This is the green baseline.
 - `tests/unit/test_types.py` (assert tightened defaults)
 - `pdf_smasher/types.py` (defaults; `max_pages: int | None = 10000`)
 - `pdf_smasher/cli/main.py` (defaults, password file read, stat-before-read in `else:` branch)
-- `pdf_smasher/__init__.py` (password threading into public `triage` shim, `compress` triage call, per-page split; enriched refusal messages)
-- `pdf_smasher/engine/triage.py` (password kwarg; depth-cap fail-closed at 64)
+- `pdf_smasher/__init__.py` (password threading into public `triage` shim, `compress` triage call, page-sizing pdfium open at line 834, per-page split; enriched refusal messages)
+- `pdf_smasher/engine/triage.py` (password kwarg; `is_encrypted` reflects real state on success path; depth-cap fail-closed at 64)
+- `pdf_smasher/engine/canonical.py` (password kwarg on `canonical_input_sha256`)
 - `pdf_smasher/engine/rasterize.py` (use `_render_safety`)
-- `pdf_smasher/engine/image_export.py` (use `_render_safety`; keep `_MAX_BOMB_PIXELS` alias)
+- `pdf_smasher/engine/image_export.py` (use `_render_safety`; keep `_MAX_BOMB_PIXELS` alias; password kwarg on user-input pdfium open)
 - `pdf_smasher/utils/atomic.py` (`O_NOFOLLOW` on POSIX)
 - `pdf_smasher/_pillow_hardening.py` (idempotent `ensure_capped()`)
 - `pdf_smasher/engine/{rasterize,image_export,compose,verifier,background,foreground,mask,ocr,strategy}.py` (call `ensure_capped()` after PIL import)
@@ -308,9 +309,7 @@ def check_render_size(
     if target_w * target_h > max_pixels:
         raise DecompressionBombError(
             f"page would render to {target_w}x{target_h} pixels "
-            f"({target_w * target_h:,} px), exceeding cap of {max_pixels:,} "
-            f"(~2 GiB raw RGB; override via check_render_size(max_pixels=N) "
-            f"if you have bounded the allocation by other means)"
+            f"({target_w * target_h:,} px), exceeding cap of {max_pixels:,}"
         )
 ```
 
@@ -438,7 +437,7 @@ Expected:
 - `test_triage_with_correct_password_succeeds` and `test_triage_with_wrong_password_classifies_require_password` and `test_triage_multipage_with_correct_password_returns_correct_page_count` FAIL with `TypeError: triage() got an unexpected keyword argument 'password'`.
 - `test_triage_with_no_password_classifies_require_password` PASSES (pre-existing behavior).
 
-- [ ] **Step 4.3: Add `password` kwarg to engine `triage()`**
+- [ ] **Step 4.3: Add `password` kwarg to engine `triage()` and propagate `is_encrypted`**
 
 In `pdf_smasher/engine/triage.py:164`, change the signature from:
 
@@ -464,19 +463,26 @@ to:
 pdf = pikepdf.open(io.BytesIO(pdf_bytes), password=password or "")
 ```
 
-- [ ] **Step 4.4: Update the public `triage` shim and the `compress()` triage call**
-
-In `pdf_smasher/__init__.py:669`, change the public re-export from:
+After the success-open (around line 195, just before `pages = len(pdf.pages)`), add a single line so the `TriageReport.is_encrypted` field reflects reality when a password successfully unlocked the PDF:
 
 ```python
-def triage(input_data: bytes) -> TriageReport:
-    """Cheap structural scan. Never decodes image streams. See SPEC.md §4."""
-    from pdf_smasher.engine.triage import triage as _triage
-
-    return _triage(input_data)
+is_encrypted = bool(pdf.is_encrypted)
 ```
 
-to:
+The pre-existing local `is_encrypted = False` at line 169 stays as the initialization for the still-encrypted-and-no-password branch. The `pikepdf.PasswordError` branch at lines 172-190 keeps `is_encrypted=True` literally. The new line above only fires on the success path. Net behavior:
+
+| Input | Password supplied? | Correct? | `is_encrypted` |
+|---|---|---|---|
+| Plaintext PDF | n/a | n/a | `False` (pdfium reports `False`) |
+| Encrypted PDF | No | n/a | `True` (PasswordError branch) |
+| Encrypted PDF | Yes | No | `True` (PasswordError branch) |
+| Encrypted PDF | Yes | Yes | **`True`** (new line — was `False` before) |
+
+- [ ] **Step 4.4: Update every site that opens user-supplied PDF bytes**
+
+The encrypted bytes flow through more than just `compress()`. Every site below reads user input directly (not a per-page plaintext slice). All must accept the password.
+
+**(a) Public `triage` shim** — `pdf_smasher/__init__.py:669`:
 
 ```python
 def triage(input_data: bytes, *, password: str | None = None) -> TriageReport:
@@ -486,9 +492,42 @@ def triage(input_data: bytes, *, password: str | None = None) -> TriageReport:
     return _triage(input_data, password=password)
 ```
 
-Then find the `triage(input_data)` call inside `compress()` (search for `tri = triage(`) and change it to `tri = triage(input_data, password=options.password)`.
+**(b) `compress()` triage call** — search for `tri = triage(` inside `compress()`. Change to `tri = triage(input_data, password=options.password)`.
 
-Per-page split: find the line near 847 that reads `pikepdf.open(io.BytesIO(input_data))` and change to `pikepdf.open(io.BytesIO(input_data), password=options.password or "")`. (Once split, downstream slices are plaintext — see scope-decision note above.)
+**(c) Per-page split via pikepdf.open** — `pdf_smasher/__init__.py:847`:
+
+```python
+with pikepdf.open(io.BytesIO(input_data), password=options.password or "") as _src_split:
+```
+
+**(d) Page-sizing pdfium open** — `pdf_smasher/__init__.py:834`:
+
+```python
+pdf_dims = pdfium.PdfDocument(input_data, password=options.password)
+```
+
+(`pypdfium2.PdfDocument` accepts `password=` directly, no normalization needed.)
+
+**(e) Canonical hash open** — `pdf_smasher/engine/canonical.py:19`. Change the signature and inner open:
+
+```python
+def canonical_input_sha256(pdf_bytes: bytes, *, password: str | None = None) -> str:
+    """Return the SHA-256 hex digest of a canonicalized form of ``pdf_bytes``."""
+    with pikepdf.open(io.BytesIO(pdf_bytes), password=password or "") as pdf:
+        ...
+```
+
+Then update its caller in `pdf_smasher/__init__.py` (search for `canonical_input_sha256(input_data)`) to forward `options.password`. (This caller currently soft-fails to `None` on `pikepdf.PdfError`; with the password threaded, encrypted-with-correct-password input will succeed.)
+
+**(f) Image-export route triage** — `pdf_smasher/cli/main.py:730`. The `_run_image_export` path currently calls `tri = triage(input_bytes)` with no password — `--password-file image.pdf -o page.jpg` would always exit `EXIT_ENCRYPTED`. Change to:
+
+```python
+tri = triage(input_bytes, password=_read_password(args))
+```
+
+Then ensure the `_run_image_export(...)` call below this `triage` block also receives the password (either by adding a `password: str | None = None` kwarg to `_run_image_export` and forwarding it, or by reading the password from `args` again inside `_run_image_export` — pick whichever matches the function's existing parameter style).
+
+**(g) Image-export pdfium open** — `pdf_smasher/engine/image_export.py` opens the user bytes via `pypdfium2.PdfDocument(...)`. Add `password: str | None = None` to whichever helper holds the open call (`_page_size_points` and the main render path). Pass `password=password` to every `pypdfium2.PdfDocument(...)` call. The caller (`_run_image_export` in cli/main.py from step f) forwards the password.
 
 - [ ] **Step 4.5: Fix CLI password-file read (Windows CRLF safe)**
 
@@ -512,13 +551,27 @@ elif content.endswith(("\n", "\r")):
 return content or None
 ```
 
-- [ ] **Step 4.5b: Verify no other PDF-open site needs password**
+- [ ] **Step 4.5b: Verify every PDF-open site is accounted for**
 
 ```bash
 grep -rn 'pikepdf\.open(\|pdfium\.PdfDocument(\|pypdfium2\.PdfDocument(' pdf_smasher/
 ```
 
-Expected: every `pikepdf.open(` either takes `password=` (the two we just edited) OR opens an in-memory plaintext slice produced by the per-page split. `pdfium.PdfDocument(` and `pypdfium2.PdfDocument(` calls receive only plaintext slices — leave them alone. If you find a `pikepdf.open(` call that reads user-supplied bytes WITHOUT a password kwarg, add `password=options.password or ""` to it and document the new site here.
+Expect 9 matches (verified 2026-04-25). Each must fall into exactly one of these dispositions:
+
+| File:line | Disposition |
+|---|---|
+| `pdf_smasher/engine/triage.py:171` | **EDIT** — Step 4.3 adds `password=password or ""` |
+| `pdf_smasher/__init__.py:834` (`pdfium.PdfDocument(input_data)`) | **EDIT** — Step 4.4d adds `password=options.password` |
+| `pdf_smasher/__init__.py:847` (per-page split `pikepdf.open(input_data)`) | **EDIT** — Step 4.4c adds `password=options.password or ""` |
+| `pdf_smasher/__init__.py:1149` (post-compose `pikepdf.open(composed_bytes)`) | **SAFE** — already-composed plaintext output bytes |
+| `pdf_smasher/engine/canonical.py:21` | **EDIT** — Step 4.4e adds `password=password or ""` |
+| `pdf_smasher/engine/chunking.py:49` | **SAFE** — operates on composed output PDF bytes |
+| `pdf_smasher/engine/text_layer.py:87` | **SAFE** — receives composed plaintext bytes |
+| `pdf_smasher/engine/rasterize.py:34` (`pdfium.PdfDocument(pdf_bytes)`) | **SAFE** — per-page plaintext slice from Step 4.4c |
+| `pdf_smasher/engine/image_export.py:159` (`pdfium.PdfDocument(pdf_bytes)`) | **EDIT** — Step 4.4g adds `password=password` |
+
+If the grep returns a number other than 9, or any new site appears, stop and audit each one before continuing. Add a new row to the table and pick a disposition.
 
 - [ ] **Step 4.6: Run new + baseline tests**
 
@@ -531,13 +584,19 @@ Expected: all green.
 - [ ] **Step 4.7: Commit**
 
 ```bash
-git add pdf_smasher/engine/triage.py pdf_smasher/__init__.py pdf_smasher/cli/main.py tests/unit/engine/test_password_plumbing.py
-git commit -m "feat(security): plumb --password-file through pikepdf-open sites
+git add pdf_smasher/engine/triage.py pdf_smasher/engine/canonical.py pdf_smasher/engine/image_export.py pdf_smasher/__init__.py pdf_smasher/cli/main.py tests/unit/engine/test_password_plumbing.py
+git commit -m "feat(security): plumb --password-file through every user-input PDF-open site
 
-The two sites that touch user-supplied encrypted bytes — engine.triage
-and the per-page split in __init__.compress — now accept password=.
-The public triage() re-export forwards the kwarg. Downstream pdfium
-calls operate on plaintext slices and don't need the password.
+Every site that opens user-supplied PDF bytes — engine.triage,
+__init__.compress (page-sizing pdfium open + per-page split),
+engine.canonical (canonical_input_sha256), engine.image_export
+(_run_image_export's pdfium open), the public triage() re-export,
+and cli.main._run_image_export's triage call — now accepts a
+password kwarg and forwards options.password / args password.
+Per-page plaintext slices and composed-output opens are left alone.
+
+triage() also propagates is_encrypted=True after a successful
+password-decrypt (was False, masking real encryption status).
 
 CLI password-file read switches from locale-decoded + .strip() to
 utf-8-decoded + targeted CRLF/LF/CR strip so passwords with internal
@@ -745,24 +804,19 @@ def _build_nested_dict(depth: int) -> dict[str, object]:
     return root
 
 
-def test_walk_dict_under_cap_returns_silently() -> None:
-    # Plain dicts aren't pikepdf Dictionary instances, so they yield no
-    # hits — but the call must not raise as long as depth is within cap.
-    d = _build_nested_dict(20)
-    result = _walk_dict_for_names(d, frozenset({"JS"}), set())
+def test_walk_dict_at_cap_boundary_passes() -> None:
+    # Calling with depth==max_depth must NOT raise (boundary is `>`, not `>=`).
+    result = _walk_dict_for_names({}, frozenset({"JS"}), set(), depth=64, max_depth=64)
     assert result == set()
 
 
-def test_walk_dict_over_cap_raises_malicious() -> None:
-    # Plain Python dicts are not traversed (not pikepdf Dictionary), so to
-    # exercise the depth-cap path we use a pikepdf-like nested structure.
-    # _walk_dict_for_names only descends into pikepdf.Dictionary / Array;
-    # dicts past the cap never reach the raise. We therefore test against
-    # the raise path via a recursion-counter helper instead — exercise the
-    # cap by calling the function directly with a high starting depth.
+def test_walk_dict_one_past_cap_raises_malicious() -> None:
+    # depth=65 with max_depth=64 must raise.
     with pytest.raises(MaliciousPDFError):
-        _walk_dict_for_names({}, frozenset({"JS"}), set(), depth=99, max_depth=64)
+        _walk_dict_for_names({}, frozenset({"JS"}), set(), depth=65, max_depth=64)
 ```
+
+Note: plain Python dicts aren't `pikepdf.Dictionary` instances, so the recursive descent at line 47 is skipped. The boundary tests above exercise the raise path directly by calling with explicit `depth=` and `max_depth=` values. The under-cap regression — that real `pikepdf.Dictionary` trees deeper than 12 but shallower than 64 don't get refused — is covered indirectly by the existing `tests/unit` baseline (245 tests across real and synthetic PDFs).
 
 - [ ] **Step 6.2: Run, see it fail**
 
@@ -771,8 +825,8 @@ uv run pytest tests/unit/engine/test_triage_depth_cap.py -v
 ```
 
 Expected:
-- `test_walk_dict_under_cap_returns_silently` PASSES (no exception under existing code).
-- `test_walk_dict_over_cap_raises_malicious` FAILS — current `if depth > max_depth: return hits` early-returns silently instead of raising.
+- `test_walk_dict_at_cap_boundary_passes` PASSES (existing code already returns silently at exactly the cap).
+- `test_walk_dict_one_past_cap_raises_malicious` FAILS — current `if depth > max_depth: return hits` early-returns silently instead of raising.
 
 - [ ] **Step 6.3: Update `_walk_dict_for_names`**
 
@@ -805,8 +859,9 @@ git commit -m "feat(security): depth-cap fail-closed in triage walker
 
 _walk_dict_for_names previously returned silently past the depth cap,
 which meant deeply nested JS / EmbeddedFiles entries skipped detection.
-Now raises MaliciousPDFError. Cap raised from 12 to 32 to keep
-legitimate PDFs unaffected."
+Now raises MaliciousPDFError. Cap raised from 12 to 64 to keep
+legitimate heavily-nested PDFs (form trees, tagged accessibility)
+unaffected."
 ```
 
 ---
@@ -968,6 +1023,8 @@ out = subprocess.run([resolved, "--version"], capture_output=True, check=False, 
 ```
 
 (Move the existing `which` check into a single resolution step, then pass the resolved absolute path to `subprocess.run`. Net behavior is identical for the present-and-absent cases; the only change is that the running subprocess uses the absolute path.)
+
+**Preserve `except subprocess.TimeoutExpired, OSError:` at audit.py:44 verbatim.** Python 3.14 (PEP 758) accepts unparenthesized `except` lists; the existing style in this file is intentional (see spec §1 context note). Do NOT "modernize" it to `except (subprocess.TimeoutExpired, OSError):`.
 
 - [ ] **Step 8.3: Run baseline**
 
@@ -1356,7 +1413,7 @@ Create `.github/PULL_REQUEST_TEMPLATE.md`:
 - [ ] `uv run ruff check pdf_smasher tests`
 - [ ] `uv run ruff format --check pdf_smasher tests`
 - [ ] `uv run mypy pdf_smasher`
-- [ ] Conventional Commits prefix on every commit (feat / fix / chore / docs / refactor / test / perf / ci)
+- [ ] Conventional Commits prefix on every commit (feat / fix / chore / docs / refactor / test / perf / security / observability / diag — see `CONTRIBUTING.md`)
 
 ## Notes for reviewers
 
@@ -1406,16 +1463,18 @@ If the package does not exist yet: keep "Not yet published to PyPI or GHCR" but 
 
 - [ ] **Step 14.3: Fix Docker image tag examples (both occurrences)**
 
-Find ALL occurrences of `ghcr.io/hank-ai/hankpdf:v0.0.1` in `README.md`:
+Find both occurrences of `ghcr.io/hank-ai/hankpdf:v0.0.1` in `README.md`:
 
 ```bash
 grep -n "v0\.0\.1" README.md
 ```
 
-Two occurrences are expected (around lines 109 and 124 — the `docker pull` example and the `cosign verify` example). Change both to `:latest` (for the docker pull) or to a placeholder `:<your-tag>` (for cosign verify, since cosign without a real tag fails). Pragmatic split:
+Two occurrences (around lines 109 and 124). The surrounding copy at line 105 says **"For production use, pin to an immutable tag or digest"** — so changing line 109 to `:latest` would directly contradict the paragraph. Use a placeholder instead so the example still says "pin to a real version" without falsely claiming `v0.0.1` exists:
 
-- Line 109 (docker pull) → `:latest`.
-- Line 124 (cosign verify) → keep `:latest` if Step 14.2 confirms GHCR is publishing on every main merge; otherwise replace with a comment noting "swap `:latest` for the tag you're verifying."
+- **Line 109** (`docker pull` example): change `ghcr.io/hank-ai/hankpdf:v0.0.1` → `ghcr.io/hank-ai/hankpdf:<version-tag>` and add an inline comment in the surrounding text: `# Replace <version-tag> with a published tag, e.g. v0.1.0; see GitHub Releases.`
+- **Line 124** (`cosign verify` example): same — change `:v0.0.1` → `:<version-tag>`. The cosign command keeps its meaning (verify whatever tag you choose).
+
+If line 105's "pin to immutable tag or digest" copy already shows the SHA-digest example below it (verified at line 112: `docker pull ghcr.io/hank-ai/hankpdf@sha256:<digest>`), the placeholder approach reads naturally next to it.
 
 - [ ] **Step 14.4: Verify**
 
