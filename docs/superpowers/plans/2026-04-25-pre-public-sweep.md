@@ -455,7 +455,7 @@ def test_image_export_with_correct_password_succeeds() -> None:
     blobs = list(
         iter_pages_as_images(
             pdf_bytes,
-            page_indexes=(0, 1),
+            [0, 1],
             image_format="jpeg",
             dpi=72,
             password="hunter2",
@@ -464,9 +464,24 @@ def test_image_export_with_correct_password_succeeds() -> None:
     assert len(blobs) == 2
     # JPEG SOI marker
     assert all(b[:3] == b"\xff\xd8\xff" for b in blobs)
+
+
+def test_compress_with_correct_password_succeeds() -> None:
+    """End-to-end: encrypted input + correct password through compress()."""
+    from pdf_smasher import compress
+    from pdf_smasher.types import CompressOptions
+
+    pdf_bytes = _make_encrypted_pdf("hunter2", pages=2)
+    options = CompressOptions(password="hunter2", skip_verify=True)
+    output, report = compress(pdf_bytes, options=options)
+    # We don't assert ratio (compression on a blank-page fixture is
+    # uninformative); we assert the compress pipeline COMPLETED rather
+    # than refusing at the encrypted-input gate.
+    assert isinstance(output, bytes)
+    assert report.input_bytes == len(pdf_bytes)
 ```
 
-(Adjust the `iter_pages_as_images` call signature in the test to match the actual function — `page_indexes` may be named `pages` or similar in the real code. Read `pdf_smasher/engine/image_export.py:58` to confirm the parameter name and JPEG-format constant before writing the test.)
+The actual `iter_pages_as_images` signature (verified at `pdf_smasher/engine/image_export.py:58-73`) takes `page_indices: list[int]` as the 2nd positional argument and the rest as kw-only. The test above uses positional `[0, 1]` to match.
 
 - [ ] **Step 4.2: Run, see it fail**
 
@@ -1131,7 +1146,7 @@ subprocess call and makes the resolved path explicit in error messages."
 
 **Files:**
 - Modify: `pdf_smasher/_pillow_hardening.py`
-- Modify: `pdf_smasher/engine/rasterize.py`, `pdf_smasher/engine/image_export.py`, `pdf_smasher/engine/compose.py`, `pdf_smasher/engine/verifier.py` (call `ensure_capped()` at module top)
+- Modify: every `pdf_smasher/engine/*.py` that imports PIL — `background.py`, `compose.py`, `foreground.py`, `image_export.py`, `mask.py`, `ocr.py`, `rasterize.py`, `strategy.py`, `verifier.py` (call `ensure_capped()` at module top)
 - Create: `tests/unit/test_pillow_cap_idempotent.py`
 
 - [ ] **Step 9.1: Write the failing test**
@@ -1198,7 +1213,7 @@ grep -l "^import PIL\|^from PIL" pdf_smasher/engine/*.py
 
 Expected matches (all of these): `background.py`, `compose.py`, `foreground.py`, `image_export.py`, `mask.py`, `ocr.py`, `rasterize.py`, `strategy.py`, `verifier.py`.
 
-At the top of each matched module, after the existing PIL import line, add:
+At the top of each matched module, after the existing PIL import (the line may be `import PIL.Image`, `from PIL import Image`, `import PIL`, or any variant — match on whatever the file currently has), add:
 
 ```python
 from pdf_smasher._pillow_hardening import ensure_capped
@@ -1206,7 +1221,7 @@ from pdf_smasher._pillow_hardening import ensure_capped
 ensure_capped()
 ```
 
-Place the import + call AFTER the `import PIL.Image` line so the cap is installed at module-load time on the same `PIL.Image` reference the module uses.
+Place the import + call AFTER any PIL import so the cap is installed at module-load time on the same `PIL.Image` reference the module uses.
 
 - [ ] **Step 9.5: Run all tests**
 
@@ -1219,7 +1234,17 @@ Expected: all green.
 - [ ] **Step 9.6: Commit**
 
 ```bash
-git add pdf_smasher/_pillow_hardening.py pdf_smasher/engine/rasterize.py pdf_smasher/engine/image_export.py pdf_smasher/engine/compose.py pdf_smasher/engine/verifier.py tests/unit/test_pillow_cap_idempotent.py
+git add pdf_smasher/_pillow_hardening.py \
+        pdf_smasher/engine/background.py \
+        pdf_smasher/engine/compose.py \
+        pdf_smasher/engine/foreground.py \
+        pdf_smasher/engine/image_export.py \
+        pdf_smasher/engine/mask.py \
+        pdf_smasher/engine/ocr.py \
+        pdf_smasher/engine/rasterize.py \
+        pdf_smasher/engine/strategy.py \
+        pdf_smasher/engine/verifier.py \
+        tests/unit/test_pillow_cap_idempotent.py
 git commit -m "chore(security): idempotent Pillow cap; engine modules self-install
 
 Programmatic callers that import only an engine submodule (without
