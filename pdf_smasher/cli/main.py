@@ -497,7 +497,15 @@ def _parse_pages_spec(spec: str) -> set[int]:
 
 def _read_password(args: argparse.Namespace) -> str | None:
     if args.password_file is not None:
-        return args.password_file.read_text().strip() or None
+        content = args.password_file.read_text(encoding="utf-8")
+        # Strip exactly one trailing newline (CR, LF, or CRLF). Don't use
+        # .strip() — that would also eat leading/trailing spaces inside the
+        # password itself.
+        if content.endswith("\r\n"):
+            content = content[:-2]
+        elif content.endswith(("\n", "\r")):
+            content = content[:-1]
+        return content or None
     return os.environ.get("HANKPDF_PASSWORD")
 
 
@@ -707,6 +715,7 @@ def _run_image_export(
     """
     _label = _input_label(args.input)
     _prefix = _line_prefix(_label)
+    password = _read_password(args)
 
     # --max-output-mb is a PDF-only concept (it splits a merged PDF into
     # size-bounded sibling files). In image-export mode each page is
@@ -727,7 +736,7 @@ def _run_image_export(
     # generic catch-all, so upstream can distinguish a decompression
     # bomb or malicious PDF from a plain corrupt one.
     try:
-        tri = triage(input_bytes)
+        tri = triage(input_bytes, password=password)
     except MaliciousPDFError as e:
         print(
             _refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label), file=sys.stderr
@@ -850,6 +859,7 @@ def _run_image_export(
             webp_quality=args.webp_quality,
             webp_lossless=args.webp_lossless,
             progress_callback=_progress,
+            password=password,
         )
 
         if n == 1:

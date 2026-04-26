@@ -14,7 +14,13 @@ from pdf_smasher.engine._render_safety import check_render_size
 _POINTS_PER_INCH = 72.0
 
 
-def rasterize_page(pdf_bytes: bytes, *, page_index: int, dpi: int) -> Image.Image:
+def rasterize_page(
+    pdf_bytes: bytes,
+    *,
+    page_index: int,
+    dpi: int,
+    password: str | None = None,
+) -> Image.Image:
     """Render a single page of ``pdf_bytes`` at ``dpi`` into a PIL RGB image.
 
     Parameters
@@ -33,7 +39,7 @@ def rasterize_page(pdf_bytes: bytes, *, page_index: int, dpi: int) -> Image.Imag
         RGB-mode image. 8 bits per channel — pdfium's public render API
         maxes out at 8-bit depth.
     """
-    pdf = pdfium.PdfDocument(pdf_bytes)
+    pdf = pdfium.PdfDocument(pdf_bytes, password=password)
     try:
         if page_index < 0 or page_index >= len(pdf):
             msg = f"page_index {page_index} out of range for {len(pdf)}-page document"

@@ -161,14 +161,14 @@ def _classify(
     return "proceed"
 
 
-def triage(pdf_bytes: bytes) -> TriageReport:
+def triage(pdf_bytes: bytes, *, password: str | None = None) -> TriageReport:
     """Classify a PDF input. See SPEC.md §4 for the full handling taxonomy."""
     is_linearized = _detect_linearized(pdf_bytes)
 
     # Probe encryption separately — pikepdf.open raises on missing password.
     is_encrypted = False
     try:
-        pdf = pikepdf.open(io.BytesIO(pdf_bytes))
+        pdf = pikepdf.open(io.BytesIO(pdf_bytes), password=password or "")
     except pikepdf.PasswordError:
         is_encrypted = True
         # We can still count pages but not inspect objects — return minimal
@@ -193,6 +193,7 @@ def triage(pdf_bytes: bytes) -> TriageReport:
         raise CorruptPDFError(msg) from e
 
     try:
+        report_is_encrypted = bool(pdf.is_encrypted)
         pages = len(pdf.pages)
         is_signed, is_certified = _detect_signature(pdf)
         is_tagged = _detect_tagged(pdf)
@@ -212,7 +213,7 @@ def triage(pdf_bytes: bytes) -> TriageReport:
     return TriageReport(
         pages=pages,
         input_bytes=len(pdf_bytes),
-        is_encrypted=is_encrypted,
+        is_encrypted=report_is_encrypted,
         is_signed=is_signed,
         is_certified_signature=is_certified,
         is_linearized=is_linearized,

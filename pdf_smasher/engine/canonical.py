@@ -16,9 +16,9 @@ import io
 import pikepdf
 
 
-def canonical_input_sha256(pdf_bytes: bytes) -> str:
+def canonical_input_sha256(pdf_bytes: bytes, *, password: str | None = None) -> str:
     """Return the SHA-256 hex digest of a canonicalized form of ``pdf_bytes``."""
-    with pikepdf.open(io.BytesIO(pdf_bytes)) as pdf:
+    with pikepdf.open(io.BytesIO(pdf_bytes), password=password or "") as pdf:
         # Strip metadata that changes per save / per producer but not content.
         if "/Info" in pdf.trailer:
             info = pdf.trailer["/Info"]

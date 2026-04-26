@@ -368,7 +368,9 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     warnings: list[str] = []
 
     # --- Rasterize input ---
-    raster = rasterize_page(winput.input_page_pdf, page_index=0, dpi=winput.source_dpi)
+    raster = rasterize_page(
+        winput.input_page_pdf, page_index=0, dpi=winput.source_dpi, password=None
+    )
 
     # Input OCR is needed when:
     #   - options.ocr (for add_text_layer positioning), OR
@@ -549,7 +551,9 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
                 color_preserved=False,
             )
         else:
-            output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
+            output_raster = rasterize_page(
+                composed, page_index=0, dpi=winput.source_dpi, password=None
+            )
             # Kick off output OCR in parallel with awaiting the input OCR (if
             # we haven't already needed it). Two tesseract subprocesses run
             # concurrently inside this worker — each uses 1 thread (OMP pinned)
@@ -666,11 +670,11 @@ def _extract_ground_truth_text(
     return fallback_ocr_text
 
 
-def triage(input_data: bytes) -> TriageReport:
+def triage(input_data: bytes, *, password: str | None = None) -> TriageReport:
     """Cheap structural scan. Never decodes image streams. See SPEC.md §4."""
     from pdf_smasher.engine.triage import triage as _triage
 
-    return _triage(input_data)
+    return _triage(input_data, password=password)
 
 
 def compress(
@@ -768,7 +772,7 @@ def compress(
 
     # --- Triage ---
     _emit("triage", f"triage: {len(input_data):,} bytes input")
-    tri = _triage(input_data)
+    tri = _triage(input_data, password=options.password)
 
     # Validate + apply only_pages filter.
     if only_pages is not None:
@@ -831,7 +835,7 @@ def compress(
     import pypdfium2 as pdfium
 
     # We need page dimensions — open with pdfium once for sizing.
-    pdf_dims = pdfium.PdfDocument(input_data)
+    pdf_dims = pdfium.PdfDocument(input_data, password=options.password)
     page_sizes: list[tuple[float, float]] = []
     try:
         for i in range(tri.pages):
@@ -844,7 +848,7 @@ def compress(
     # or serial) gets only its own 1-page PDF, never the whole source.
     # Byproduct: length → per-page input bytes used for honest ratio display.
     single_page_pdfs: dict[int, bytes] = {}
-    with pikepdf.open(io.BytesIO(input_data)) as _src_split:
+    with pikepdf.open(io.BytesIO(input_data), password=options.password or "") as _src_split:
         for i in _selected_indices:
             _single = pikepdf.new()
             try:
@@ -1220,7 +1224,7 @@ def compress(
     input_sha = hashlib.sha256(input_data).hexdigest()
     output_sha = hashlib.sha256(output_bytes).hexdigest()
     try:
-        canonical_sha: str | None = canonical_input_sha256(input_data)
+        canonical_sha: str | None = canonical_input_sha256(input_data, password=options.password)
     except pikepdf.PdfError:
         canonical_sha = None
 

@@ -71,6 +71,7 @@ def iter_pages_as_images(
     progress_callback: Callable[[str, int, int], None] | None = None,
     _force_rasterize_error_for_test: bool = False,
     _simulate_huge_page_for_test: bool = False,
+    password: str | None = None,
 ) -> Iterator[bytes]:
     """Streaming counterpart to :func:`render_pages_as_images`.
 
@@ -123,6 +124,7 @@ def iter_pages_as_images(
         progress_callback=progress_callback,
         _force_rasterize_error_for_test=_force_rasterize_error_for_test,
         _simulate_huge_page_for_test=_simulate_huge_page_for_test,
+        password=password,
     )
 
 
@@ -153,11 +155,13 @@ def _reraise_per_page_error(
     raise RuntimeError(wrapped) from exc
 
 
-def _page_size_points(pdf_bytes: bytes, page_index: int) -> tuple[float, float]:
+def _page_size_points(
+    pdf_bytes: bytes, page_index: int, *, password: str | None = None
+) -> tuple[float, float]:
     """Open the PDF briefly and return (width_pt, height_pt) for the given
     page WITHOUT rasterizing. Used for the pre-allocation pixel-budget check.
     """
-    doc = pdfium.PdfDocument(pdf_bytes)
+    doc = pdfium.PdfDocument(pdf_bytes, password=password)
     try:
         page = doc[page_index]
         try:
@@ -184,6 +188,7 @@ def _iter_pages_impl(
     progress_callback: Callable[[str, int, int], None] | None,
     _force_rasterize_error_for_test: bool,
     _simulate_huge_page_for_test: bool,
+    password: str | None = None,
 ) -> Iterator[bytes]:
     """Real generator body for :func:`iter_pages_as_images`.
 
@@ -203,12 +208,16 @@ def _iter_pages_impl(
             if _simulate_huge_page_for_test:
                 width_pt, height_pt = 100_000.0, 100_000.0
             else:
-                width_pt, height_pt = _page_size_points(pdf_bytes, page_index)
+                width_pt, height_pt = _page_size_points(
+                    pdf_bytes, page_index, password=password
+                )
             check_render_size(width_pt=width_pt, height_pt=height_pt, dpi=dpi)
             if _force_rasterize_error_for_test:
                 _forced = "forced test error"
                 raise RuntimeError(_forced)
-            raster = rasterize_page(pdf_bytes, page_index=page_index, dpi=dpi)
+            raster = rasterize_page(
+                pdf_bytes, page_index=page_index, dpi=dpi, password=password
+            )
             buf = io.BytesIO()
             rgb = raster.convert("RGB")
             if image_format == "jpeg":
