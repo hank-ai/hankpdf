@@ -20,6 +20,10 @@ Out of scope:
 - DoS via deliberately-pathological PDFs that trip our resource caps (SIGKILL on `RLIMIT_AS` exceedance is working as designed).
 - Vulnerabilities in dependencies we've already updated past — report those upstream.
 
+## Operational assumptions
+
+- The output directory passed via `-o`/`--output-dir` is assumed to be writable only by the running user. On POSIX, partial-write paths use `O_NOFOLLOW` so a pre-placed symlink at the partial path is refused; on Windows the partial path is written without a symlink check (no `O_NOFOLLOW` equivalent without ctypes).
+
 ## Release integrity
 
 We don't ship platform-native code-signing CA certs. Instead:
