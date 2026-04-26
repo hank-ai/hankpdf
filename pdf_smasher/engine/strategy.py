@@ -21,6 +21,10 @@ from enum import Enum
 import numpy as np
 from PIL import Image
 
+from pdf_smasher._pillow_hardening import ensure_capped
+
+ensure_capped()
+
 _MASK_COVERAGE_MIXED_FLOOR = 0.05  # below this → single-image route
 LIGHT_PIXEL_VALUE = 230  # public — shared with foreground.detect_paper_color
 _LIGHT_PIXEL_FRACTION_UNIFORM = 0.80  # >=80% light pixels = paper-dominated (text-like bg)

@@ -25,7 +25,10 @@ from PIL import Image
 from skimage.measure import block_reduce
 from skimage.metrics import structural_similarity
 
+from pdf_smasher._pillow_hardening import ensure_capped
 from pdf_smasher.types import VerifierResult
+
+ensure_capped()
 
 _DIGIT_RUN_RE = re.compile(r"\d+(?:[.,]\d+)?(?:\s*(?:mg|mcg|mL|IU|ng|g|kg|lb|oz|%))?")
 

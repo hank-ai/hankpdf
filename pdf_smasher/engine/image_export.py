@@ -24,9 +24,12 @@ import PIL.Image
 import pypdfium2 as pdfium
 
 from pdf_smasher._limits import MAX_BOMB_PIXELS as _MAX_BOMB_PIXELS
+from pdf_smasher._pillow_hardening import ensure_capped
 from pdf_smasher.engine._render_safety import check_render_size
 from pdf_smasher.engine.rasterize import rasterize_page
 from pdf_smasher.exceptions import DecompressionBombError
+
+ensure_capped()
 
 ImageFormat = Literal["jpeg", "png", "webp"]
 

@@ -16,7 +16,10 @@ from dataclasses import dataclass
 import pytesseract
 from PIL import Image
 
+from pdf_smasher._pillow_hardening import ensure_capped
 from pdf_smasher.exceptions import OcrTimeoutError
+
+ensure_capped()
 
 _BLOCK_OF_TEXT_PSM = "6"  # assume a single uniform block of text
 

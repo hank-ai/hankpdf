@@ -26,7 +26,10 @@ from typing import Any, Literal
 import pikepdf
 from PIL import Image
 
+from pdf_smasher._pillow_hardening import ensure_capped
 from pdf_smasher.engine.codecs.jbig2 import encode_1bit_jbig2
+
+ensure_capped()
 
 BgColorMode = Literal["rgb", "grayscale"]
 BgCodec = Literal["jpeg", "jpeg2000"]
