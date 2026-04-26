@@ -4,7 +4,7 @@ Aggressive, safety-first PDF shrinker for scanned documents. Takes a PDF in, pro
 
 _Repo / package name: `pdf-smasher`. Product brand: **HankPDF**._
 
-**Status:** Working CLI + library. 327 tests passing on Linux / macOS / Windows CI. Not yet published to PyPI or GHCR — install from the repo (see **Setup** below).
+**Status:** Working CLI + library. 340 tests passing on Linux / macOS / Windows CI. Not yet published to PyPI or GHCR (GHCR pushes are wired up in `docker.yml` and run on the next merge to `main`) — install from the repo (see **Setup** below).
 
 ## What it does
 
@@ -106,7 +106,7 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/data" \
 
 ```bash
 # Immutable — a specific release:
-docker pull ghcr.io/hank-ai/hankpdf:v0.0.1
+docker pull ghcr.io/hank-ai/hankpdf:<version-tag>
 
 # Immutable — a specific commit SHA:
 docker pull ghcr.io/hank-ai/hankpdf@sha256:<digest>
@@ -121,7 +121,7 @@ and carries a SLSA v1 build-provenance attestation. Verify before
 running in production:
 
 ```bash
-cosign verify ghcr.io/hank-ai/hankpdf:v0.0.1 \
+cosign verify ghcr.io/hank-ai/hankpdf:<version-tag> \
     --certificate-identity-regexp 'https://github\.com/hank-ai/hankpdf/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -245,7 +245,7 @@ hankpdf --version
 ### Running tests
 
 ```bash
-uv run pytest -q                          # all 327 tests (~1 min)
+uv run pytest -q                          # all 340 tests (~1 min)
 uv run pytest tests/unit -v               # unit only (~10 s)
 uv run pytest -m integration -v           # integration only
 uv run pytest --cov=pdf_smasher           # with coverage
