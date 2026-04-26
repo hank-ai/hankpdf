@@ -67,13 +67,13 @@ Store golden expectations in `tests/corpus/golden/<fixture>.json`. Don't store g
    - USPTO patent scans
    - Public-domain book scans (Project Gutenberg alternatives)
 2. Download and compute SHA-256.
-3. Upload to our S3 corpus bucket (once provisioned).
+3. Upload to a mirror you control. Anything `urllib` can fetch works — S3 via HTTPS, your own HTTPS host, even a `file://` path during local development. The mirror is optional; the upstream `url` is the fallback.
 4. Add entry to `tests/corpus/manifest.json`:
    ```json
    {
      "filename": "govinfo-2021-house-hearing.pdf",
      "url": "https://www.govinfo.gov/...",
-     "s3_mirror": "s3://our-corpus-bucket/govinfo-2021-house-hearing.pdf",
+     "mirror_url": "https://example.com/mirror/govinfo-2021-house-hearing.pdf",
      "sha256": "abc123...",
      "tags": ["mono", "text", "large", "linearized"],
      "license": "Public domain (U.S. government work)",

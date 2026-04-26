@@ -63,7 +63,7 @@ uv run pre-commit run --all-files       # manual run
 
 ## Corpus
 
-Real PDFs are not committed. They live in an S3 bucket and are fetched on demand by `scripts/fetch_corpus.py` against `tests/corpus/manifest.json`. See `tests/corpus/README.md` for how to add a fixture.
+Real PDFs are not committed. They live wherever you like (S3, an HTTPS host, a local cache) and are fetched on demand by `scripts/fetch_corpus.py` against `tests/corpus/manifest.json`. See `tests/corpus/README.md` for how to add a fixture.
 
 ## Design docs
 
