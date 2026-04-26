@@ -66,8 +66,8 @@ class CompressOptions:
     min_ratio: float = 1.5
 
     # Limits
-    max_pages: int | None = None
-    max_input_mb: float = 2000.0
+    max_pages: int | None = 10000  # None disables the gate (programmatic-only escape hatch)
+    max_input_mb: float = 250.0
     per_page_timeout_seconds: int = 120
     total_timeout_seconds: int = 1200
     photo_target_dpi: int = 200  # DPI for PHOTO_ONLY pages

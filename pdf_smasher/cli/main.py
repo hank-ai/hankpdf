@@ -259,8 +259,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--password-file", type=Path, help="Read password from file")
 
     # Limits + passthrough floors
-    p.add_argument("--max-pages", type=int)
-    p.add_argument("--max-input-mb", type=float, default=2000.0)
+    p.add_argument("--max-pages", type=int, default=10000)
+    p.add_argument("--max-input-mb", type=float, default=250.0)
     p.add_argument(
         "--min-input-mb",
         type=float,
@@ -991,6 +991,15 @@ def main(argv: list[str] | None = None) -> int:
     if str(args.input) == "-":
         input_bytes = sys.stdin.buffer.read()
     else:
+        size_mb = args.input.stat().st_size / (1024 * 1024)
+        if size_mb > args.max_input_mb:
+            print(
+                f"refused: input is {size_mb:.1f} MB, exceeds --max-input-mb={args.max_input_mb} "
+                f"(default tightened from 2000.0; pass --max-input-mb 2000 to restore "
+                f"the previous behavior)",
+                file=sys.stderr,
+            )
+            return EXIT_OVERSIZE
         input_bytes = args.input.read_bytes()
 
     # Resolve the log-label once so every stderr line this run emits

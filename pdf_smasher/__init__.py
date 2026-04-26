@@ -271,12 +271,19 @@ def _enforce_input_policy(
         raise SignedPDFError(msg)
 
     if options.max_pages is not None and tri.pages > options.max_pages:
-        msg = f"input has {tri.pages} pages; max_pages={options.max_pages}"
+        msg = (
+            f"input has {tri.pages} pages; max_pages={options.max_pages} "
+            "(default tightened from unlimited; pass --max-pages 100000 or "
+            "set CompressOptions(max_pages=None) to relax)"
+        )
         raise OversizeError(msg)
 
     input_mb = len(input_data) / (1024 * 1024)
     if input_mb > options.max_input_mb:
-        msg = f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb}"
+        msg = (
+            f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb} "
+            "(default tightened from 2000.0; pass --max-input-mb 2000 to relax)"
+        )
         raise OversizeError(msg)
 
 
