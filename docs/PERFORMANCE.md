@@ -6,8 +6,11 @@ Measured benchmarks across representative inputs and the full settings matrix. N
 
 - **Use HankPDF when the input is a scanned document.** Compression of 2.7×–5.5× is typical on real-world scan-derived slide decks; higher on true scanned text.
 - **Don't use HankPDF on already-efficient PDFs.** Native-export presentations (PowerPoint → PDF, Word → PDF) inflate when run through the MRC pipeline because the embedded JPEGs are already at high compression. The default `--min-ratio 1.5` correctly passthrough's these inputs unchanged.
+- **Pass `--ocr` if you want a searchable output.** The MRC pipeline rasterizes every page; without `--ocr`, the output has zero text — even if the input had a text layer. This bites scan-with-existing-OCR inputs.
 - **For known-scan inputs, `--mode fast` is the sweet spot.** It gets ~the same compression as `--mode standard` in roughly one-third the wall time, with no visible quality difference at letter-page DPI.
 - **Image export beats the PDF pipeline on size for some workflows.** WebP at 150 DPI / quality 80 is the smallest output in our matrix and visually clean.
+- **`--max-workers 0` (auto, default) is correct.** Serial mode is ~4× slower on this hardware; past `cpu_count` of perf-cores there's no further gain.
+- **`--verify` is a strict, slow quality gate.** ~5.8× wall-time cost; will refuse common MRC outputs unless paired with `--ocr` and `--mode safe`. Use only when downstream consumers treat absence-of-drift as a contract.
 
 ## Test inputs
 
@@ -120,16 +123,73 @@ I rendered page 1 of each I_large output and the source at 100 DPI, then visuall
 
 For the synthetic-text scan (`I_synth`), `aggressive` produced text identical to source at 100 DPI render — text legibility is preserved even at the most compressed setting.
 
+## OCR / text-findability
+
+The MRC pipeline rasterizes every page and re-encodes it as image content. **Without `--ocr`, the output PDF has no text layer at all** — even if the input had one. This matters: a scanned PDF that arrived with an upstream text layer comes out searchable=False unless you explicitly pass `--ocr`.
+
+Measured on a freshly-extracted-text comparison (output PDF rendered through pypdfium2 → text page count):
+
+| Run | Input text layer | `--ocr` | Output text (chars, page 1) | Output text (total, all pages) | Wall vs no-OCR |
+|---|---|---|---:|---:|---:|
+| `smoke_text` (synthetic raster) | 0 chars | — | 0 chars | 0 | baseline 1.4s |
+| `smoke_text` | 0 chars | yes | ~110 chars | **4,700** | +110% (2.9s) |
+| `I_large` source has 194 chars (page 1) | 194 / 30 pages | — | **0 chars** | **0** | baseline 9.7s |
+| `I_large` | 194 chars | yes | 181 chars | **12,769** | +34% (13.0s) |
+
+Take-aways:
+
+- **Pass `--ocr` if you want the output to be searchable** — even if your input is already searchable. The MRC pipeline does not preserve upstream text layers.
+- OCR cost is roughly **+30-100% wall time**. On the 30-page I_large input, `--mode fast --ocr` runs 13.0s vs 9.7s without (`+34%`). On the 2-page synthetic fixture, OCR overhead is proportionally larger because compression is fast and OCR is a fixed cost per page.
+- **OCR text is imperfect** — Tesseract collapses spaces in mixed regions ("HankPDFsmokefixture" was the source's "HankPDF smoke fixture"). Good enough for grep/search; not byte-exact.
+- The verifier's content-drift check (next section) compares OCR text input-vs-output, so without `--ocr` on a pre-OCR'd input, the verifier will see "had text → has no text" as drift.
+
+## Threading: `--max-workers`
+
+Same input, settings, and machine — only the worker count varies. Input: I_large (30 pages, 23 MB scan-derived) at `--mode fast --min-ratio 0`.
+
+| `--max-workers` | Wall time | Speedup vs serial | Notes |
+|---:|---:|---:|---|
+| 1 (serial) | 41.0s | 1.00× | baseline; `ProcessPoolExecutor` not invoked |
+| 2 | 21.0s | 1.95× | nearly linear |
+| 4 | 12.9s | 3.17× | scaling efficiency drops slightly |
+| 8 | 9.7s | 4.22× | knee of the curve on this 8-perf-core M-series Mac |
+| 0 (auto) | 9.7s | 4.22× | `auto` = `cpu_count - 2`; matches 8 here |
+
+Take-aways:
+
+- **`--max-workers 0` (auto, the default) is the right choice for most users.**
+- Serial mode (`--max-workers 1`) is ~4× slower on this 30-page job. Use it only when you need single-process determinism for a specific debugging scenario.
+- Diminishing returns past ~`cpu_count`-of-perf-cores; on Apple Silicon the boundary is the count of P-cores. Past 8, no measurable gain.
+- Linear-ish scaling 1→4 means the per-page workload is well-isolated; the coordinator + merge stage doesn't bottleneck below ~4 workers.
+
+## Content-drift verifier (`--verify`)
+
+Off by default since v0.0.x. When on, the verifier re-rasterizes the output, re-runs OCR + tile-SSIM + structural checks against the input, and refuses with `EXIT_VERIFIER_FAIL=20` if drift exceeds gates. Test: I_large at default (with `--no-ocr` to isolate verifier behavior from OCR).
+
+| Run | Wall time | Exit code | Verifier verdict |
+|---|---:|---:|---|
+| no `--verify` | 24.7s | 0 | (skipped) |
+| `--verify` | 143.1s | **20** | `E-VERIFIER-FAIL`: content drift on 28 of 30 pages, OCR Levenshtein 0.93 vs 0.05 ceiling, SSIM tile-min -0.58 |
+
+Take-aways:
+
+- **Verifier wall-time cost is large** — ~5.8× the no-verify path on this input. It re-OCRs both source and output and computes tile SSIM per page.
+- **Verifier is opinionated.** With `--no-ocr`, the input had a text layer that gets stripped; the verifier's OCR-text edit-distance check then sees the input's existing text vs the output's freshly-OCR'd text (now 0) — large drift. This is real signal: passthrough-without-text-layer is content drift by the verifier's definition.
+- **For verifier-passing output:** combine `--verify` with `--ocr` (preserve searchability) and prefer `--mode safe` (less aggressive bg compression). On photo-heavy slide decks the SSIM gates may still flag legitimate JPEG re-encoding artifacts; use `--accept-drift` to write the output with a warning rather than refuse.
+- **Don't enable `--verify` on every job.** It's a quality gate for cases where a downstream consumer treats absence-of-drift as a contract (clinical, legal archival). For typical use, the SHA + structural checks at default settings are sufficient.
+
 ## Recommendations
 
 | Use case | Settings |
 |---|---|
 | Default ("I want it smaller, don't surprise me") | `hankpdf in.pdf -o out.pdf` (passthrough below 1.5×) |
-| Known-scan input, want speed | `hankpdf in.pdf -o out.pdf --mode fast` |
-| Known-scan input, want maximum compression | `hankpdf in.pdf -o out.pdf --target-bg-dpi 100 --target-color-quality 40 --min-ratio 0` |
-| Archival quality on a scan | `hankpdf in.pdf -o out.pdf --mode safe --target-bg-dpi 200` |
+| Known-scan input, want speed + searchable text | `hankpdf in.pdf -o out.pdf --mode fast --ocr` |
+| Known-scan input, want maximum compression + searchable | `hankpdf in.pdf -o out.pdf --target-bg-dpi 100 --target-color-quality 40 --ocr --min-ratio 0` |
+| Archival quality with verifier-passing output | `hankpdf in.pdf -o out.pdf --mode safe --ocr --verify` (slow but contractual) |
+| Searchability without compression goals | `hankpdf in.pdf -o out.pdf --ocr --accept-drift` |
 | One-page-per-image for review tooling | `hankpdf in.pdf -o page.webp --output-format webp --image-dpi 150` |
 | Preview thumbnails | `hankpdf in.pdf -o thumb.jpg --output-format jpeg --image-dpi 72 --jpeg-quality 60` |
+| Single-process serial run for debugging | `hankpdf in.pdf -o out.pdf --max-workers 1` |
 
 ## Wall-time scaling
 
