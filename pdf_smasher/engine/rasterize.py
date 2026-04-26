@@ -9,6 +9,8 @@ from __future__ import annotations
 import pypdfium2 as pdfium
 from PIL import Image
 
+from pdf_smasher.engine._render_safety import check_render_size
+
 _POINTS_PER_INCH = 72.0
 
 
@@ -38,6 +40,7 @@ def rasterize_page(pdf_bytes: bytes, *, page_index: int, dpi: int) -> Image.Imag
             raise IndexError(msg)
         page = pdf[page_index]
         width_pt, height_pt = page.get_size()
+        check_render_size(width_pt=width_pt, height_pt=height_pt, dpi=dpi)
         target_w = round(width_pt * dpi / _POINTS_PER_INCH)
         target_h = round(height_pt * dpi / _POINTS_PER_INCH)
         scale = dpi / _POINTS_PER_INCH

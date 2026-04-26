@@ -24,6 +24,7 @@ import PIL.Image
 import pypdfium2 as pdfium
 
 from pdf_smasher._limits import MAX_BOMB_PIXELS as _MAX_BOMB_PIXELS
+from pdf_smasher.engine._render_safety import check_render_size
 from pdf_smasher.engine.rasterize import rasterize_page
 from pdf_smasher.exceptions import DecompressionBombError
 
@@ -203,17 +204,7 @@ def _iter_pages_impl(
                 width_pt, height_pt = 100_000.0, 100_000.0
             else:
                 width_pt, height_pt = _page_size_points(pdf_bytes, page_index)
-            target_w = width_pt * dpi / 72.0
-            target_h = height_pt * dpi / 72.0
-            if target_w * target_h > _MAX_BOMB_PIXELS:
-                msg = (
-                    f"page {page_index + 1} would rasterize to "
-                    f"{int(target_w)}x{int(target_h)} px — exceeds the "
-                    f"decompression-bomb cap "
-                    f"({_MAX_BOMB_PIXELS / (1024 * 1024):.0f} MB of raw "
-                    "pixels). Lower --image-dpi or --pages to proceed."
-                )
-                raise DecompressionBombError(msg)
+            check_render_size(width_pt=width_pt, height_pt=height_pt, dpi=dpi)
             if _force_rasterize_error_for_test:
                 _forced = "forced test error"
                 raise RuntimeError(_forced)
