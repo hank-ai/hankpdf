@@ -28,7 +28,7 @@ Out of scope:
 
 We don't ship platform-native code-signing CA certs. Instead:
 
-- **PyPI** — `pip install pdf-smasher` uses PyPI's checksum + GitHub OIDC trusted-publishing provenance.
+- **PyPI** — `pip install pdf-smasher` uses PyPI's checksum + GitHub OIDC trusted-publishing provenance. The publish workflow is `.github/workflows/release.yml`; it triggers only on a published GitHub Release.
 - **Docker** — `ghcr.io/hank-ai/hankpdf@sha256:…` pins to immutable digests. Every pushed image is signed with cosign (keyless, via GitHub's OIDC issuer) and carries a SLSA v1 build-provenance attestation + SPDX SBOM. Verify via `cosign verify ghcr.io/hank-ai/hankpdf:<tag> --certificate-identity-regexp 'https://github\\.com/hank-ai/hankpdf/\\.github/workflows/docker\\.yml@refs/.+' --certificate-oidc-issuer https://token.actions.githubusercontent.com` and `gh attestation verify oci://ghcr.io/hank-ai/hankpdf:<tag> --owner hank-ai`.
 - **Windows jbig2.exe bundle** — release assets include a SHA-256 sidecar (`jbig2-windows-x64.zip.sha256`) plus SLSA build-provenance attestation. The installer script refuses to install any download whose digest doesn't match the sidecar. The installer script itself is published as a release asset with its own `.sha256`, and users should install via the tagged URL (`releases/download/jbig2-windows-vX.Y.Z/install_jbig2_windows.ps1`) — never the mutable `raw/main/…` URL.
 - **GitHub Releases** — SHA-256 checksums for every asset are published alongside the asset. Image digests appear in the Docker publish workflow summary.
