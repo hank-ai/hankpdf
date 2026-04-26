@@ -438,7 +438,7 @@ HankPDF is CLI-only. There is no desktop GUI phase. Users who want drag-drop beh
 
 **Acceptance criteria**:
 - `pip install pdf-smasher` on a clean Python 3.14 env works; `hankpdf --doctor` passes after the user has installed Tesseract + jbig2enc via their package manager.
-- `docker run ghcr.io/ourorg/pdf-smasher:X.Y --doctor` works on a clean host with no extra setup.
+- `docker run ghcr.io/hank-ai/hankpdf:X.Y --doctor` works on a clean host with no extra setup.
 - Release pipeline runs to green in under 15 minutes.
 
 ### Tasks

@@ -22,7 +22,7 @@ docker run --rm ghcr.io/hank-ai/hankpdf:latest \
 
 Ship both in any bug report.
 
-## 2. The correlation-ID recovery workflow (shartzog P0)
+## 2. The correlation-ID recovery workflow
 
 Every `hankpdf` invocation generates a UUID4 correlation id at startup.
 Two places carry it:

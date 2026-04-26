@@ -5,7 +5,6 @@
 If you think you've found a security issue in HankPDF, **please do not open a public GitHub issue**. Report it privately:
 
 - GitHub Security Advisories (once the repo is public) — preferred: https://github.com/hank-ai/hankpdf/security/advisories/new
-- Email: security@TBD.example
 
 We'll acknowledge within 72 hours and aim for a triage decision within a week. Coordinated disclosure preferred.
 

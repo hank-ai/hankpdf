@@ -284,7 +284,7 @@ Both shapes run the engine **locally** on the user's machine. No network, no ser
 Same engine, two ways to get it onto a machine:
 
 - **Python package** (`pip install pdf-smasher`) — installs the `hankpdf` console script plus the importable Python API (`from pdf_smasher import compress, CompressOptions`). Primary target. Users install the non-Python native deps (Tesseract, jbig2enc) via their system package manager — one line on every major OS, documented in `docs/INSTALL.md`. Wheel is published to PyPI.
-- **Docker image** (`ghcr.io/ourorg/pdf-smasher:X.Y`) — ~300 MB multi-arch image with all native deps (pdfium, Tesseract, jbig2enc, OpenJPEG, qpdf) baked in. For users who don't want to manage native deps on the host; for CI pipelines; for SFTP upload wrappers; for sealed execution environments. Non-root user, writable `/tmp`, read-only rootfs friendly.
+- **Docker image** (`ghcr.io/hank-ai/hankpdf:X.Y`) — ~300 MB multi-arch image with all native deps (pdfium, Tesseract, jbig2enc, OpenJPEG, qpdf) baked in. For users who don't want to manage native deps on the host; for CI pipelines; for SFTP upload wrappers; for sealed execution environments. Non-root user, writable `/tmp`, read-only rootfs friendly.
 
 Contract details — flags, exit codes, JSON report schema — in [SPEC.md §2](SPEC.md).
 
