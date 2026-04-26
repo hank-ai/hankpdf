@@ -270,6 +270,7 @@ def render_pages_as_images(
     progress_callback: Callable[[str, int, int], None] | None = None,
     _force_rasterize_error_for_test: bool = False,
     _simulate_huge_page_for_test: bool = False,
+    password: str | None = None,
 ) -> list[bytes]:
     """Rasterize the requested pages and return one encoded image per page.
 
@@ -343,5 +344,6 @@ def render_pages_as_images(
             progress_callback=progress_callback,
             _force_rasterize_error_for_test=_force_rasterize_error_for_test,
             _simulate_huge_page_for_test=_simulate_huge_page_for_test,
+            password=password,
         )
     )

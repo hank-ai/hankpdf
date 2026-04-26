@@ -35,12 +35,22 @@ def _canonical_oid(obj: object) -> int:
     same indirect reference, so plain ``id(obj)`` does not dedupe and
     the cycle-detection set grows unboundedly. ``objgen`` (a tuple of
     object number + generation) is the PDF-spec canonical identity for
-    indirect refs; we hash it. For direct (inline) objects, fall back
-    to Python ``id`` — direct objects are unique per parent, so cycles
-    require an indirect ref somewhere along the chain.
+    indirect refs; we hash it. Direct (inline) objects are reported by
+    pikepdf as ``objgen=(0, 0)`` regardless of position — they are NOT
+    canonically distinct, so we MUST fall back to Python ``id`` for
+    those. Otherwise every sibling direct dict would dedupe to one,
+    and a malicious PDF could hide JS/EmbeddedFiles behind an arbitrary
+    benign sibling — verified exploitable.
+
+    ``getattr`` defends against future pikepdf versions whose ``objgen``
+    raises on access for direct objects; we treat any failure as
+    "fall back to id".
     """
-    objgen = getattr(obj, "objgen", None)
-    if objgen is not None:
+    try:
+        objgen = getattr(obj, "objgen", None)
+    except Exception:  # noqa: BLE001 — defensive; any pikepdf error → use id()
+        return id(obj)
+    if objgen is not None and objgen != (0, 0):
         return hash(objgen)
     return id(obj)
 

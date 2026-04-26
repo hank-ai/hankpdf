@@ -336,6 +336,8 @@ Both caps share `pdf_smasher._limits.MAX_BOMB_PIXELS` as the canonical numeric v
 
 Callers that knowingly need a higher ceiling (e.g., a future per-page render CLI for engineering drawings) can pass `max_pixels=N` to `check_render_size` for a per-call override; there is intentionally no override for the Pillow cap (it's a global SECURITY boundary, not a tuning knob).
 
+**Operational note.** The Pillow cap (`PIL.Image.MAX_IMAGE_PIXELS`) is a process-global value installed at import time. There is currently no public API to relax it for a specific job — the per-call `max_pixels` override on `check_render_size` only affects our pre-allocation guard, not Pillow's. Workloads needing pages larger than ~715 Mpx require either an external pre-rasterization step or a forked build that adjusts `_limits.MAX_BOMB_PIXELS`. We may add a context-manager API in a future major version if the use-case shows up.
+
 ## 12. What we're explicitly not building
 
 To keep scope honest:
