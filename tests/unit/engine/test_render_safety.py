@@ -23,9 +23,9 @@ def test_modest_dpi_on_small_page_passes() -> None:
 
 
 def test_zero_or_negative_dimensions_refuse_with_value_error() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="invalid page size"):
         check_render_size(width_pt=0.0, height_pt=792.0, dpi=300.0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="invalid page size"):
         check_render_size(width_pt=-1.0, height_pt=792.0, dpi=300.0)
 
 

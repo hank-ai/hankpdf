@@ -51,7 +51,8 @@ def test_canonical_hash_with_correct_password_succeeds() -> None:
 
     pdf_bytes = _make_encrypted_pdf("hunter2")
     digest = canonical_input_sha256(pdf_bytes, password="hunter2")
-    assert isinstance(digest, str) and len(digest) == 64
+    assert isinstance(digest, str)
+    assert len(digest) == 64
 
 
 def test_image_export_with_correct_password_succeeds() -> None:

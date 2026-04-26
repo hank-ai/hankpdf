@@ -68,7 +68,7 @@ def encode_1bit_jbig2(mask: Image.Image) -> bytes:
         # JBIG2 page bytes to stdout.
         binary = _resolve_jbig2_bin()
         if binary is None:
-            msg = f"jbig2 not found on PATH; install jbig2enc"
+            msg = "jbig2 not found on PATH; install jbig2enc"
             raise FileNotFoundError(msg)
         result = subprocess.run(
             [binary, "-p", str(png_path)],

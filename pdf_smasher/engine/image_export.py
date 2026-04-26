@@ -23,7 +23,9 @@ from typing import Literal
 import PIL.Image
 import pypdfium2 as pdfium
 
-from pdf_smasher._limits import MAX_BOMB_PIXELS as _MAX_BOMB_PIXELS
+from pdf_smasher._limits import (
+    MAX_BOMB_PIXELS as _MAX_BOMB_PIXELS,  # noqa: F401  — re-exported for tests/unit/test_pillow_hardening.py
+)
 from pdf_smasher._pillow_hardening import ensure_capped
 from pdf_smasher.engine._render_safety import check_render_size
 from pdf_smasher.engine.rasterize import rasterize_page
@@ -211,16 +213,12 @@ def _iter_pages_impl(
             if _simulate_huge_page_for_test:
                 width_pt, height_pt = 100_000.0, 100_000.0
             else:
-                width_pt, height_pt = _page_size_points(
-                    pdf_bytes, page_index, password=password
-                )
+                width_pt, height_pt = _page_size_points(pdf_bytes, page_index, password=password)
             check_render_size(width_pt=width_pt, height_pt=height_pt, dpi=dpi)
             if _force_rasterize_error_for_test:
                 _forced = "forced test error"
                 raise RuntimeError(_forced)
-            raster = rasterize_page(
-                pdf_bytes, page_index=page_index, dpi=dpi, password=password
-            )
+            raster = rasterize_page(pdf_bytes, page_index=page_index, dpi=dpi, password=password)
             buf = io.BytesIO()
             rgb = raster.convert("RGB")
             if image_format == "jpeg":

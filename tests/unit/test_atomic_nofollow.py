@@ -16,7 +16,7 @@ def test_atomic_write_refuses_symlinked_partial_path(tmp_path) -> None:
     bait = tmp_path / "bait.txt"
     bait.write_text("untouched")
     partial.symlink_to(bait)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError):  # noqa: PT011 — O_NOFOLLOW raises generic OSError; the bait check below verifies the cause
         _atomic_write_bytes(final, b"hello")
     assert bait.read_text() == "untouched"
 

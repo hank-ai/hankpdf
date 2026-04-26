@@ -37,15 +37,17 @@ def check_render_size(
     bounded the allocation by some other means.
     """
     if width_pt <= 0 or height_pt <= 0:
-        raise ValueError(
+        msg = (
             f"invalid page size: width_pt={width_pt!r}, height_pt={height_pt!r}; "
             "non-positive values often indicate a locked/encrypted pdfium handle "
             "fell back to a stub document"
         )
+        raise ValueError(msg)
     target_w = round(width_pt * dpi / _POINTS_PER_INCH)
     target_h = round(height_pt * dpi / _POINTS_PER_INCH)
     if target_w * target_h > max_pixels:
-        raise DecompressionBombError(
+        msg = (
             f"page would render to {target_w}x{target_h} pixels "
             f"({target_w * target_h:,} px), exceeding cap of {max_pixels:,}"
         )
+        raise DecompressionBombError(msg)
