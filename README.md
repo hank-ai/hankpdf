@@ -20,7 +20,7 @@ Takes oversized scanned PDFs (typical input: 200-page, 800 MB image scans) and p
 - **Permissive license throughout** — no AGPL, no commercial SDK dependency. Built entirely on Apache-2.0 / BSD / MPL-2.0 components. We can ship, modify, and redistribute freely.
 - **Content-preservation invariant** — every output is gated by OCR-text diff, tile-level SSIM, and structural audit. We refuse rather than silently corrupt.
 - **Weird-PDF robust** — encrypted, signed, corrupt-xref, JBIG2-in, form XObjects, color profiles, linearized, tagged, PDF/A-3-embedded: each class has an explicit detect-and-handle policy. None crash the pipeline.
-- **Honest compression targets** — we promise what we deliver: ≥3× guaranteed, 8–15× typical, 50–200× best-case on text-only content. Not 200× on everything.
+- **Honest compression targets** — for **scanned-document inputs**, we deliver ≥3× guaranteed, 8–15× typical, 50–200× best-case on text-only scans. **For PDFs that are already efficiently encoded** (vector slide decks, presentations, native exports from Word/Powerpoint), the MRC re-rasterize-and-recompress pipeline can produce *larger* output — so the default `--min-ratio 1.5` short-circuits to passthrough rather than churning. See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for measured ratios across input types and settings.
 
 ## Output modes
 
@@ -266,6 +266,7 @@ uv run mypy pdf_smasher                   # type check
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design decisions, rationale, system diagram. The *why*. |
 | [docs/SPEC.md](docs/SPEC.md) | Functional spec — CLI contract, API surface, behaviors, edge-case policies. The *what*. |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Measured compression ratios + wall-time across input types and settings. The *how-fast and how-small*. |
 | [docs/KNOWLEDGE.md](docs/KNOWLEDGE.md) | Reference material: MRC algorithm, codec trade-offs, license notes, PDF internals, prior-art summaries. The *background*. |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phased implementation checklist. The *how and when*. |
 

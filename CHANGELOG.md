@@ -16,6 +16,7 @@ All notable changes to `pdf-smasher` (HankPDF) are documented here. The format i
 - `.github/ISSUE_TEMPLATE/{bug_report,feature_request,config}.yml` and `.github/PULL_REQUEST_TEMPLATE.md`.
 - `pre-commit` ecosystem in `.github/dependabot.yml`.
 - `docs/ARCHITECTURE.md` — new "Render-size protection" section documenting the two-tier cap (`_render_safety.check_render_size` pre-allocation + Pillow `MAX_IMAGE_PIXELS` post-decode).
+- `docs/PERFORMANCE.md` — measured compression ratios and wall-times across the full settings matrix on three real-world inputs (small/medium/large) plus a synthetic-text scan, with visual quality assessment of representative outputs and per-use-case settings recommendations. Updates the "Honest compression targets" line in the README to call out that the 8-15× typical figure applies to *scanned* inputs, not natively-exported PDFs.
 
 ### Changed
 - **BREAKING (CLI):** `--max-input-mb` default lowered from `2000.0` to `250.0`. To restore previous behavior: `--max-input-mb 2000`.
