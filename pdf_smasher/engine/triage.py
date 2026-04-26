@@ -13,7 +13,7 @@ from typing import Literal
 
 import pikepdf
 
-from pdf_smasher.exceptions import CorruptPDFError
+from pdf_smasher.exceptions import CorruptPDFError, MaliciousPDFError
 from pdf_smasher.types import TriageReport
 
 TriageClassification = Literal["proceed", "refuse", "pass-through", "require-password"]
@@ -28,24 +28,44 @@ def _detect_linearized(pdf_bytes: bytes) -> bool:
     return bool(_LINEARIZED_MARKER.search(prefix))
 
 
+def _canonical_oid(obj: object) -> int:
+    """Best-effort canonical identity for pikepdf objects.
+
+    pikepdf returns a fresh Python wrapper each time you traverse the
+    same indirect reference, so plain ``id(obj)`` does not dedupe and
+    the cycle-detection set grows unboundedly. ``objgen`` (a tuple of
+    object number + generation) is the PDF-spec canonical identity for
+    indirect refs; we hash it. For direct (inline) objects, fall back
+    to Python ``id`` — direct objects are unique per parent, so cycles
+    require an indirect ref somewhere along the chain.
+    """
+    objgen = getattr(obj, "objgen", None)
+    if objgen is not None:
+        return hash(objgen)
+    return id(obj)
+
+
 def _walk_dict_for_names(
     obj: object,
     target_names: frozenset[str],
     visited: set[int],
     depth: int = 0,
-    max_depth: int = 12,
+    max_depth: int = 64,
 ) -> set[str]:
     """Walk a pikepdf Object tree; return the subset of ``target_names`` found as keys.
 
     ``target_names`` is compared against dict keys as plain strings (leading
-    slash stripped). Visited object IDs are tracked to avoid recursion on
-    circular references.
+    slash stripped). Visited object identities are tracked via
+    :func:`_canonical_oid` to avoid recursion on circular references — pikepdf
+    wraps indirect refs in fresh Python objects each access, so plain ``id()``
+    does not dedupe.
     """
     hits: set[str] = set()
     if depth > max_depth:
-        return hits
+        msg = f"nested resource tree exceeds inspection depth ({max_depth}); refusing"
+        raise MaliciousPDFError(msg)
     if isinstance(obj, pikepdf.Dictionary):
-        oid = id(obj)
+        oid = _canonical_oid(obj)
         if oid in visited:
             return hits
         visited.add(oid)
@@ -56,7 +76,7 @@ def _walk_dict_for_names(
         for val in obj.values():  # type: ignore[operator]
             hits |= _walk_dict_for_names(val, target_names, visited, depth + 1, max_depth)
     elif isinstance(obj, pikepdf.Array):
-        oid = id(obj)
+        oid = _canonical_oid(obj)
         if oid in visited:
             return hits
         visited.add(oid)
