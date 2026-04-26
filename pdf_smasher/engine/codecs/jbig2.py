@@ -11,14 +11,27 @@ in a PDF stream with ``/Filter /JBIG2Decode``.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
+from functools import cache
 from pathlib import Path
 
 from PIL import Image
 
 _JBIG2_BIN = "jbig2"
 _JBIG2_TIMEOUT_SECONDS = 120
+
+
+@cache
+def _resolve_jbig2_bin() -> str | None:
+    """Resolve the jbig2 binary's absolute path once. ``None`` if not on PATH.
+
+    Cached so subsequent subprocess calls skip the re-walk; cache is
+    process-lifetime (installing jbig2enc mid-process is not a supported
+    scenario).
+    """
+    return shutil.which(_JBIG2_BIN)
 
 
 def encode_1bit_jbig2(mask: Image.Image) -> bytes:
@@ -53,8 +66,12 @@ def encode_1bit_jbig2(mask: Image.Image) -> bytes:
         #
         # The reliable invocation is: `jbig2 -p <input>` which prints the
         # JBIG2 page bytes to stdout.
+        binary = _resolve_jbig2_bin()
+        if binary is None:
+            msg = f"jbig2 not found on PATH; install jbig2enc"
+            raise FileNotFoundError(msg)
         result = subprocess.run(
-            [_JBIG2_BIN, "-p", str(png_path)],
+            [binary, "-p", str(png_path)],
             capture_output=True,
             check=True,
             timeout=_JBIG2_TIMEOUT_SECONDS,
