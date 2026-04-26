@@ -379,9 +379,10 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         winput.input_page_pdf, page_index=0, dpi=winput.source_dpi, password=None
     )
 
-    # Source-truth: prefer the input PDF's existing text layer (native) over
-    # a fresh Tesseract pass. We probe FIRST (cheap textpage read) so we can
-    # decide whether to incur the Tesseract subprocess cost at all.
+    # ── Text-layer policy (see CompressOptions docstring) ────────────────
+    # Defaults: preserve any usable upstream text layer. --ocr fills gaps
+    # via Tesseract. --strip-text-layer disables both. --re-ocr forces
+    # Tesseract even when native is good.
     from pypdfium2 import PdfDocument as _Pdfium
 
     _doc = _Pdfium(winput.input_page_pdf)
@@ -395,16 +396,16 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         _doc.close()
     _has_native_text = bool(_native_text and _native_text.strip())
 
-    # Pre-load native word boxes when --ocr is set and the input has text.
-    # When this succeeds, we skip Tesseract for both input OCR and the
-    # output text layer. Tesseract is still kicked off below if the
-    # verifier needs it (it runs Tesseract on output regardless and we
-    # want a comparable input pass when native text isn't available).
+    # Pre-load native word boxes (cheap) so the quality heuristic + the
+    # decision below have data to work with. Skip entirely if the user
+    # explicitly opted out via --strip-text-layer or --re-ocr.
     word_boxes: list[Any] = []
-    if _has_native_text and options.ocr:
+    _native_decent = False
+    if _has_native_text and not options.strip_text_layer and not options.re_ocr:
         from pdf_smasher.engine.text_layer import (
             extract_native_word_boxes as _extract_native,
         )
+        from pdf_smasher.engine.text_layer import is_native_text_decent
 
         _native_boxes = _extract_native(
             winput.input_page_pdf,
@@ -413,17 +414,25 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             raster_height_px=raster.size[1],
         )
         if _native_boxes:
-            word_boxes = _native_boxes
+            _native_decent = is_native_text_decent(_native_boxes)
+            if _native_decent:
+                word_boxes = _native_boxes
+            elif options.ocr:
+                # Native exists but is garbage; we'll let the Tesseract path
+                # below produce fresh word boxes and ignore _native_boxes.
+                warnings.append(f"page-{i + 1}-native-text-quality-poor-using-tesseract")
 
-    # Input OCR via Tesseract is needed when:
-    #   - options.ocr is set AND we couldn't use native (no text layer or
-    #     extraction yielded nothing), OR
-    #   - the verifier runs (for drift comparison) AND we don't have a
-    #     usable native text fallback.
-    # When all of those are false, skip Tesseract entirely.
-    need_input_ocr = (bool(options.ocr) and not word_boxes) or (
-        not options.skip_verify and not _has_native_text
+    # Tesseract input OCR runs when:
+    #   - native unusable AND user wants searchability (--ocr OR --re-ocr), OR
+    #   - native unusable AND verifier runs (needs comparable input text), OR
+    #   - --re-ocr is set (always replace native with Tesseract).
+    _need_tesseract_for_text_layer = (
+        not options.strip_text_layer
+        and not word_boxes
+        and (bool(options.ocr) or bool(options.re_ocr))
     )
+    _need_tesseract_for_verifier = (not options.skip_verify) and not _has_native_text
+    need_input_ocr = _need_tesseract_for_text_layer or _need_tesseract_for_verifier
     _input_ocr_future: Any = None
     ocr_text: str = ""
     # ExitStack guarantees the OCR ThreadPoolExecutor's __exit__ fires on
@@ -562,17 +571,25 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
                 warnings.append(f"page-{i + 1}-jbig2-fallback-to-flate")
 
-        if options.ocr:
-            _await_input_ocr()
-            composed = add_text_layer(
-                composed,
-                page_index=0,
-                word_boxes=word_boxes,
-                raster_width_px=raster.size[0],
-                raster_height_px=raster.size[1],
-                page_width_pt=width_pt,
-                page_height_pt=height_pt,
-            )
+        # Add a text layer whenever we have word boxes — covers both:
+        #  (a) native-preserved (default when input had a usable text layer)
+        #  (b) Tesseract output from --ocr / --re-ocr / poor-native fallback
+        # --strip-text-layer suppresses the layer entirely.
+        if not options.strip_text_layer:
+            # If --ocr or --re-ocr triggered Tesseract and native didn't
+            # already fill word_boxes, await the input-OCR future now.
+            if not word_boxes and _need_tesseract_for_text_layer:
+                _await_input_ocr()
+            if word_boxes:
+                composed = add_text_layer(
+                    composed,
+                    page_index=0,
+                    word_boxes=word_boxes,
+                    raster_width_px=raster.size[0],
+                    raster_height_px=raster.size[1],
+                    page_width_pt=width_pt,
+                    page_height_pt=height_pt,
+                )
 
         # --- Streaming verify ---
         # When skip_verify is set, synthesize a trivially-passing verdict and

@@ -41,12 +41,22 @@ class CompressOptions:
     legal_codec_profile: str | None = None
     target_pdf_a: bool = False
 
-    # OCR behavior. Off by default — OCR roughly doubles wall time (verifier
-    # runs Tesseract on input + output rasters regardless, but writing an
-    # embedded text layer to the output is opt-in). Pass --ocr / ocr=True to
-    # produce a searchable output.
+    # OCR behavior:
+    # - The output ALWAYS preserves an upstream text layer when one exists
+    #   (and it passes a quality heuristic) — searchability is not opt-in
+    #   for inputs that arrived searchable.
+    # - ``ocr=True`` means "ensure searchable": if no upstream text layer is
+    #   present, or the existing one looks like garbage, run Tesseract.
+    # - ``strip_text_layer=True`` opts out: the output gets no text layer
+    #   even when the input had one. Use for size-only workflows where
+    #   searchability is unwanted.
+    # - ``re_ocr=True`` opts out the other way: ignore the upstream text
+    #   layer (even if good) and re-run Tesseract. Use when the upstream
+    #   OCR is known to be wrong and you want a fresh Tesseract pass.
     ocr: bool = False
     ocr_language: str = "eng"
+    strip_text_layer: bool = False
+    re_ocr: bool = False
 
     # Safety / behavior gates
     allow_signed_invalidation: bool = False

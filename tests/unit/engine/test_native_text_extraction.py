@@ -11,7 +11,16 @@ import io
 
 import pikepdf
 
-from pdf_smasher.engine.text_layer import extract_native_word_boxes
+from pdf_smasher.engine.ocr import WordBox
+from pdf_smasher.engine.text_layer import (
+    extract_native_word_boxes,
+    is_native_text_decent,
+)
+
+
+def _word(text: str) -> WordBox:
+    """Synthetic WordBox; coordinates don't matter for the decency heuristic."""
+    return WordBox(text=text, x=0, y=0, width=1, height=1, confidence=100.0)
 
 
 def _make_pdf_with_text() -> bytes:
@@ -70,6 +79,42 @@ def test_blank_page_returns_empty_list() -> None:
         raster_height_px=1584,
     )
     assert boxes == []
+
+
+def test_is_native_text_decent_accepts_real_words() -> None:
+    boxes = [
+        _word(w) for w in ["Scaling", "Anesthesia", "Billing", "and", "Compliance", "Documentation"]
+    ]
+    assert is_native_text_decent(boxes)
+
+
+def test_is_native_text_decent_rejects_single_char_floods() -> None:
+    # The "Scal i ng" pattern: each glyph as its own word.
+    boxes = [_word(c) for c in ["Scal", "i", "ng", "Anest", "hesi", "a", "Bi", "l", "l", "i", "ng"]]
+    assert not is_native_text_decent(boxes)
+
+
+def test_is_native_text_decent_rejects_symbol_noise() -> None:
+    # Need >30 chars total to escape the sparse-page exception, then the
+    # alpha-or-space gate fires.
+    boxes = [_word("???###|||$$$%%%@@@") for _ in range(4)]
+    assert not is_native_text_decent(boxes)
+
+
+def test_is_native_text_decent_rejects_long_garbage_runs() -> None:
+    # Gibberish OCR signature: ultra-long pseudo-words.
+    boxes = [_word("a" * 30) for _ in range(8)]
+    assert not is_native_text_decent(boxes)
+
+
+def test_is_native_text_decent_accepts_sparse_pages() -> None:
+    # Cover pages, dividers — light on text, but what's there is real.
+    boxes = [_word("Cover")]
+    assert is_native_text_decent(boxes)
+
+
+def test_is_native_text_decent_rejects_empty_list() -> None:
+    assert not is_native_text_decent([])
 
 
 def test_coords_land_in_raster_pixel_space_top_left_origin() -> None:

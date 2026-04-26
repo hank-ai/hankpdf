@@ -247,10 +247,17 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # OCR — off by default. --ocr embeds a searchable text layer (adds ~5s/pg).
+    # OCR — see CompressOptions docstring for the full semantics.
+    # Default: existing text layer is preserved verbatim (no Tesseract).
+    # --ocr: ensure output is searchable; run Tesseract only if native text
+    #        is missing or fails the quality heuristic.
+    # --strip-text-layer: explicitly drop any text layer (size-only workflow).
+    # --re-ocr: force Tesseract even when the input has a usable text layer.
     p.add_argument("--ocr", dest="ocr", action="store_true", default=False)
     p.add_argument("--no-ocr", dest="ocr", action="store_false")
     p.add_argument("--ocr-language", default="eng")
+    p.add_argument("--strip-text-layer", action="store_true", default=False)
+    p.add_argument("--re-ocr", action="store_true", default=False)
 
     # Safety gates
     p.add_argument("--allow-signed-invalidation", action="store_true")
@@ -526,6 +533,8 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         target_pdf_a=args.target_pdfa,
         ocr=args.ocr,
         ocr_language=args.ocr_language,
+        strip_text_layer=args.strip_text_layer,
+        re_ocr=args.re_ocr,
         allow_signed_invalidation=args.allow_signed_invalidation,
         allow_certified_invalidation=args.allow_certified_invalidation,
         allow_embedded_files=args.allow_embedded_files,

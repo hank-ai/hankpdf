@@ -125,29 +125,53 @@ For the synthetic-text scan (`I_synth`), `aggressive` produced text identical to
 
 ## OCR / text-findability
 
-The MRC pipeline rasterizes every page and re-encodes it as image content. **Without `--ocr`, the output PDF has no text layer at all** — even if the input had one. With `--ocr`, the source of the output text depends on whether the input has an existing text layer:
+**Defaults preserve any existing text layer.** No flag required. If the input PDF arrived with searchable text, the output keeps that text verbatim — byte-faithful to the source, with no Tesseract recognition noise and no per-page Tesseract cost.
 
-- **Input has no text layer (true scan)** → run Tesseract on the raster (slow; some recognition errors).
-- **Input has a text layer** → read it directly via pdfium and reuse it verbatim (faithful, no Tesseract noise, much cheaper).
+**`--ocr` means "ensure the output is searchable"** — it fills gaps. If the input has no text layer (true scan) OR the existing text fails a quality heuristic (mostly-symbol noise, single-char-flood "S c a l i n g" patterns, etc.), Tesseract runs to fill in. Pages that already have decent native text are kept as-is even with `--ocr` set.
 
-This native-preserve path is automatic — you don't need to opt in. It's transparent to callers and only changes the implementation.
+**Two opt-out flags:**
 
-Measured (output PDF rendered through pypdfium2 → text page count):
+- `--strip-text-layer` — explicitly remove any text layer. Output is guaranteed text-free. Use for size-only workflows where searchability is unwanted.
+- `--re-ocr` — force Tesseract on every page even when the input has good native text. Use when the upstream OCR is known to be wrong and you want a fresh Tesseract pass.
 
-| Run | Input text layer | `--ocr` | Output text (page 1 / total) | Source | Wall |
-|---|---|---|---:|---|---:|
-| `smoke_text` (synthetic raster) | 0 chars | — | 0 / 0 | — | 1.0s |
-| `smoke_text` | 0 chars | yes | ~110 / **4,700** | Tesseract (no native) | 2.8s (+180%) |
-| `I_large` (has upstream text) | 194 chars / page 1 | — | 0 / 0 | — | 10.1s |
-| `I_large` | 194 chars / page 1 | yes | 181 / **12,289** | **native, faithful** | 13.3s (+32%) |
+### Measured behavior on I_large (30-page scan-derived deck with upstream text)
 
-Take-aways:
+| Run | Output total chars | Output page-1 sample | Wall time |
+|---|---:|---|---:|
+| default (no flags) | **3,998** | "Scaling Anesthesia Billing…" (faithful) | **5.4s** ★ |
+| `--no-ocr` | 3,998 | same — preservation is unconditional | 5.1s |
+| `--strip-text-layer` | 0 | (empty) | 5.3s |
+| `--ocr` | 12,162 | native preserved + Tesseract fills sparse pages | 7.1s |
+| `--re-ocr` | 12,769 | Tesseract everywhere (Tesseract noise) | 7.9s |
 
-- **Pass `--ocr` if you want the output to be searchable.** Even if your input is already searchable. Without `--ocr` the MRC pipeline emits no text layer.
-- **Native preservation is the default for inputs that have a text layer.** The output's text is byte-faithful to the source ("Scaling Anesthesia Billing" comes back exactly as it was, not "Scal i ng Anest hesi a Bi l l i ng"). Helpful when downstream consumers do exact-string matches or extract structured data via regex.
-- **OCR cost when Tesseract has to run** is roughly +30-180% wall time depending on page-count vs compose-time ratio. When native preservation kicks in, cost drops dramatically per page.
-- **Tesseract is imperfect** — it collapses some spaces ("HankPDFsmokefixture" was source's "HankPDF smoke fixture"). Native is exact.
-- **Verifier interaction:** the verifier's input-vs-output OCR comparison uses native input text when available, so a verifier-passing run on a pre-OCR'd input is now possible (was previously near-impossible because Tesseract noise on input vs. Tesseract noise on output produced large edit-distance drift).
+The default went from 10.1s pre-this-feature to **5.4s** — 47% faster AND searchable, by skipping Tesseract entirely on inputs that already have a usable text layer.
+
+### Quality heuristic (`is_native_text_decent`)
+
+Lives in `pdf_smasher.engine.text_layer`. Inspects the extracted word list and returns `True` if the text looks like real words. Rejects:
+
+- **Mostly-non-alphabetic content** (`alpha-or-space ratio < 0.5`) — corrupted layers full of `?` / replacement markers.
+- **Average word length outside 2-12 chars** — gibberish OCR often produces single-char tokens or long runs of garbage.
+- **>40% single-character "words"** — the "S c a l i n g" pattern from OCR engines that couldn't infer word boundaries.
+
+Sparse pages (cover, dividers, < 30 chars total) pass — light text density alone isn't a quality signal. Tunables are centralized as `_NATIVE_DECENCY_*` constants in `text_layer.py`.
+
+### Comparison to running Tesseract
+
+| Aspect | Native preservation | Tesseract |
+|---|---|---|
+| Text faithfulness | byte-exact source text | recognition noise (collapsed spaces, mis-OCR'd glyphs) |
+| Per-page cost | ~50ms textpage walk | ~1-5s subprocess per page |
+| Source font / kerning | preserved (positions exact) | re-laid-out via Helvetica heuristic |
+| Verifier input-vs-output | comparable (native input vs Tesseract output still works) | symmetric (Tesseract input vs Tesseract output) |
+| Works on true scans | requires upstream text layer | works on any image |
+
+Practical guidance:
+
+- **Default settings just work.** Run `hankpdf in.pdf -o out.pdf` and the output keeps whatever searchable text the input had. No flag needed.
+- **For inputs that may or may not be scans:** `hankpdf in.pdf -o out.pdf --ocr` does the right thing automatically — preserves good native text, falls back to Tesseract on pages that need it.
+- **Force-OCR escape hatch:** if an upstream tool's OCR is known-bad, `--re-ocr` runs Tesseract regardless.
+- **Strip-everything escape hatch:** `--strip-text-layer` produces a text-free output (rare; size-only workflows).
 
 ## Threading: `--max-workers`
 

@@ -136,6 +136,57 @@ def add_text_layer(
         return buf.getvalue()
 
 
+# Tuning constants for is_native_text_decent. Centralized so they're greppable
+# and so adjustments can be made without scattering magic numbers.
+_NATIVE_DECENCY_SPARSE_THRESHOLD = (
+    30  # below this many chars, treat the page as too sparse to judge
+)
+_NATIVE_DECENCY_MIN_ALPHA_RATIO = 0.5  # at least half the chars must be letters or whitespace
+_NATIVE_DECENCY_MIN_AVG_WORD_LEN = 2.0
+_NATIVE_DECENCY_MAX_AVG_WORD_LEN = 12.0
+_NATIVE_DECENCY_MAX_SINGLE_CHAR_RATIO = 0.4  # ">40% single-char words" = "S c a l i n g" pattern
+
+
+def is_native_text_decent(boxes: Sequence[WordBox]) -> bool:
+    """Heuristic: is a native text layer reasonable enough to keep?
+
+    Returns ``True`` for text that looks like real words; ``False`` for
+    OCR-garbage signatures. Used to decide whether ``--ocr`` should
+    accept the existing text or replace it with a fresh Tesseract pass.
+
+    Rejects:
+      - Mostly-non-alphabetic content (punctuation/symbol noise) — e.g.
+        a corrupted text layer where most chars are ``?`` or unicode
+        replacement markers.
+      - Average word length outside 2-12 chars — gibberish OCR often
+        produces single-char tokens or long runs of garbage.
+      - High single-char-word ratio (>40%) — the "S c a l i n g" pattern
+        you get when an OCR engine treats every glyph as its own word
+        because it couldn't infer word boundaries.
+
+    Sparse pages (covers, dividers) with very little text pass — light
+    text density alone isn't a quality signal. The minimum gate is that
+    SOME text exists; below 30 chars we return ``True`` rather than
+    forcing a Tesseract pass on a near-blank page.
+    """
+    if not boxes:
+        return False
+    full_text = " ".join(b.text for b in boxes)
+    if len(full_text) < _NATIVE_DECENCY_SPARSE_THRESHOLD:
+        return True  # too sparse to judge; keep what's there
+    alpha_or_space = sum(1 for c in full_text if c.isalpha() or c.isspace())
+    if alpha_or_space / len(full_text) < _NATIVE_DECENCY_MIN_ALPHA_RATIO:
+        return False
+    words = [w for w in full_text.split() if w.isalpha()]
+    if not words:
+        return False
+    avg_len = sum(len(w) for w in words) / len(words)
+    if avg_len < _NATIVE_DECENCY_MIN_AVG_WORD_LEN or avg_len > _NATIVE_DECENCY_MAX_AVG_WORD_LEN:
+        return False
+    single_char_ratio = sum(1 for w in words if len(w) == 1) / len(words)
+    return single_char_ratio <= _NATIVE_DECENCY_MAX_SINGLE_CHAR_RATIO
+
+
 def extract_native_word_boxes(
     pdf_bytes: bytes,
     *,
