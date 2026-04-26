@@ -325,6 +325,17 @@ HankPDF runs on the user's machine. We are not a Business Associate, HIPAA cover
 
 **If a user embeds HankPDF inside their own HIPAA-covered pipeline**, that pipeline's compliance is the user's responsibility. HankPDF makes that easier by never reaching off-machine, but we don't carry a BAA because there's no service to carry one against.
 
+### 11.1 Render-size protection (two-tier)
+
+Two independent caps protect against decompression-bomb PDFs that would allocate billions of pixels:
+
+1. **Pre-allocation pixel-count guard.** `pdf_smasher.engine._render_safety.check_render_size(width_pt, height_pt, dpi)` is called BEFORE pdfium allocates the bitmap. It computes the target pixel dimensions from the page geometry and refuses with `pdf_smasher.exceptions.DecompressionBombError` if the product would exceed `pdf_smasher._limits.MAX_BOMB_PIXELS` (~715 Mpx, sized so an RGB raster fits in 2 GiB). Both the compress path (`rasterize.rasterize_page`) and the image-export path (`image_export._iter_pages_impl`) call this helper. Tests in `tests/unit/engine/test_render_safety.py`.
+2. **Post-decode Pillow guard.** `PIL.Image.MAX_IMAGE_PIXELS` is set to the SAME value by `pdf_smasher._pillow_hardening.ensure_capped()` so any image opened through Pillow (e.g., a per-page raster being re-encoded) hits the same ceiling. Pillow raises `PIL.Image.DecompressionBombError`, which our engine modules re-raise as our typed `DecompressionBombError` for consistent CLI exit-code mapping (`EXIT_DECOMPRESSION_BOMB=16`).
+
+Both caps share `pdf_smasher._limits.MAX_BOMB_PIXELS` as the canonical numeric value — the `tests/unit/test_pillow_hardening.py` suite asserts they don't drift apart.
+
+Callers that knowingly need a higher ceiling (e.g., a future per-page render CLI for engineering drawings) can pass `max_pixels=N` to `check_render_size` for a per-call override; there is intentionally no override for the Pillow cap (it's a global SECURITY boundary, not a tuning knob).
+
 ## 12. What we're explicitly not building
 
 To keep scope honest:
