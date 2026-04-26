@@ -6,7 +6,7 @@ Measured benchmarks across representative inputs and the full settings matrix. N
 
 - **Use HankPDF when the input is a scanned document.** Compression of 2.7×–5.5× is typical on real-world scan-derived slide decks; higher on true scanned text.
 - **Don't use HankPDF on already-efficient PDFs.** Native-export presentations (PowerPoint → PDF, Word → PDF) inflate when run through the MRC pipeline because the embedded JPEGs are already at high compression. The default `--min-ratio 1.5` correctly passthrough's these inputs unchanged.
-- **Pass `--ocr` if you want a searchable output.** The MRC pipeline rasterizes every page; without `--ocr`, the output has zero text — even if the input had a text layer. This bites scan-with-existing-OCR inputs.
+- **Existing text layers are preserved by default** (no flag required). `--ocr` fills gaps via Tesseract on pages with no native text or garbage native text; `--strip-text-layer` opts out (text-free output); `--re-ocr` forces Tesseract on every page. See the [text-layer section](#ocr--text-findability) for the quality heuristic and full settings matrix.
 - **For known-scan inputs, `--mode fast` is the sweet spot.** It gets ~the same compression as `--mode standard` in roughly one-third the wall time, with no visible quality difference at letter-page DPI.
 - **Image export beats the PDF pipeline on size for some workflows.** WebP at 150 DPI / quality 80 is the smallest output in our matrix and visually clean.
 - **`--max-workers 0` (auto, default) is correct.** Serial mode is ~4× slower on this hardware; past `cpu_count` of perf-cores there's no further gain.
@@ -226,6 +226,79 @@ Take-aways:
 Roughly: wall-time is **dominated by per-page raster + classify + compose + verify**, not by total bytes. A 30-page input at default settings ran in 28s; a 190-page input took 28s as well — page count is the lever, not file size, when the per-page workload is similar.
 
 `--mode fast` cuts wall time by ~2-3× by lowering source render DPI; quality at letter-page sizes is unchanged.
+
+## Real-world matrix (31 PDFs × 8 settings = 248 runs)
+
+To validate the per-setting takeaways above against a wider input set, the full matrix was run against **31 native-export presentation PDFs** from a 2026 conference (sizes 320 KB → 23 MB; 1 → 190 pages each; all have embedded text layers). Every input went through 8 settings: 4 PDF-compress paths and 4 image-export paths.
+
+### Per-setting rollup
+
+| Setting | Success | Median ratio | p25 / p75 ratio | Min ratio | Max ratio | Median wall | Total wall |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| default (passthrough fallback) | 31/31 | **1.00×** | 1.00 / 1.00 | 1.00 | 2.76 | 6.1s | 244s |
+| `--mode fast --min-ratio 0` | 31/31 | **0.33×** | 0.21 / 0.50 | 0.07 | 3.03 | 3.2s | 128s |
+| `--bg-dpi 100 --color-quality 40 --min-ratio 0` | 31/31 | **0.46×** | 0.26 / 0.67 | 0.09 | 4.74 | 5.9s | 229s |
+| `--ocr` (preserve native + Tesseract for gaps) | 31/31 | **1.00×** | 1.00 / 1.00 | 1.00 | 2.75 | 6.3s | 253s |
+| `-o page.jpg --image-dpi 150 --jpeg-quality 75` | 31/31 | **0.19×** | 0.12 / 0.31 | 0.05 | 1.97 | 2.2s | 77s |
+| `-o page.jpg --image-dpi 300 --jpeg-quality 90` | 31/31 | **0.05×** | 0.03 / 0.08 | 0.01 | 0.42 | 6.3s | 217s |
+| `-o page.webp --image-dpi 150 --webp-quality 80` | 31/31 | **0.46×** | 0.27 / 0.69 | 0.13 | 5.48 | 5.7s | 207s |
+| `-o page.png --image-dpi 150` | 31/31 | **0.09×** | 0.06 / 0.14 | 0.03 | 0.59 | 3.3s | 121s |
+
+A **median ratio < 1.0× means the setting INFLATES the typical input**. PNG @ 150 DPI inflates output to 11× the input size on the median; JPEG @ 300 DPI inflates to 20×. These settings are correct for "I want one image per page for a viewer or thumbnail pipeline" workflows, never for "I want a smaller PDF."
+
+### How often does each setting actually shrink the file?
+
+| Setting | <1× (inflated) | 1.0× exactly | 1.0–1.5× | 1.5–3× | >3× |
+|---|---:|---:|---:|---:|---:|
+| default | 0 | **30** | 0 | 1 | 0 |
+| `--mode fast --min-ratio 0` | **29** | 0 | 1 | 0 | 1 |
+| aggressive (100 DPI / quality 40) | **29** | 0 | 0 | 1 | 1 |
+| `--ocr` | 0 | **30** | 0 | 1 | 0 |
+| jpeg @ 150 DPI | **30** | 0 | 0 | 1 | 0 |
+| jpeg @ 300 DPI | **31** | 0 | 0 | 0 | 0 |
+| webp @ 150 DPI | **28** | 0 | 1 | 1 | 1 |
+| png @ 150 DPI | **31** | 0 | 0 | 0 | 0 |
+
+Every aggressive PDF-compress + every image-export setting INFLATES native-export PDFs the vast majority of the time. The default's `--min-ratio 1.5` short-circuit is the right behavior for this entire input class — 30 of 31 inputs passthrough unchanged.
+
+The single input that compresses meaningfully (Upadya Loynes "Scaling Anesthesia Billing") is **scan-derived**, not native-export. It hits 2.76× at default and 5.48× at webp@150 — the same headline numbers from the I_large case study above.
+
+### Text-layer preservation (default-preserve behavior)
+
+- **30/31 inputs**: default preserves at least 95% of the input's native text characters. The output is searchable verbatim, with no flag required.
+- The 1/31 outlier: the scan-derived "Scaling Anesthesia Billing" deck has only 4,241 source text chars; default preserved 3,998 (94%) — a few chars dropped to native-extraction's word-grouping heuristic on edge-case glyphs. The visible text remains complete and searchable.
+- `--ocr` enriched the text by >5% over default on 1/31 inputs (the same scan-derived deck — Tesseract filled sparse pages where native text was absent). For 30/31 inputs, `--ocr` adds zero new text because the inputs were already fully searchable.
+
+### Notable per-input highlights
+
+**Best compression seen (per input, any setting):**
+
+| Input | Best setting | Ratio | In | Out |
+|---|---|---:|---:|---:|
+| Upadya Loynes Scaling Anesthesia Billing and Compliance | webp_150 | 5.48× | 22,965 KB | 4,192 KB |
+| Upadya Conlon "Two Sides, One Record…" | webp_150 | 1.63× | 2,491 KB | 1,528 KB |
+| West "Approaches to Analytics Driven Management Strategies" | webp_150 | 1.07× | 1,287 KB | 1,205 KB |
+| 28 other inputs | default (passthrough) | 1.00× | (unchanged) | (unchanged) |
+
+**Worst inflation seen (per input, any setting):**
+
+| Input | Worst setting | Ratio | In | Out |
+|---|---|---:|---:|---:|
+| Moody "What's New in Anesthesia for 2026" | jpeg_300 | 0.01× | 343 KB | 24,739 KB |
+| Cameron "Navigating Payer Policies and Insurance Challenges" | jpeg_300 | 0.02× | 970 KB | 51,062 KB |
+| Carey "The Role of Bylaws, Credentialing, and Privileging" | jpeg_300 | 0.02× | 1,048 KB | 51,827 KB |
+
+JPEG/PNG/WebP at high DPI on native-export PDFs is the worst-case for output size — a 1 MB input can balloon to 51 MB if you hand-pick the wrong setting. Stick to defaults unless you specifically know your input is scan-derived.
+
+### Reproducing this matrix
+
+```bash
+# 31 inputs × 8 settings = 248 rows; ~30-50 min on M-series.
+uv run python /tmp/hankpdf-bench/run_matrix2.py
+uv run python /tmp/hankpdf-bench/aggregate.py  # writes /tmp/hankpdf-bench/aggregate.md
+```
+
+Both scripts live in `/tmp/hankpdf-bench/` (not committed — they point at user-local files). Adapt `DIR` in `run_matrix2.py` to your own corpus.
 
 ## Reproducing
 
