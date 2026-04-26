@@ -125,23 +125,29 @@ For the synthetic-text scan (`I_synth`), `aggressive` produced text identical to
 
 ## OCR / text-findability
 
-The MRC pipeline rasterizes every page and re-encodes it as image content. **Without `--ocr`, the output PDF has no text layer at all** — even if the input had one. This matters: a scanned PDF that arrived with an upstream text layer comes out searchable=False unless you explicitly pass `--ocr`.
+The MRC pipeline rasterizes every page and re-encodes it as image content. **Without `--ocr`, the output PDF has no text layer at all** — even if the input had one. With `--ocr`, the source of the output text depends on whether the input has an existing text layer:
 
-Measured on a freshly-extracted-text comparison (output PDF rendered through pypdfium2 → text page count):
+- **Input has no text layer (true scan)** → run Tesseract on the raster (slow; some recognition errors).
+- **Input has a text layer** → read it directly via pdfium and reuse it verbatim (faithful, no Tesseract noise, much cheaper).
 
-| Run | Input text layer | `--ocr` | Output text (chars, page 1) | Output text (total, all pages) | Wall vs no-OCR |
-|---|---|---|---:|---:|---:|
-| `smoke_text` (synthetic raster) | 0 chars | — | 0 chars | 0 | baseline 1.4s |
-| `smoke_text` | 0 chars | yes | ~110 chars | **4,700** | +110% (2.9s) |
-| `I_large` source has 194 chars (page 1) | 194 / 30 pages | — | **0 chars** | **0** | baseline 9.7s |
-| `I_large` | 194 chars | yes | 181 chars | **12,769** | +34% (13.0s) |
+This native-preserve path is automatic — you don't need to opt in. It's transparent to callers and only changes the implementation.
+
+Measured (output PDF rendered through pypdfium2 → text page count):
+
+| Run | Input text layer | `--ocr` | Output text (page 1 / total) | Source | Wall |
+|---|---|---|---:|---|---:|
+| `smoke_text` (synthetic raster) | 0 chars | — | 0 / 0 | — | 1.0s |
+| `smoke_text` | 0 chars | yes | ~110 / **4,700** | Tesseract (no native) | 2.8s (+180%) |
+| `I_large` (has upstream text) | 194 chars / page 1 | — | 0 / 0 | — | 10.1s |
+| `I_large` | 194 chars / page 1 | yes | 181 / **12,289** | **native, faithful** | 13.3s (+32%) |
 
 Take-aways:
 
-- **Pass `--ocr` if you want the output to be searchable** — even if your input is already searchable. The MRC pipeline does not preserve upstream text layers.
-- OCR cost is roughly **+30-100% wall time**. On the 30-page I_large input, `--mode fast --ocr` runs 13.0s vs 9.7s without (`+34%`). On the 2-page synthetic fixture, OCR overhead is proportionally larger because compression is fast and OCR is a fixed cost per page.
-- **OCR text is imperfect** — Tesseract collapses spaces in mixed regions ("HankPDFsmokefixture" was the source's "HankPDF smoke fixture"). Good enough for grep/search; not byte-exact.
-- The verifier's content-drift check (next section) compares OCR text input-vs-output, so without `--ocr` on a pre-OCR'd input, the verifier will see "had text → has no text" as drift.
+- **Pass `--ocr` if you want the output to be searchable.** Even if your input is already searchable. Without `--ocr` the MRC pipeline emits no text layer.
+- **Native preservation is the default for inputs that have a text layer.** The output's text is byte-faithful to the source ("Scaling Anesthesia Billing" comes back exactly as it was, not "Scal i ng Anest hesi a Bi l l i ng"). Helpful when downstream consumers do exact-string matches or extract structured data via regex.
+- **OCR cost when Tesseract has to run** is roughly +30-180% wall time depending on page-count vs compose-time ratio. When native preservation kicks in, cost drops dramatically per page.
+- **Tesseract is imperfect** — it collapses some spaces ("HankPDFsmokefixture" was source's "HankPDF smoke fixture"). Native is exact.
+- **Verifier interaction:** the verifier's input-vs-output OCR comparison uses native input text when available, so a verifier-passing run on a pre-OCR'd input is now possible (was previously near-impossible because Tesseract noise on input vs. Tesseract noise on output produced large edit-distance drift).
 
 ## Threading: `--max-workers`
 

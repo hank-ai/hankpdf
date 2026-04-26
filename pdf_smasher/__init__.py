@@ -379,16 +379,52 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         winput.input_page_pdf, page_index=0, dpi=winput.source_dpi, password=None
     )
 
-    # Input OCR is needed when:
-    #   - options.ocr (for add_text_layer positioning), OR
-    #   - verifier runs (for drift comparison)
-    # When BOTH are disabled (--skip-verify --no-ocr), skip Tesseract entirely.
-    # Tesseract is subprocess-based and releases the GIL during wait, so we
-    # kick input OCR off in a background thread NOW — it runs concurrently
-    # with mask/classify/compose and is awaited when we need the text.
-    need_input_ocr = bool(options.ocr) or not options.skip_verify
-    _input_ocr_future: Any = None
+    # Source-truth: prefer the input PDF's existing text layer (native) over
+    # a fresh Tesseract pass. We probe FIRST (cheap textpage read) so we can
+    # decide whether to incur the Tesseract subprocess cost at all.
+    from pypdfium2 import PdfDocument as _Pdfium
+
+    _doc = _Pdfium(winput.input_page_pdf)
+    try:
+        _tp = _doc[0].get_textpage()
+        try:
+            _native_text = _tp.get_text_range()
+        finally:
+            _tp.close()
+    finally:
+        _doc.close()
+    _has_native_text = bool(_native_text and _native_text.strip())
+
+    # Pre-load native word boxes when --ocr is set and the input has text.
+    # When this succeeds, we skip Tesseract for both input OCR and the
+    # output text layer. Tesseract is still kicked off below if the
+    # verifier needs it (it runs Tesseract on output regardless and we
+    # want a comparable input pass when native text isn't available).
     word_boxes: list[Any] = []
+    if _has_native_text and options.ocr:
+        from pdf_smasher.engine.text_layer import (
+            extract_native_word_boxes as _extract_native,
+        )
+
+        _native_boxes = _extract_native(
+            winput.input_page_pdf,
+            page_index=0,
+            raster_width_px=raster.size[0],
+            raster_height_px=raster.size[1],
+        )
+        if _native_boxes:
+            word_boxes = _native_boxes
+
+    # Input OCR via Tesseract is needed when:
+    #   - options.ocr is set AND we couldn't use native (no text layer or
+    #     extraction yielded nothing), OR
+    #   - the verifier runs (for drift comparison) AND we don't have a
+    #     usable native text fallback.
+    # When all of those are false, skip Tesseract entirely.
+    need_input_ocr = (bool(options.ocr) and not word_boxes) or (
+        not options.skip_verify and not _has_native_text
+    )
+    _input_ocr_future: Any = None
     ocr_text: str = ""
     # ExitStack guarantees the OCR ThreadPoolExecutor's __exit__ fires on
     # any path out of this block (happy return OR exception), which drains
@@ -420,19 +456,17 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
                 timeout_seconds=options.per_page_timeout_seconds,
             )
 
-        # Source-truth: prefer native PDF text layer when present.
-        # (Still cheap even with skip_verify; just a textpage read.)
-        from pypdfium2 import PdfDocument as _Pdfium
-
-        _doc = _Pdfium(winput.input_page_pdf)
-        try:
-            _tp = _doc[0].get_textpage()
-            try:
-                _native_text = _tp.get_text_range()
-            finally:
-                _tp.close()
-        finally:
-            _doc.close()
+        # Output OCR is also still kicked off below when --verify is on; the
+        # ThreadPoolExecutor for that case must exist. Create it lazily here
+        # if we skipped the input-OCR submission but the verifier will need
+        # an output-OCR future. (When skip_verify is True AND native text
+        # supplied word_boxes, no pool at all is needed — saves a thread.)
+        if _ocr_pool is None and not options.skip_verify:
+            _ocr_pool = ThreadPoolExecutor(max_workers=1)
+            _pool2 = _ocr_pool
+            _ocr_stack.callback(
+                lambda: _pool2.shutdown(wait=False, cancel_futures=True),
+            )
 
         def _await_input_ocr() -> None:
             """Populate word_boxes + ocr_text from the background OCR future.
@@ -443,10 +477,9 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             word_boxes = _input_ocr_future.result()
             ocr_text = " ".join(b.text for b in word_boxes)
 
-        # If native text is present we can skip waiting on OCR for the verifier
-        # ground-truth (native wins anyway). But we still need word_boxes later
-        # if options.ocr is set (for text-layer positioning).
-        if _native_text and _native_text.strip():
+        # Verifier ground-truth: native text wins when present (faithful).
+        # Otherwise wait on Tesseract.
+        if _has_native_text:
             input_ocr_text = _native_text.strip()
         else:
             _await_input_ocr()
