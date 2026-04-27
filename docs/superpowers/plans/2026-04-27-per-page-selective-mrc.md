@@ -778,30 +778,6 @@ def test_verify_disables_the_gate() -> None:
     assert not any("passthrough-no-image-content" in w for w in report.warnings)
 
 
-def _make_image_only_pdf() -> bytes:
-    """One-page PDF with a 50KB image XObject. Defined here for test-file
-    isolation (a copy also exists in tests/unit/engine/test_page_classifier.py)."""
-    pdf = pikepdf.new()
-    page = pdf.add_blank_page(page_size=(612, 792))
-    image_stream = pdf.make_stream(
-        b"\x00" * 50_000,
-        Type=pikepdf.Name.XObject,
-        Subtype=pikepdf.Name.Image,
-        Width=100,
-        Height=100,
-        BitsPerComponent=8,
-        ColorSpace=pikepdf.Name.DeviceRGB,
-        Filter=pikepdf.Name.FlateDecode,
-    )
-    page.Resources = pikepdf.Dictionary(
-        XObject=pikepdf.Dictionary(Im0=image_stream),
-    )
-    page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Im0 Do Q\n")
-    buf = io.BytesIO()
-    pdf.save(buf, linearize=False)
-    return buf.getvalue()
-
-
 def _make_2page_mixed_pdf() -> bytes:
     """Page 0: text-only. Page 1: image-dominated. Tests partial MRC."""
     text = _make_text_only_pdf()
