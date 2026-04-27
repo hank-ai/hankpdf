@@ -159,6 +159,7 @@ class _WorkerInput:
     is_safe: bool
     lev_ceiling: float
     ssim_floor: float
+    mrc_worthy: bool = True  # False = verbatim-copy fast path; default True for back-compat
 
 
 @_dc(frozen=True)
@@ -169,7 +170,7 @@ class _PageResult:
 
     page_index: int
     composed_bytes: bytes
-    strategy_name: str  # one of "text_only" / "photo_only" / "mixed"
+    strategy_name: str  # one of "text_only" / "photo_only" / "mixed" / "already_optimized"
     verdict: Any  # PageVerdict — engine.verifier.PageVerdict
     per_page_warnings: tuple[str, ...]
     input_bytes: int
@@ -374,6 +375,38 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     ssim_floor = winput.ssim_floor
     warnings: list[str] = []
 
+    # ── Per-page MRC gate ────────────────────────────────────────────
+    # If the page wasn't MRC-worthy (image-byte-fraction below the
+    # threshold), skip the entire pipeline — return the unchanged
+    # 1-page slice as the composed bytes, with a trivially-passing
+    # verdict (same shape as skip_verify uses). The whole-doc-shortcut
+    # in compress() catches the all-pages-verbatim case at the top
+    # level; this fast path is for the partial-MRC case (some pages
+    # MRC, some pages verbatim) where a worker still gets dispatched.
+    if not winput.mrc_worthy:
+        from pdf_smasher.engine.verifier import PageVerdict as _PageVerdict
+
+        _verdict = _PageVerdict(
+            page_index=-1,
+            passed=True,
+            lev=1.0,
+            ssim_global=0.0,
+            ssim_tile_min=0.0,
+            digits_match=False,
+            color_preserved=False,
+        )
+        return _PageResult(
+            page_index=winput.page_index,
+            composed_bytes=winput.input_page_pdf,
+            strategy_name="already_optimized",
+            verdict=_verdict,
+            per_page_warnings=(),
+            input_bytes=len(winput.input_page_pdf),
+            output_bytes=len(winput.input_page_pdf),
+            ratio=1.0,
+            worker_wall_ms=int((time.monotonic() - _worker_t0) * 1000),
+        )
+
     # --- Rasterize input ---
     raster = rasterize_page(
         winput.input_page_pdf, page_index=0, dpi=winput.source_dpi, password=None
@@ -503,6 +536,10 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         if options.force_monochrome and _page_has_color(raster):
             warnings.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
 
+        # Defensive: classify_page() never returns ALREADY_OPTIMIZED, and
+        # the per-page mrc_worthy gate above already short-circuited any
+        # verbatim page before we got here. If we ever land here, something
+        # upstream is wrong; keep the AssertionError as a tripwire.
         if strategy == PageStrategy.ALREADY_OPTIMIZED:
             msg = (
                 f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
