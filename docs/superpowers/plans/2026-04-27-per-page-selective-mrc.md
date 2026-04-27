@@ -15,7 +15,7 @@ git checkout feat/per-page-selective-mrc
 uv run pytest tests/unit -q
 ```
 
-Expect 278 passed (baseline). Branch is currently 1 commit ahead of `pre-public-sweep` (the spec doc).
+Expect 278 passed (baseline). Branch is currently 2 commits ahead of `pre-public-sweep` (the spec doc + this plan doc) — both are docs-only so the test count is unchanged.
 
 ---
 
@@ -387,6 +387,25 @@ git commit -m "feat(engine): page-level MRC-worthiness classifier"
 **Files:**
 - Modify: `pdf_smasher/__init__.py` (`_WorkerInput` field; worker fast path)
 
+- [ ] **Step 3.0: Update the stale `_PageResult.strategy_name` taxonomy comment + the dead-code AssertionError**
+
+In `pdf_smasher/__init__.py:172`, the existing comment reads `# one of "text_only" / "photo_only" / "mixed"`. Update to add the new value:
+
+```python
+    strategy_name: str  # one of "text_only" / "photo_only" / "mixed" / "already_optimized"
+```
+
+In `pdf_smasher/__init__.py:506-511` the existing `if strategy == PageStrategy.ALREADY_OPTIMIZED:` AssertionError path becomes unreachable after this PR (the new fast-path returns BEFORE reaching `classify_page`, and `classify_page` itself never emits `ALREADY_OPTIMIZED`). Add a one-line comment ABOVE the existing block to note this:
+
+```python
+        # Defensive: classify_page() never returns ALREADY_OPTIMIZED, and
+        # the per-page mrc_worthy gate above already short-circuited any
+        # verbatim page before this branch. If we ever land here, something
+        # upstream is wrong; keep the AssertionError as a tripwire.
+        if strategy == PageStrategy.ALREADY_OPTIMIZED:
+            ...
+```
+
 - [ ] **Step 3.1: Add the field to `_WorkerInput`**
 
 In `pdf_smasher/__init__.py`, find the `class _WorkerInput:` definition (around line 147). Add a new field at the end:
@@ -466,9 +485,9 @@ git commit -m "feat(engine): _WorkerInput.mrc_worthy + verbatim-copy worker fast
 
 - [ ] **Step 4.1: Score pages and decide whole-doc shortcut**
 
-In `pdf_smasher/__init__.py`, find the `compress()` body. Locate the section just AFTER the `_enforce_input_policy(tri, options, input_data)` call but BEFORE the per-page split. (This is roughly where `_selected_indices` is computed and the per-page split happens — search for `single_page_pdfs:`.)
+Insertion point: AFTER the existing `min_input_mb` passthrough block (around `pdf_smasher/__init__.py:885`, after the existing `if input_mb < options.min_input_mb:` block returns) and BEFORE the per-page split (`single_page_pdfs: dict[int, bytes] = {}` at line 907). This ordering matters: the cheap byte-size floor at `min_input_mb` must run BEFORE the new pikepdf-walking classifier so tiny inputs still passthrough on the cheapest path.
 
-Insert this block immediately after `_enforce_input_policy(tri, options, input_data)`:
+Insert this block at that location:
 
 ```python
     # ── Per-page MRC gate ────────────────────────────────────────────
@@ -479,9 +498,19 @@ Insert this block immediately after `_enforce_input_policy(tri, options, input_d
     # short-circuits the pipeline for verbatim pages.
     from pdf_smasher.engine.page_classifier import score_pages_for_mrc
 
-    _force_full_pipeline = bool(options.re_ocr) or bool(options.strip_text_layer)
+    # The gate is disabled (every page goes through MRC) when:
+    #   --re-ocr            → Tesseract on every page; verbatim incompatible.
+    #   --strip-text-layer  → no-text-layer output; verbatim preserves text.
+    #   --verify            → verbatim pages would feed synthetic verdicts
+    #                         into _VerifierAggregator and pollute the
+    #                         aggregate ssim/lev/digit metrics on partial
+    #                         runs. Verifier-conscious users get full work.
+    _force_full_pipeline = (
+        bool(options.re_ocr)
+        or bool(options.strip_text_layer)
+        or not options.skip_verify
+    )
     if _force_full_pipeline:
-        # --re-ocr / --strip-text-layer require every page to MRC.
         _mrc_flags = [True] * tri.pages
     else:
         _mrc_flags = score_pages_for_mrc(
@@ -492,7 +521,9 @@ Insert this block immediately after `_enforce_input_policy(tri, options, input_d
 
     if not any(_mrc_flags):
         # Whole-doc shortcut: every page is verbatim → return input unchanged.
-        return _build_passthrough_report(
+        # compress() returns tuple[bytes, CompressReport]; the unchanged input
+        # is the byte-identical first element.
+        return input_data, _build_passthrough_report(
             input_data,
             pages=tri.pages,
             wall_ms=int((time.monotonic() - t0) * 1000),
@@ -502,7 +533,7 @@ Insert this block immediately after `_enforce_input_policy(tri, options, input_d
         )
 ```
 
-The start-time variable in `compress()` is `t0` (defined at line 768 as `t0 = time.monotonic()`). The `_build_passthrough_report` helper takes `correlation_id` as a kwarg per `pdf_smasher/__init__.py:197-205`.
+The start-time variable in `compress()` is `t0` (defined at line 768 as `t0 = time.monotonic()`). The `_build_passthrough_report` helper takes `correlation_id` as a kwarg per `pdf_smasher/__init__.py:197-205`. The function signature is `compress(...) -> tuple[bytes, CompressReport]` — note the comma + `input_data` prefix on the return statement.
 
 - [ ] **Step 4.2: Thread the per-page flag into `_WorkerInput`**
 
@@ -589,14 +620,37 @@ Find the `report = CompressReport(...)` call at line 1300. Add a kwarg right bef
 
 - [ ] **Step 5.4: Add an aggregate warning code when verbatim pages exist**
 
-Find the `warnings_list: list[str] = []` block (line 922). After `_merge_result` has run (so after the `for result in ...` loop completes — search for "merge complete" emit or just before `report = CompressReport(`), add:
+Insertion point: immediately BEFORE the `report = CompressReport(...)` construction at `pdf_smasher/__init__.py:1300`, after the `verifier_result.status == "fail"` block that ends near line 1278. Insert:
 
 ```python
     # If some-but-not-all pages were verbatim, emit an aggregate warning
     # so users see in the report that the gate fired on some pages.
+    # Note: dash separator (not colon) for grammar consistency with the
+    # existing `verifier-fail-...-pages-...` warning-code pattern.
     if _verbatim_pages and len(_verbatim_pages) < tri.pages:
-        warnings_list.append(f"pages-skipped-verbatim:{len(_verbatim_pages)}")
+        warnings_list.append(f"pages-skipped-verbatim-{len(_verbatim_pages)}")
 ```
+
+The `:N` count is replaced with `-N` for grammar consistency with `pdf_smasher/cli/warning_codes.py`'s existing kebab-case pattern. The actual page indices are available on `report.pages_skipped_verbatim`; the count in the code is for log-grep convenience.
+
+- [ ] **Step 5.4b: Register both new warning codes in the CLI registry**
+
+In `pdf_smasher/cli/warning_codes.py`, find the `CliWarningCode` Literal type. Add two new entries:
+
+- `"passthrough-no-image-content"` — the whole-doc passthrough code emitted from `_build_passthrough_report` in Step 4.1.
+- `"pages-skipped-verbatim-N"` is a runtime-formatted code; the registry's Literal lists base codes only. If the registry expects exact strings, register as `"pages-skipped-verbatim"` with a docstring noting the runtime suffix; otherwise (if the registry tolerates suffixed forms) document the suffix grammar.
+
+Verify by grepping `pdf_smasher/cli/warning_codes.py` for the existing pattern (e.g., `"verifier-fail"`) to see whether suffixed codes are listed verbatim or as base names.
+
+- [ ] **Step 5.4c: Update SPEC.md with the new schema and warning codes**
+
+In `docs/SPEC.md`, find the §8.5 "Warning codes" section. Add an entry for `passthrough-no-image-content` and `pages-skipped-verbatim-N` describing when each fires and what report fields back them.
+
+In `docs/SPEC.md`, find the §11.1 "Schema versioning" section. Bump `schema_version` from `3` to `4`. Add a v3→v4 migration row noting the additive `pages_skipped_verbatim: tuple[int, ...]` field on `CompressReport` and the always-emitted `"already_optimized"` key in `strategy_distribution`.
+
+Update `pdf_smasher/types.py` if `schema_version` is encoded there as a constant (search for `schema_version`).
+
+If §8.5 currently says `strategy_distribution` only contains `text_only / photo_only / mixed`, also tighten that entry to include `already_optimized` — it has been pre-allocated in `strategy_counts` since the existing engine bootstrap and was always emitted as `0` even when no producer existed; this PR makes it potentially non-zero, which is a documented schema change.
 
 - [ ] **Step 5.5: Run all tests**
 
@@ -712,6 +766,80 @@ def test_threshold_zero_forces_full_pipeline() -> None:
     options = CompressOptions(min_image_byte_fraction=0.0, skip_verify=True)
     out_bytes, report = compress(pdf_bytes, options=options)
     assert not any("passthrough-no-image-content" in w for w in report.warnings)
+
+
+def test_verify_disables_the_gate() -> None:
+    """--verify forces every page through MRC + verifier so the
+    aggregator's metrics aren't polluted by synthetic verdicts."""
+    pdf_bytes = _make_text_only_pdf()
+    options = CompressOptions(skip_verify=False)  # equivalent to --verify
+    out_bytes, report = compress(pdf_bytes, options=options)
+    assert not any("passthrough-no-image-content" in w for w in report.warnings)
+
+
+def _make_2page_mixed_pdf() -> bytes:
+    """Page 0: text-only. Page 1: image-dominated. Tests partial MRC."""
+    text = _make_text_only_pdf()
+    image = _make_image_only_pdf()
+    text_pdf = pikepdf.open(io.BytesIO(text))
+    image_pdf = pikepdf.open(io.BytesIO(image))
+    text_pdf.pages.append(image_pdf.pages[0])
+    buf = io.BytesIO()
+    text_pdf.save(buf, linearize=False)
+    image_pdf.close()
+    text_pdf.close()
+    return buf.getvalue()
+
+
+def _make_image_only_pdf() -> bytes:
+    """Inline copy of the engine-test fixture so this file is self-contained."""
+    pdf = pikepdf.new()
+    page = pdf.add_blank_page(page_size=(612, 792))
+    image_stream = pdf.make_stream(
+        b"\x00" * 50_000,
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Image,
+        Width=100,
+        Height=100,
+        BitsPerComponent=8,
+        ColorSpace=pikepdf.Name.DeviceRGB,
+        Filter=pikepdf.Name.FlateDecode,
+    )
+    page.Resources = pikepdf.Dictionary(
+        XObject=pikepdf.Dictionary(Im0=image_stream),
+    )
+    page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Im0 Do Q\n")
+    buf = io.BytesIO()
+    pdf.save(buf, linearize=False)
+    return buf.getvalue()
+
+
+def test_partial_mrc_run_skips_only_text_pages() -> None:
+    """2-page mixed PDF: page 0 (text) is verbatim; page 1 (image) is MRC'd.
+
+    Asserts the report carries the right pages_skipped_verbatim indices
+    AND the aggregate warning code fires.
+    """
+    pdf_bytes = _make_2page_mixed_pdf()
+    out_bytes, report = compress(pdf_bytes, options=CompressOptions())
+    # Whole-doc shortcut should NOT fire — at least one page is MRC-worthy.
+    assert report.status != "passed_through"
+    # The text page (index 0) should be in pages_skipped_verbatim.
+    assert report.pages_skipped_verbatim == (0,)
+    # The aggregate warning should fire (some-but-not-all pages verbatim).
+    assert any(w.startswith("pages-skipped-verbatim-") for w in report.warnings)
+
+
+def test_compress_stream_routes_through_the_gate() -> None:
+    """compress_stream() uses compress() under the hood; verify the gate
+    fires through the streaming entry point too."""
+    import io as _io
+
+    from pdf_smasher import compress_stream
+
+    pdf_bytes = _make_text_only_pdf()
+    out_bytes, report = compress_stream(_io.BytesIO(pdf_bytes), options=CompressOptions())
+    assert any("passthrough-no-image-content" in w for w in report.warnings)
 ```
 
 - [ ] **Step 6.2: Run tests**
@@ -777,7 +905,10 @@ The gate disables itself on `--re-ocr` and `--strip-text-layer` runs (those flag
 Append under `[Unreleased]`:
 
 ```markdown
-- **Per-page selective MRC** — pages whose image-byte-fraction is below `CompressOptions.min_image_byte_fraction` (default 0.30) are now copied verbatim from the input instead of running through the MRC pipeline. On native-export PDFs every page is verbatim → whole-doc passthrough fires at the top of `compress()` → wall time drops from 3-30s to <1s. New CLI flag `--per-page-min-image-fraction`; new `CompressReport.pages_skipped_verbatim` field; new warning code `passthrough-no-image-content` (whole-doc) and `pages-skipped-verbatim:N` (partial). The `--re-ocr` and `--strip-text-layer` flags disable the gate (force every page through MRC). Closes the design gap left by `PageStrategy.ALREADY_OPTIMIZED` being defined but never wired up.
+- **Per-page selective MRC** — pages whose image-byte-fraction is below `CompressOptions.min_image_byte_fraction` (default 0.30) are now copied verbatim from the input instead of running through the MRC pipeline. On native-export PDFs every page is verbatim → whole-doc passthrough fires at the top of `compress()` → wall time drops from 3-30s to <1s. New CLI flag `--per-page-min-image-fraction`; new `CompressReport.pages_skipped_verbatim` field; new warning codes `passthrough-no-image-content` (whole-doc) and `pages-skipped-verbatim-N` (partial). The `--re-ocr`, `--strip-text-layer`, and `--verify` flags disable the gate (force every page through MRC; `--verify` because verbatim pages would pollute aggregate verifier metrics with synthetic verdicts). Closes the design gap left by `PageStrategy.ALREADY_OPTIMIZED` being defined but never wired up.
+- **`ProgressEvent.strategy`** may now emit the value `"already_optimized"` for verbatim pages (in addition to the existing `text_only / photo_only / mixed`). External tooling that pattern-matches on this string should accept the new value.
+- **Schema version bump v3 → v4** — `CompressReport.pages_skipped_verbatim` is an additive field per the same precedent as v2→v3 (`build_info`, `correlation_id`). Strict-schema consumers that pin v3 should update.
+- **Threshold-tuning note** — the default `min_image_byte_fraction = 0.30` was empirically separated on a 31-PDF benchmark of conference presentation PDFs; production traffic distributions may differ. Measure before tuning; the existing `--min-ratio 1.5` post-hoc gate remains as a backstop.
 ```
 
 - [ ] **Step 7.4: Commit**

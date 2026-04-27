@@ -100,12 +100,13 @@ The merge stage is unchanged — it already accepts per-page composed PDF bytes 
 
 ### 3.4 Force-MRC flags
 
-`--re-ocr` and `--strip-text-layer` (introduced in PR #11) bypass the gate entirely:
+Three flags bypass the gate entirely (force every page through MRC):
 
-- `--re-ocr` requires Tesseract on every page; that requires rasterization; verbatim copy is incompatible.
-- `--strip-text-layer` requires producing output with no text layer; verbatim copy preserves the input text layer; incompatible.
+- `--re-ocr` — Tesseract on every page; rasterization required; verbatim incompatible.
+- `--strip-text-layer` — output has no text layer; verbatim preserves the input text layer.
+- `--verify` (i.e., `not options.skip_verify`) — verbatim pages would feed synthetic `PageVerdict` values into `_VerifierAggregator` (the same pattern the existing `skip_verify=True` synthesis uses), which pollutes aggregate `ssim_global / ocr_lev / digits_match / color_preserved` metrics. Verifier-conscious users get full per-page work so their aggregate verifier output reflects reality. Documented + tested.
 
-Both flags effectively set `min_image_byte_fraction = 0.0` for the run (every page is MRC-worthy). Documented in CompressOptions docstring + CLI help.
+Effectively all three set `min_image_byte_fraction = 0.0` for the run. Documented in CompressOptions docstring + CLI help.
 
 ### 3.5 New `PageStrategy.ALREADY_OPTIMIZED` handler
 
@@ -218,7 +219,7 @@ The PR is ready to merge when ALL of the following are true:
 1. `uv run pytest` passes (baseline + new tests).
 2. `score_pages_for_mrc` returns `[True, False]` on a synthetic 2-page PDF with one image and one text page (test asserts).
 3. A 100%-native PDF runs through `compress()` in <1s and returns `status="passed_through"` with `passthrough-no-image-content` in warnings (test asserts).
-4. A 2-page mixed PDF returns `pages_skipped_verbatim=(1,)` and the verbatim page in the output is byte-identical to the input page (test asserts).
+4. A 2-page mixed PDF (page 0 text, page 1 image) returns `pages_skipped_verbatim=(0,)` and the aggregate warning code `pages-skipped-verbatim-1` is in `report.warnings` (test asserts). Note: the OUTPUT PDF is re-emitted via `pikepdf.save(deterministic_id=True)` so byte-identity of the verbatim page region within the output is NOT a meaningful assertion; the meaningful claim is that the verbatim page's content stream and resource objects are content-equivalent to the input's. Whole-doc passthrough (every page verbatim) DOES return byte-identical output because `compress()` returns `input_data` directly (Step 4.1).
 5. `--re-ocr` on a native PDF runs every page through MRC (test asserts).
 6. The full 31-PDF matrix re-run shows 30/31 inputs hit whole-doc passthrough at <1s each.
 7. `/dc` post-implementation review passes clean (no CRITICAL/MEDIUM findings).
