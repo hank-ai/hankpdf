@@ -102,7 +102,7 @@ def test_compress_report_construct() -> None:
     #   - VerifierResult.status "skipped" literal
     #   - CompressReport.warnings kebab-case codes (e.g. verifier-skipped)
     #   - CompressReport.strategy_distribution populated
-    assert report.schema_version == 3
+    assert report.schema_version == 4
     assert report.ratio == 2.0
     # correlation_id auto-generates via default_factory — shouldn't be empty.
     assert report.correlation_id

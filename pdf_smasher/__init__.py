@@ -1025,6 +1025,7 @@ def compress(
     # Page results accumulate by original index; output merges in sorted order
     # regardless of completion order (matters when parallel).
     page_pdfs_by_index: dict[int, bytes] = {}
+    _verbatim_pages: set[int] = set()
 
     _worker_wall_ms_total: list[int] = []
 
@@ -1034,6 +1035,8 @@ def compress(
         warnings_list.extend(result.per_page_warnings)
         verifier_agg.merge(result.page_index, result.verdict)
         strategy_counts[result.strategy_name] += 1
+        if result.strategy_name == "already_optimized":
+            _verbatim_pages.add(result.page_index)
         _worker_wall_ms_total.append(result.worker_wall_ms)
         # Under skip_verify the worker synthesizes a trivially-passing
         # verdict so it can still be aggregated; don't let that leak
@@ -1379,6 +1382,14 @@ def compress(
     from pdf_smasher.audit import resolve_build_info
     from pdf_smasher.types import _new_correlation_id
 
+    # If some-but-not-all pages were verbatim, emit an aggregate warning
+    # so consumers see in the report that the gate fired on some pages.
+    # Dash separator (not colon) for grammar consistency with the existing
+    # `verifier-fail-...-pages-...` pattern. The actual indices are on
+    # report.pages_skipped_verbatim; the count here is for log-grep.
+    if _verbatim_pages and len(_verbatim_pages) < tri.pages:
+        warnings_list.append(f"pages-skipped-verbatim-{len(_verbatim_pages)}")
+
     report = CompressReport(
         status=status,
         exit_code=exit_code,
@@ -1394,6 +1405,7 @@ def compress(
         output_sha256=output_sha,
         canonical_input_sha256=canonical_sha,
         warnings=tuple(warnings_list),
+        pages_skipped_verbatim=tuple(sorted(_verbatim_pages)),
         strategy_distribution=dict(strategy_counts),
         build_info=resolve_build_info(),
         correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),

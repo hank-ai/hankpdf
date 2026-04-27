@@ -223,6 +223,11 @@ class CompressReport:
     input_sha256: str
     output_sha256: str
     canonical_input_sha256: str | None
+    # 0-indexed page numbers that the per-page gate copied verbatim
+    # from the input rather than running through the MRC pipeline.
+    # Empty tuple = every page was MRC'd OR a whole-doc passthrough
+    # fired (in which case status="passed_through").
+    pages_skipped_verbatim: tuple[int, ...] = ()
     warnings: tuple[str, ...] = ()
     strips: tuple[str, ...] = ()
     reason: str | None = None
@@ -235,7 +240,7 @@ class CompressReport:
     #     on-call grep a batch log and tie each line back to its report.
     # v2 (Wave 3) added the "skipped" verifier status, kebab-case warning
     # codes, and populated strategy_distribution.
-    schema_version: int = field(default=3)
+    schema_version: int = field(default=4)
     strategy_distribution: Mapping[str, int] = field(default_factory=dict)
     build_info: BuildInfo | None = None
     correlation_id: str = field(default_factory=_new_correlation_id)
