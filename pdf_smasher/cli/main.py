@@ -258,6 +258,18 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--ocr-language", default="eng")
     p.add_argument("--strip-text-layer", action="store_true", default=False)
     p.add_argument("--re-ocr", action="store_true", default=False)
+    p.add_argument(
+        "--per-page-min-image-fraction",
+        type=float,
+        default=0.30,
+        help=(
+            "Per-page MRC gate threshold. Pages with image_xobject_bytes / "
+            "page_byte_budget below this fraction are copied verbatim instead "
+            "of recompressed. Default 0.30 — catches native-export PDFs and "
+            "skips them. Set to 0.0 to force the full MRC pipeline on every "
+            "page."
+        ),
+    )
 
     # Safety gates
     p.add_argument("--allow-signed-invalidation", action="store_true")
@@ -535,6 +547,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         ocr_language=args.ocr_language,
         strip_text_layer=args.strip_text_layer,
         re_ocr=args.re_ocr,
+        min_image_byte_fraction=args.per_page_min_image_fraction,
         allow_signed_invalidation=args.allow_signed_invalidation,
         allow_certified_invalidation=args.allow_certified_invalidation,
         allow_embedded_files=args.allow_embedded_files,

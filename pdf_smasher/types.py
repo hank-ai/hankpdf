@@ -78,6 +78,17 @@ class CompressOptions:
     # Limits
     max_pages: int | None = 10000  # None disables the gate (programmatic-only escape hatch)
     max_input_mb: float = 250.0
+    # Per-page MRC gate: pages whose image_xobject_bytes / page_byte_budget
+    # is below this threshold are copied verbatim from the input — no
+    # rasterize, no MRC pipeline, no Tesseract. Default 0.30 catches
+    # native-export PDFs (PowerPoint/Word output) where the MRC pipeline
+    # can't beat already-efficient encoding. Set to 0.0 to disable the
+    # gate (force every page through MRC). The flags strip_text_layer,
+    # re_ocr, AND skip_verify=False (--verify) all also disable the gate
+    # — --verify is included so verbatim pages don't feed synthetic
+    # verdicts into _VerifierAggregator and pollute the aggregate
+    # ssim/lev/digit metrics on partial-passthrough runs.
+    min_image_byte_fraction: float = 0.30
     per_page_timeout_seconds: int = 120
     total_timeout_seconds: int = 1200
     photo_target_dpi: int = 200  # DPI for PHOTO_ONLY pages

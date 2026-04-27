@@ -23,6 +23,7 @@ def test_compress_options_defaults() -> None:
     assert opts.allow_certified_invalidation is False
     assert opts.max_input_mb == 250.0
     assert opts.max_pages == 10000
+    assert opts.min_image_byte_fraction == 0.30
     assert opts.password is None
 
 
