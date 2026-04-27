@@ -87,5 +87,5 @@ def test_classifier_propagates_pikepdf_open_errors() -> None:
     """The per-page fallback applies to per-page analysis errors only;
     PDF-level open errors propagate so callers can route through
     ``_enforce_input_policy``."""
-    with pytest.raises(Exception):  # noqa: B017 — pikepdf raises one of several types
+    with pytest.raises(pikepdf.PdfError):
         score_pages_for_mrc(b"not a pdf at all")

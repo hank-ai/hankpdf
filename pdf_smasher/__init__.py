@@ -939,9 +939,7 @@ def compress(
     from pdf_smasher.engine.page_classifier import score_pages_for_mrc
 
     _force_full_pipeline = (
-        bool(options.re_ocr)
-        or bool(options.strip_text_layer)
-        or not options.skip_verify
+        bool(options.re_ocr) or bool(options.strip_text_layer) or not options.skip_verify
     )
     if _force_full_pipeline:
         _mrc_flags = [True] * tri.pages

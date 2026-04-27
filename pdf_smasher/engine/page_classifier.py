@@ -52,6 +52,54 @@ def score_pages_for_mrc(
     return flags
 
 
+def _stream_length(obj: pikepdf.Object) -> int:
+    """Return the ``/Length`` of a pikepdf Stream, or 0 if missing/unparseable."""
+    if not isinstance(obj, pikepdf.Stream):
+        return 0
+    raw = obj.get(pikepdf.Name.Length)
+    if raw is None:
+        return 0
+    try:
+        return int(raw)
+    except TypeError, ValueError:
+        return 0
+
+
+def _xobject_byte_split(page: pikepdf.Page) -> tuple[int, int]:
+    """Sum (image_xobject_bytes, other_xobject_bytes) for one page."""
+    image_bytes = 0
+    other_bytes = 0
+    resources = page.obj.get(pikepdf.Name.Resources)
+    if resources is None:
+        return 0, 0
+    xobjects = resources.get(pikepdf.Name.XObject)
+    if xobjects is None:
+        return 0, 0
+    for xobj in xobjects.values():  # type: ignore[operator]
+        length = _stream_length(xobj)
+        if (
+            isinstance(xobj, pikepdf.Stream)
+            and xobj.get(pikepdf.Name.Subtype) == pikepdf.Name.Image
+        ):
+            image_bytes += length
+        else:
+            other_bytes += length
+    return image_bytes, other_bytes
+
+
+def _content_stream_bytes(page: pikepdf.Page) -> int:
+    """Sum the encoded length of /Contents (single stream or array of streams)."""
+    contents = page.obj.get(pikepdf.Name.Contents)
+    if contents is None:
+        return 0
+    if isinstance(contents, pikepdf.Array):
+        total = 0
+        for s in contents:  # type: ignore[attr-defined]
+            total += _stream_length(s)
+        return total
+    return _stream_length(contents)
+
+
 def _page_image_byte_fraction(page: pikepdf.Page) -> float:
     """Return ``image_xobject_bytes / page_byte_budget`` for one page.
 
@@ -63,30 +111,7 @@ def _page_image_byte_fraction(page: pikepdf.Page) -> float:
     subforms). Floor at 1 byte to avoid division-by-zero on degenerate
     pages.
     """
-    image_bytes = 0
-    other_xobject_bytes = 0
-    resources = page.obj.get("/Resources")
-    if resources is not None:
-        xobjects = resources.get("/XObject")
-        if xobjects is not None:
-            for xobj in xobjects.values():  # type: ignore[operator]
-                if not isinstance(xobj, pikepdf.Stream):
-                    continue
-                length = int(xobj.get("/Length", 0) or 0)
-                if xobj.get("/Subtype") == pikepdf.Name.Image:
-                    image_bytes += length
-                else:
-                    other_xobject_bytes += length
-
-    contents = page.obj.get("/Contents")
-    content_bytes = 0
-    if contents is not None:
-        if isinstance(contents, pikepdf.Array):
-            for s in contents:  # type: ignore[attr-defined]
-                if isinstance(s, pikepdf.Stream):
-                    content_bytes += int(s.get("/Length", 0) or 0)
-        elif isinstance(contents, pikepdf.Stream):
-            content_bytes = int(contents.get("/Length", 0) or 0)
-
+    image_bytes, other_xobject_bytes = _xobject_byte_split(page)
+    content_bytes = _content_stream_bytes(page)
     budget = max(1, content_bytes + image_bytes + other_xobject_bytes)
     return image_bytes / budget
