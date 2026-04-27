@@ -921,6 +921,50 @@ def compress(
             correlation_id=correlation_id,
         )
 
+    # ── Per-page MRC gate ────────────────────────────────────────────
+    # Score every page once (cheap pikepdf walk: image_xobject_bytes /
+    # page_byte_budget). True = MRC-worthy, False = verbatim copy.
+    # If no page meets the threshold AND no flag forces full MRC, the
+    # input passes through unchanged at <1s wall. Otherwise the
+    # per-page flag is threaded into _WorkerInput and the worker
+    # short-circuits the pipeline for verbatim pages.
+    #
+    # The gate is disabled (every page MRC'd) when:
+    #   --re-ocr            → Tesseract on every page; verbatim incompatible.
+    #   --strip-text-layer  → no-text-layer output; verbatim preserves it.
+    #   --verify (skip_verify=False) → verbatim pages would feed synthetic
+    #                          PageVerdict values into _VerifierAggregator
+    #                          and pollute the aggregate ssim/lev/digit
+    #                          metrics on partial-passthrough runs.
+    from pdf_smasher.engine.page_classifier import score_pages_for_mrc
+
+    _force_full_pipeline = (
+        bool(options.re_ocr)
+        or bool(options.strip_text_layer)
+        or not options.skip_verify
+    )
+    if _force_full_pipeline:
+        _mrc_flags = [True] * tri.pages
+    else:
+        _mrc_flags = score_pages_for_mrc(
+            input_data,
+            password=options.password,
+            min_image_byte_fraction=options.min_image_byte_fraction,
+        )
+
+    if not any(_mrc_flags):
+        # Whole-doc shortcut: every page is verbatim → return input unchanged.
+        # compress() returns tuple[bytes, CompressReport]; the unchanged input
+        # is the byte-identical first element.
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=int((time.monotonic() - t0) * 1000),
+            reason="no page meets the image-content threshold",
+            warning_code="passthrough-no-image-content",
+            correlation_id=correlation_id,
+        )
+
     # --- Per-page recompress ---
     source_dpi = 200 if options.mode == "fast" else 300
     bg_target_dpi = options.target_bg_dpi
@@ -1029,6 +1073,7 @@ def compress(
             is_safe=is_safe,
             lev_ceiling=lev_ceiling,
             ssim_floor=ssim_floor,
+            mrc_worthy=_mrc_flags[i],
         )
         for i in _selected_indices
     ]
