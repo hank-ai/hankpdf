@@ -5,6 +5,11 @@ All notable changes to `pdf-smasher` (HankPDF) are documented here. The format i
 ## [Unreleased]
 
 ### Added
+- **Per-page MRC gate (`--per-page-min-image-fraction`, default `0.30`).** Before the pipeline splits work across workers, each page is scored on `image_xobject_bytes / page_byte_budget` (a cheap stream-length signal — no decode, no render). Pages below the threshold are emitted verbatim; pages at or above go through the full MRC pipeline. When no page meets the threshold, the whole-doc passthrough shortcut fires (input bytes returned unchanged, `status="passed_through"`, warning `passthrough-no-image-content`). Native-export and text-only PDFs see ~15× faster wall time (3.83s → 0.25s on a 50-page text-only PDF) and avoid the 53× inflate-and-discard cycle. Image-heavy inputs are unchanged. `--re-ocr`, `--strip-text-layer`, and `--verify` all disable the gate. See `docs/superpowers/specs/2026-04-27-per-page-selective-mrc-design.md` and the new "Per-page MRC gate" section in `docs/PERFORMANCE.md`.
+- `CompressReport.pages_skipped_verbatim: tuple[int, ...]` — page indices skipped by the per-page gate. Empty tuple on full-pipeline runs and on whole-doc passthrough.
+- `CompressReport.warnings` codes: `passthrough-no-image-content` (whole-doc shortcut) and `pages-skipped-verbatim-N` (partial-run aggregate).
+- `CompressOptions.min_image_byte_fraction: float = 0.30` and CLI flag `--per-page-min-image-fraction`.
+- New module `pdf_smasher.engine.page_classifier` exposing `score_pages_for_mrc(pdf_bytes, *, password, min_image_byte_fraction) -> list[bool]`.
 - Shared render-size cap helper (`pdf_smasher.engine._render_safety.check_render_size`) used by both the compress (`rasterize.py`) and image-export (`image_export.py`) paths. Closes a decompression-bomb gap on the compress path.
 - `--password-file` now plumbs the password through to every PDF-open site that touches user-supplied encrypted bytes (`engine.triage.triage`, public `pdf_smasher.triage`, `engine.canonical.canonical_input_sha256`, the per-page split + page-sizing pdfium open in `compress`, the image-export route's `iter_pages_as_images` chain, and the shared `engine.rasterize.rasterize_page`).
 - `_walk_dict_for_names` in triage now fails closed past its depth cap (raises `MaliciousPDFError` instead of silently early-returning); cap raised from 12 to 64 for legitimate-PDF headroom; cycle detection switched from Python `id()` to pikepdf's `objgen` so the visited-set actually dedupes indirect refs.
@@ -23,6 +28,7 @@ All notable changes to `pdf-smasher` (HankPDF) are documented here. The format i
 - New `pdf_smasher.engine.text_layer.extract_native_word_boxes` and `is_native_text_decent` helpers; tests in `tests/unit/engine/test_native_text_extraction.py`. **Behavior change for users who relied on the old "no `--ocr` → no text layer" assumption** — those workflows now need `--strip-text-layer` to keep the previous text-free behavior.
 
 ### Changed
+- **CompressReport schema bumped from v3 → v4.** Additive only (new fields default to empty/zero). Existing v3 readers must not assert `schema_version == 3`. See SPEC.md §11 migration table.
 - **BREAKING (CLI):** `--max-input-mb` default lowered from `2000.0` to `250.0`. To restore previous behavior: `--max-input-mb 2000`.
 - **BREAKING (CLI):** `--max-pages` default lowered from "unlimited" to `10000`. To restore previous behavior: `--max-pages 100000` (or higher).
 - **Library API note:** `CompressOptions.max_input_mb` default also tightened to `250.0`. `CompressOptions.max_pages` default tightened from `None` to `10000`; the type stays `int | None`, so programmatic callers can still pass `max_pages=None` to opt into the previous unlimited behavior.

@@ -11,6 +11,30 @@ Measured benchmarks across representative inputs and the full settings matrix. N
 - **Image export beats the PDF pipeline on size for some workflows.** WebP at 150 DPI / quality 80 is the smallest output in our matrix and visually clean.
 - **`--max-workers 0` (auto, default) is correct.** Serial mode is ~4× slower on this hardware; past `cpu_count` of perf-cores there's no further gain.
 - **`--verify` is a strict, slow quality gate.** ~5.8× wall-time cost; will refuse common MRC outputs unless paired with `--ocr` and `--mode safe`. Use only when downstream consumers treat absence-of-drift as a contract.
+- **Per-page MRC gate skips pages with no meaningful image content.** A cheap stream-length signal (`image_xobject_bytes / page_byte_budget`) is computed per page; pages below `--per-page-min-image-fraction` (default 0.30) are emitted verbatim. On a 50-page text-only PDF, this drops wall time from 3.83s to 0.25s (~15×) and avoids 53× output inflation. On image-heavy inputs the gate fires on every page, so wall time is unchanged. `--re-ocr`, `--strip-text-layer`, and `--verify` all disable the gate. See [Per-page MRC gate](#per-page-mrc-gate) below.
+
+## Per-page MRC gate
+
+Every page is scored before the pipeline splits work across workers. A page's `image_byte_fraction` is `image_xobject_bytes / (content_stream_bytes + image_xobject_bytes + other_xobject_bytes)`. Pages with a fraction at or above `--per-page-min-image-fraction` (default `0.30`) go through the full MRC pipeline; pages below are copied verbatim into the output PDF (no rasterize, no classify, no compose, no verify).
+
+When **no** pages meet the threshold, the whole-doc passthrough shortcut fires and the input bytes are returned unchanged — `CompressReport.status == "passed_through"` with the `passthrough-no-image-content` warning. On partial runs, `CompressReport.pages_skipped_verbatim` carries the indices of skipped pages and a `pages-skipped-verbatim-N` warning is emitted.
+
+| Input | Pages | Setting | Wall time | Output | Notes |
+|---|---:|---|---:|---:|---|
+| 50-page text-only synthetic | 50 | gate on (default) | **254 ms** | 20,755 B (== input) | whole-doc passthrough |
+| 50-page text-only synthetic | 50 | `--per-page-min-image-fraction 0 --min-ratio 0` | 3,830 ms | 1,109,406 B | full MRC; 53× **inflation** |
+| I_small (mixed slides + photo) | 18 | gate on (default) | 3.99 s | 2,551,055 B (== input) | every page MRC-worthy → pipeline runs → min-ratio passthrough |
+| I_med (native-export slides) | 190 | gate on (default) | 26.87 s | 11,346,630 B (== input) | every page MRC-worthy → pipeline runs → min-ratio passthrough |
+| I_large (scan-derived) | 30 | gate on (default) | 19.06 s | 8,447,331 B | 27/30 pages MRC-worthy; 3 verbatim |
+
+The gate is a **conservative pre-filter**, not a full whole-doc detector — embedded JPEGs in native-export slides will mark pages as image-heavy even when MRC won't compress further. The downstream `--min-ratio` check is what handles the "ran but didn't help" case. The gate's headline value is on **text-only** inputs, where it converts a 4-second inflate-and-throw-away cycle into a 250 ms passthrough.
+
+Disable the gate any time a forced full pipeline is required:
+
+- `--re-ocr` — force Tesseract on every page; gate is bypassed.
+- `--strip-text-layer` — explicit text-removal request; gate is bypassed.
+- `--verify` — verifier needs the full pipeline output to compare against; gate is bypassed (otherwise the aggregator would see synthetic verdicts).
+- `--per-page-min-image-fraction 0` — sets the threshold to 0 so every page meets it.
 
 ## Test inputs
 

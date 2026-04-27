@@ -1016,9 +1016,13 @@ def main(argv: list[str] | None = None) -> int:
         size_mb = args.input.stat().st_size / (1024 * 1024)
         if size_mb > args.max_input_mb:
             print(
-                f"refused: input is {size_mb:.1f} MB, exceeds --max-input-mb={args.max_input_mb} "
-                f"(default tightened from 2000.0; pass --max-input-mb 2000 to restore "
-                f"the previous behavior)",
+                _refuse(
+                    "E-INPUT-OVERSIZE",
+                    f"input is {size_mb:.1f} MB, exceeds --max-input-mb={args.max_input_mb} "
+                    f"(default tightened from 2000.0; pass --max-input-mb 2000 to restore "
+                    f"the previous behavior)",
+                    input_name=_input_label(args.input),
+                ),
                 file=sys.stderr,
             )
             return EXIT_OVERSIZE
