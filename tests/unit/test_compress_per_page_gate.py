@@ -92,6 +92,23 @@ def test_strip_text_layer_disables_the_gate() -> None:
     assert not any("passthrough-no-image-content" in w for w in report.warnings)
 
 
+def test_legal_mode_disables_the_gate() -> None:
+    """--legal-mode (CCITT G4 archival) forces every page through MRC.
+
+    The user invoked legal_codec_profile to guarantee a re-encode under the
+    archival profile. Verbatim copy would defeat the guarantee — the gate
+    must back off when this option is non-None.
+    """
+    pdf_bytes = _make_text_only_pdf()
+    options = CompressOptions(legal_codec_profile="ccitt-g4", skip_verify=True, accept_drift=True)
+    # legal_codec_profile is currently RESERVED; we expect a
+    # NotImplementedError (per types.py docstring) which is fine — the
+    # important assertion is that the gate did NOT short-circuit before
+    # the engine got the chance to refuse.
+    with pytest.raises(NotImplementedError):
+        compress(pdf_bytes, options=options)
+
+
 def test_threshold_zero_forces_full_pipeline() -> None:
     """min_image_byte_fraction=0.0 disables the gate (every page MRC-worthy)."""
     pdf_bytes = _make_text_only_pdf()
@@ -121,6 +138,41 @@ def test_partial_mrc_run_skips_only_text_pages() -> None:
     assert report.status != "passed_through"
     assert report.pages_skipped_verbatim == (0,)
     assert any(w.startswith("pages-skipped-verbatim-") for w in report.warnings)
+
+
+def _make_4page_alternating_pdf() -> bytes:
+    """4 pages: text, image, text, image. Tests that pages_skipped_verbatim
+    indices survive non-contiguous skip patterns and arrive sorted."""
+    text = _make_text_only_pdf()
+    image = _make_image_only_pdf()
+    out = pikepdf.open(io.BytesIO(text))
+    image_pdf = pikepdf.open(io.BytesIO(image))
+    # text already has page 0; append image, text, image to reach indices 1,2,3.
+    out.pages.append(image_pdf.pages[0])
+    text2 = pikepdf.open(io.BytesIO(_make_text_only_pdf()))
+    out.pages.append(text2.pages[0])
+    image2 = pikepdf.open(io.BytesIO(_make_image_only_pdf()))
+    out.pages.append(image2.pages[0])
+    buf = io.BytesIO()
+    out.save(buf, linearize=False)
+    out.close()
+    image_pdf.close()
+    text2.close()
+    image2.close()
+    return buf.getvalue()
+
+
+def test_partial_mrc_skipped_indices_are_sorted_and_non_contiguous() -> None:
+    """4-page text/image/text/image PDF: skipped indices must be (0, 2)
+    in sorted order. Catches off-by-one and set-iteration-order bugs in
+    the _verbatim_pages → tuple(sorted(...)) pipeline.
+    """
+    pdf_bytes = _make_4page_alternating_pdf()
+    _, report = compress(pdf_bytes, options=CompressOptions())
+    assert report.status != "passed_through"
+    assert report.pages_skipped_verbatim == (0, 2)
+    # Aggregate warning carries the count.
+    assert "pages-skipped-verbatim-2" in report.warnings
 
 
 def test_compress_stream_routes_through_the_gate() -> None:

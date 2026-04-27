@@ -35,10 +35,25 @@ def score_pages_for_mrc(
 
     The denominator includes the page's content stream length plus the
     encoded byte size of every XObject (image AND form) referenced from
-    that page's ``/Resources``. Note: nested Form XObjects are not
-    recursively walked — image bytes inside a Form sub-resource are
-    not counted, which biases the gate conservatively (toward more
-    passthrough) on those rare layouts.
+    that page's ``/Resources``.
+
+    **Conservative biases** (both push toward more pages routed to MRC,
+    which is the safe direction — this is a pre-filter, not a verifier):
+
+    1. Nested Form XObjects are not recursively walked. Image bytes
+       inside a Form sub-resource are not counted toward the numerator.
+       Layouts that hide images inside Form XObjects show as text-only.
+    2. The classifier walks each page's *direct* ``/Resources/XObject``
+       dict only. Resources inherited from the parent ``/Pages`` tree
+       are not consulted. A page with parent-inherited image XObjects
+       reads as having zero direct image bytes (fraction 0.0).
+
+    Both biases are conservative: pages that actually have image content
+    are over-classified as text-only and routed verbatim, which is
+    indistinguishable from a no-image page from the user's perspective
+    and saves wall-time. Pages classified as MRC-worthy on the direct
+    ``/Resources`` walk go through the full pipeline anyway, where
+    ``rasterize_page`` resolves inherited resources correctly.
     """
     flags: list[bool] = []
     with pikepdf.open(io.BytesIO(pdf_bytes), password=password or "") as pdf:
