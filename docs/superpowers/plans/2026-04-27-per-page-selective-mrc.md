@@ -15,7 +15,7 @@ git checkout feat/per-page-selective-mrc
 uv run pytest tests/unit -q
 ```
 
-Expect 278 passed (baseline). Branch is currently 2 commits ahead of `pre-public-sweep` (the spec doc + this plan doc) — both are docs-only so the test count is unchanged.
+Expect 278 passed (baseline). The branch contains spec + plan + iterative review-fix commits — all docs-only — so the test count is unchanged from `pre-public-sweep` HEAD.
 
 ---
 
@@ -640,16 +640,14 @@ The `:N` count is replaced with `-N` for grammar consistency with `pdf_smasher/c
 
 The new kebab-case codes (`passthrough-no-image-content`, `pages-skipped-verbatim-N`) live in `CompressReport.warnings` only — they are NOT type-checked by `pdf_smasher/cli/warning_codes.py`. That file's `CliWarningCode` Literal is for stderr `W-*`/`E-*` codes (a separate taxonomy). SPEC §8.5 is the source of truth for `CompressReport.warnings` strings; updating it is sufficient.
 
-Three files to edit:
+Two files to edit (`docs/SPEC.md` has multiple sections that change; `pdf_smasher/types.py` has one constant):
 
-1. **`docs/SPEC.md` §2.3 JSON sample** (around line 346): bump the embedded `"schema_version": 2` (stale!) to `"schema_version": 4` to match this PR.
+1. **`docs/SPEC.md` — bump every embedded `schema_version: 2`** (lines 77, 346, 490 per `grep -n "schema_version" docs/SPEC.md`). All three are pre-existing v2 → v3 staleness compounded with this PR's v3 → v4 bump. Update each to `4`.
+
 2. **`docs/SPEC.md` §8.5 "Warning codes"** (around line 599-611): add an entry for each new code:
-   - `passthrough-no-image-content` — fires from `_build_passthrough_report` when every page falls below `min_image_byte_fraction`. Co-emitted with `status="passed_through"`. The 0-indexed verbatim pages are `report.pages_skipped_verbatim` (which equals `tuple(range(report.pages))` in this case).
-   - `pages-skipped-verbatim-N` — fires when SOME but not all pages were copied verbatim (partial run). N is the count; the indices are in `report.pages_skipped_verbatim`. Status remains `"ok"` because the MRC pages produced real output.
-
    Also REWRITE the existing line 603 entry (which currently says `ALREADY_OPTIMIZED is not emitted by classify_page; triage pass-through pages bypass this loop entirely`) to: `strategy_distribution{class="text_only"|"photo_only"|"mixed"|"already_optimized"} — emitted by compress() once per page (see CompressReport.strategy_distribution). The "already_optimized" count comes from the per-page MRC gate (introduced in v4) and may be non-zero on partial-passthrough runs.`
 
-3. **`docs/SPEC.md` §11.1 "Schema versioning"** (around line 671-683): bump `schema_version` to 4 and add a v3→v4 row: `additive: pages_skipped_verbatim on CompressReport; "already_optimized" key in strategy_distribution may now be non-zero (was pre-allocated as 0).`
+3. **`docs/SPEC.md` §11.1 "Schema versioning"** (around line 671-683): add a v3→v4 row: `additive: pages_skipped_verbatim on CompressReport; "already_optimized" key in strategy_distribution may now be non-zero (was pre-allocated as 0).`
 
 4. **`pdf_smasher/types.py`** (line 227, `schema_version: int = field(default=3)`): bump default to `4`.
 
@@ -664,8 +662,8 @@ Expected: all green.
 - [ ] **Step 5.6: Commit**
 
 ```bash
-git add pdf_smasher/types.py pdf_smasher/__init__.py
-git commit -m "feat(report): populate pages_skipped_verbatim + warning code"
+git add pdf_smasher/types.py pdf_smasher/__init__.py docs/SPEC.md
+git commit -m "feat(report): pages_skipped_verbatim + schema_version v4 + SPEC docs"
 ```
 
 ---
