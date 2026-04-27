@@ -70,8 +70,11 @@ In `pdf_smasher/types.py`, find the existing `# Limits` section (around line 78)
     # rasterize, no MRC pipeline, no Tesseract. Default 0.30 catches
     # native-export PDFs (PowerPoint/Word output) where the MRC pipeline
     # can't beat already-efficient encoding. Set to 0.0 to disable the
-    # gate (force every page through MRC). The flags strip_text_layer
-    # and re_ocr also disable the gate (every page MRCs).
+    # gate (force every page through MRC). The flags strip_text_layer,
+    # re_ocr, AND skip_verify=False (--verify) all also disable the gate
+    # (every page MRCs). --verify is included so verbatim pages don't
+    # feed synthetic verdicts into _VerifierAggregator and pollute the
+    # aggregate ssim/lev/digit metrics on partial-passthrough runs.
     min_image_byte_fraction: float = 0.30
 ```
 
@@ -633,24 +636,22 @@ Insertion point: immediately BEFORE the `report = CompressReport(...)` construct
 
 The `:N` count is replaced with `-N` for grammar consistency with `pdf_smasher/cli/warning_codes.py`'s existing kebab-case pattern. The actual page indices are available on `report.pages_skipped_verbatim`; the count in the code is for log-grep convenience.
 
-- [ ] **Step 5.4b: Register both new warning codes in the CLI registry**
+- [ ] **Step 5.4b: Update SPEC.md and bump the schema version**
 
-In `pdf_smasher/cli/warning_codes.py`, find the `CliWarningCode` Literal type. Add two new entries:
+The new kebab-case codes (`passthrough-no-image-content`, `pages-skipped-verbatim-N`) live in `CompressReport.warnings` only — they are NOT type-checked by `pdf_smasher/cli/warning_codes.py`. That file's `CliWarningCode` Literal is for stderr `W-*`/`E-*` codes (a separate taxonomy). SPEC §8.5 is the source of truth for `CompressReport.warnings` strings; updating it is sufficient.
 
-- `"passthrough-no-image-content"` — the whole-doc passthrough code emitted from `_build_passthrough_report` in Step 4.1.
-- `"pages-skipped-verbatim-N"` is a runtime-formatted code; the registry's Literal lists base codes only. If the registry expects exact strings, register as `"pages-skipped-verbatim"` with a docstring noting the runtime suffix; otherwise (if the registry tolerates suffixed forms) document the suffix grammar.
+Three files to edit:
 
-Verify by grepping `pdf_smasher/cli/warning_codes.py` for the existing pattern (e.g., `"verifier-fail"`) to see whether suffixed codes are listed verbatim or as base names.
+1. **`docs/SPEC.md` §2.3 JSON sample** (around line 346): bump the embedded `"schema_version": 2` (stale!) to `"schema_version": 4` to match this PR.
+2. **`docs/SPEC.md` §8.5 "Warning codes"** (around line 599-611): add an entry for each new code:
+   - `passthrough-no-image-content` — fires from `_build_passthrough_report` when every page falls below `min_image_byte_fraction`. Co-emitted with `status="passed_through"`. The 0-indexed verbatim pages are `report.pages_skipped_verbatim` (which equals `tuple(range(report.pages))` in this case).
+   - `pages-skipped-verbatim-N` — fires when SOME but not all pages were copied verbatim (partial run). N is the count; the indices are in `report.pages_skipped_verbatim`. Status remains `"ok"` because the MRC pages produced real output.
 
-- [ ] **Step 5.4c: Update SPEC.md with the new schema and warning codes**
+   Also REWRITE the existing line 603 entry (which currently says `ALREADY_OPTIMIZED is not emitted by classify_page; triage pass-through pages bypass this loop entirely`) to: `strategy_distribution{class="text_only"|"photo_only"|"mixed"|"already_optimized"} — emitted by compress() once per page (see CompressReport.strategy_distribution). The "already_optimized" count comes from the per-page MRC gate (introduced in v4) and may be non-zero on partial-passthrough runs.`
 
-In `docs/SPEC.md`, find the §8.5 "Warning codes" section. Add an entry for `passthrough-no-image-content` and `pages-skipped-verbatim-N` describing when each fires and what report fields back them.
+3. **`docs/SPEC.md` §11.1 "Schema versioning"** (around line 671-683): bump `schema_version` to 4 and add a v3→v4 row: `additive: pages_skipped_verbatim on CompressReport; "already_optimized" key in strategy_distribution may now be non-zero (was pre-allocated as 0).`
 
-In `docs/SPEC.md`, find the §11.1 "Schema versioning" section. Bump `schema_version` from `3` to `4`. Add a v3→v4 migration row noting the additive `pages_skipped_verbatim: tuple[int, ...]` field on `CompressReport` and the always-emitted `"already_optimized"` key in `strategy_distribution`.
-
-Update `pdf_smasher/types.py` if `schema_version` is encoded there as a constant (search for `schema_version`).
-
-If §8.5 currently says `strategy_distribution` only contains `text_only / photo_only / mixed`, also tighten that entry to include `already_optimized` — it has been pre-allocated in `strategy_counts` since the existing engine bootstrap and was always emitted as `0` even when no producer existed; this PR makes it potentially non-zero, which is a documented schema change.
+4. **`pdf_smasher/types.py`** (line 227, `schema_version: int = field(default=3)`): bump default to `4`.
 
 - [ ] **Step 5.5: Run all tests**
 
@@ -686,6 +687,7 @@ from __future__ import annotations
 import io
 
 import pikepdf
+import pytest
 
 from pdf_smasher import compress
 from pdf_smasher.types import CompressOptions
@@ -768,6 +770,7 @@ def test_threshold_zero_forces_full_pipeline() -> None:
     assert not any("passthrough-no-image-content" in w for w in report.warnings)
 
 
+@pytest.mark.slow  # full MRC + verifier run; rasterize + Tesseract per page
 def test_verify_disables_the_gate() -> None:
     """--verify forces every page through MRC + verifier so the
     aggregator's metrics aren't polluted by synthetic verdicts."""
@@ -777,22 +780,9 @@ def test_verify_disables_the_gate() -> None:
     assert not any("passthrough-no-image-content" in w for w in report.warnings)
 
 
-def _make_2page_mixed_pdf() -> bytes:
-    """Page 0: text-only. Page 1: image-dominated. Tests partial MRC."""
-    text = _make_text_only_pdf()
-    image = _make_image_only_pdf()
-    text_pdf = pikepdf.open(io.BytesIO(text))
-    image_pdf = pikepdf.open(io.BytesIO(image))
-    text_pdf.pages.append(image_pdf.pages[0])
-    buf = io.BytesIO()
-    text_pdf.save(buf, linearize=False)
-    image_pdf.close()
-    text_pdf.close()
-    return buf.getvalue()
-
-
 def _make_image_only_pdf() -> bytes:
-    """Inline copy of the engine-test fixture so this file is self-contained."""
+    """One-page PDF with a 50KB image XObject. Defined here for test-file
+    isolation (a copy also exists in tests/unit/engine/test_page_classifier.py)."""
     pdf = pikepdf.new()
     page = pdf.add_blank_page(page_size=(612, 792))
     image_stream = pdf.make_stream(
@@ -814,6 +804,20 @@ def _make_image_only_pdf() -> bytes:
     return buf.getvalue()
 
 
+def _make_2page_mixed_pdf() -> bytes:
+    """Page 0: text-only. Page 1: image-dominated. Tests partial MRC."""
+    text = _make_text_only_pdf()
+    image = _make_image_only_pdf()
+    text_pdf = pikepdf.open(io.BytesIO(text))
+    image_pdf = pikepdf.open(io.BytesIO(image))
+    text_pdf.pages.append(image_pdf.pages[0])
+    buf = io.BytesIO()
+    text_pdf.save(buf, linearize=False)
+    image_pdf.close()
+    text_pdf.close()
+    return buf.getvalue()
+
+
 def test_partial_mrc_run_skips_only_text_pages() -> None:
     """2-page mixed PDF: page 0 (text) is verbatim; page 1 (image) is MRC'd.
 
@@ -832,14 +836,21 @@ def test_partial_mrc_run_skips_only_text_pages() -> None:
 
 def test_compress_stream_routes_through_the_gate() -> None:
     """compress_stream() uses compress() under the hood; verify the gate
-    fires through the streaming entry point too."""
+    fires through the streaming entry point too.
+
+    compress_stream signature is `(input_stream, output_stream, options=None) -> CompressReport`
+    (per pdf_smasher/__init__.py:1322-1331) — note: TWO positional streams
+    and a single CompressReport return.
+    """
     import io as _io
 
     from pdf_smasher import compress_stream
 
     pdf_bytes = _make_text_only_pdf()
-    out_bytes, report = compress_stream(_io.BytesIO(pdf_bytes), options=CompressOptions())
+    out_buf = _io.BytesIO()
+    report = compress_stream(_io.BytesIO(pdf_bytes), out_buf, options=CompressOptions())
     assert any("passthrough-no-image-content" in w for w in report.warnings)
+    assert out_buf.getvalue() == pdf_bytes  # whole-doc passthrough returns input unchanged
 ```
 
 - [ ] **Step 6.2: Run tests**
