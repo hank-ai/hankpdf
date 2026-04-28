@@ -6,11 +6,27 @@ _Repo / package name: `pdf-smasher`. Product brand: **HankPDF**._
 
 **Status:** v0.1.0 — first public release. 389 tests passing on Linux / macOS / Windows CI. Available via PyPI (`pip install pdf-smasher`), GHCR (`docker pull ghcr.io/hank-ai/hankpdf:v0.1.0`), or from the repo (see **Setup** below).
 
+> ## ⚠️ Required: native binaries (`pip install` is NOT enough)
+>
+> HankPDF is a Python wrapper around three native CLI tools. **`pip install pdf-smasher` does NOT install them — you have to do it via your system package manager BEFORE the wrapper works**, or use the Docker image which has them baked in.
+>
+> | Binary | Why | Without it |
+> |---|---|---|
+> | **Tesseract** | OCR text-layer extraction + verifier | `hankpdf` exits with `tesseract is not installed or it's not in your PATH` on any input that needs OCR |
+> | **qpdf** | structural repair + linearization | `EnvironmentError`, refuses to run |
+> | **jbig2enc** | text-region encoder for the MRC pipeline | text-only compression drops from ~50× to ~6× (flate fallback); searchable PDFs still produced |
+>
+> Install them via your OS package manager (`brew install tesseract qpdf` on macOS, `apt install tesseract-ocr qpdf jbig2enc-tools` on Debian/Ubuntu, `choco install tesseract qpdf` on Windows). Build jbig2enc from source where it isn't packaged — see [docs/INSTALL.md](docs/INSTALL.md) for full per-OS instructions including the Windows `jbig2.exe` installer.
+>
+> **After install, run `hankpdf --doctor`** — it prints the version of every binary it can find and `NOT FOUND` for any that's missing. Run it before you trust any other output.
+>
+> **Want zero setup?** Use the Docker image (`docker pull ghcr.io/hank-ai/hankpdf:v0.1.0`) — Tesseract, qpdf, and jbig2enc are all baked in. See **Setup → Docker** below.
+
 ## What it does
 
 Takes oversized scanned PDFs (typical input: 200-page, 800 MB image scans) and produces compact, searchable, verified outputs. **CLI-first. Two install targets, both run the same engine locally**:
 
-1. **Python package** — `pip install pdf-smasher`. Brings the `compress()` API and the `hankpdf` console script. Requires Tesseract + jbig2enc via your system package manager (one-line install on every major OS — see `docs/INSTALL.md`).
+1. **Python package** — `pip install pdf-smasher` (gives you the `compress()` API and the `hankpdf` console script) **plus** Tesseract + qpdf + jbig2enc via your system package manager. See the loud callout above and [docs/INSTALL.md](docs/INSTALL.md) for one-line per-OS install instructions.
 2. **Docker image** — `ghcr.io/hank-ai/hankpdf:latest`. All native deps baked in; zero host setup. Ideal for CI/CD, SFTP upload wrappers, batch jobs, and any environment where installing Tesseract on the host is inconvenient.
 
 **Not a service, not a GUI, not a signed installer.** HankPDF is a command-line tool. It runs entirely on the user's machine, never uploads PDFs anywhere, never phones home, writes no analytics, stores no persistent state beyond what the user asks (output PDF, optional sidecar manifest).
