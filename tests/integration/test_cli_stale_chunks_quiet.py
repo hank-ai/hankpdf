@@ -20,7 +20,19 @@ from pdf_smasher.cli.main import main
 def _make_pdf(tmp_path, n_pages: int = 2):  # type: ignore[no-untyped-def]
     pdf = pikepdf.new()
     for _ in range(n_pages):
-        pdf.add_blank_page(page_size=(612, 792))
+        page = pdf.add_blank_page(page_size=(612, 792))
+        img = pdf.make_stream(
+            b"\x00" * 2048,
+            Type=pikepdf.Name.XObject,
+            Subtype=pikepdf.Name.Image,
+            Width=10,
+            Height=10,
+            BitsPerComponent=8,
+            ColorSpace=pikepdf.Name.DeviceRGB,
+            Filter=pikepdf.Name.FlateDecode,
+        )
+        page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im0=img))
+        page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Im0 Do Q\n")
     p = tmp_path / "in.pdf"
     pdf.save(p)
     return p

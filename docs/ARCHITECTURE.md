@@ -102,6 +102,18 @@ Conditions that cause immediate exit here:
 - Input exceeds the configured size ceiling — raises `InputTooLargeError`
 - Input is below `min_input_mb` — returns with `status="passed_through"` (see §4.5 on passthrough semantics)
 
+### 4.1b Per-page MRC gate
+
+Immediately after the input-policy gate and before Sanitize/Recompress, every page is scored once for MRC-worthiness via `score_pages_for_mrc(pdf_bytes, *, password, min_image_byte_fraction)` in `pdf_smasher/engine/page_classifier.py`. The gate is a cheap pre-filter — no decode, no render, just a pikepdf walk of each page's `/Resources/XObject` dict.
+
+- **Signal**: `image_xobject_bytes / page_byte_budget` per page, where the numerator is the sum of `/Length` for every `/XObject /Image` stream and the denominator is `len(/Contents) + sum(referenced_xobject_lengths)` (image + form XObjects, floored at 1 byte). Native-export PDFs (PowerPoint/Word) sit at 0–15%; scan-derived PDFs sit at 70–95%.
+- **Threshold**: `--per-page-min-image-fraction` (CLI), `CompressOptions.min_image_byte_fraction` (API). Default `0.30`. Pages at or above the threshold are MRC-worthy; pages below are emitted **verbatim** in the worker fast-path (1-page slice copied from the input with a sentinel `PageVerdict`, no rasterize, no Tesseract).
+- **Whole-doc shortcut**: when **no** page meets the threshold, `compress()` skips Sanitize/Recompress entirely and returns the input bytes unchanged with `status="passed_through"` and warning code `passthrough-no-image-content`. This is distinct from the partial-passthrough case where some pages are verbatim and others are MRC'd; partial passthrough still produces a recompressed output and records the verbatim page indices in `CompressReport.pages_skipped_verbatim` (0-indexed).
+- **Disable conditions**: the gate is bypassed (every page forced through full MRC) when `--re-ocr`, `--strip-text-layer`, `--legal-mode`, or `--verify` (i.e. `skip_verify=False`) is set, or when `--per-page-min-image-fraction 0` is passed. `--verify` disables the gate because a verbatim page would feed a synthetic `PageVerdict` into `_VerifierAggregator` and pollute the aggregate ssim/lev/digit metrics. A defensive assert in the worker fast-path traps any future regression that lets `skip_verify=False` leak into a verbatim slice.
+- **Conservative biases**: nested Form XObjects are not recursively walked (image bytes hidden inside a Form sub-resource don't count toward the numerator), and parent-inherited `/Resources` from the `/Pages` tree are not consulted (only the page's direct `/Resources/XObject` dict). Both biases under-count image bytes, pushing borderline pages toward MRC — the safe direction for a pre-filter.
+
+See SPEC.md §4.1b for the precise behavior contract.
+
 ### 4.2 Sanitize
 
 Goals: strip hostile or unneeded content, pre-repair structural issues, normalize to a canonical form that Recompress can operate on safely.
@@ -170,12 +182,13 @@ Ratio comes primarily from aggressive background downsampling + color→mono det
 
 ### 4.4 Passthrough floors
 
-After Recompress, `compress()` checks two passthrough conditions before returning the compressed result:
+`compress()` checks three passthrough conditions across the pipeline; any one returning `status="passed_through"` short-circuits everything downstream:
 
-- **`min_input_mb`**: if the raw input is smaller than this floor, no compression is attempted at all; the input bytes are returned unchanged with `status="passed_through"`. Checked in the input-policy gate (§4.1a), not post-compression.
-- **`min_ratio`**: if the achieved compression ratio falls below this floor (default `1.5×`), the input bytes are returned unchanged with `status="passed_through"`. This avoids delivering a "compressed" output that is actually larger or only marginally smaller than the original.
+- **`min_input_mb`** (pre-Sanitize): if the raw input is smaller than this floor, no compression is attempted at all; the input bytes are returned unchanged. Checked in the input-policy gate (§4.1a).
+- **`min_image_byte_fraction`** (pre-Sanitize): if no page meets the per-page MRC gate's image-byte threshold, the whole document is returned unchanged with warning `passthrough-no-image-content`. Checked in the per-page MRC gate (§4.1b).
+- **`min_ratio`** (post-Recompress): if the achieved compression ratio falls below this floor (default `1.5×`), the input bytes are returned unchanged. This avoids delivering a "compressed" output that is actually larger or only marginally smaller than the original.
 
-Both conditions are declared in `CompressOptions`. Callers can detect passthrough via `CompressReport.status`.
+All three conditions are declared in `CompressOptions`. Callers can detect passthrough via `CompressReport.status`.
 
 ### 4.5 Chunked output
 
@@ -306,7 +319,7 @@ The single engine is exposed through a unified `compress(bytes, CompressOptions)
 
 `compress()` also accepts an optional `progress_callback: Callable[[ProgressEvent], None]` argument. The CLI wires this to tqdm progress bars for both the MRC and image-export paths. `ProgressEvent` carries a `verifier` field that distinguishes `"skipped"` when `skip_verify=True` is set, so the live bar never reports false verifier progress (see §5 on verifier honesty).
 
-`CompressReport.schema_version` is currently **2**. A migration note for consumers reading v1 reports is in SPEC §11.1.
+`CompressReport.schema_version` is currently **4**. v4 (additive over v3) adds `pages_skipped_verbatim: tuple[int, ...]` and the per-page-gate warning codes (`passthrough-no-image-content`, `pages-skipped-verbatim-N`). A migration note for consumers reading earlier-version reports is in SPEC §11.1.
 
 Configuration precedence: command-line flag > environment variable > config file > built-in default.
 

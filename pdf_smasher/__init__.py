@@ -159,6 +159,7 @@ class _WorkerInput:
     is_safe: bool
     lev_ceiling: float
     ssim_floor: float
+    mrc_worthy: bool = True  # False = verbatim-copy fast path; default True for back-compat
 
 
 @_dc(frozen=True)
@@ -169,7 +170,7 @@ class _PageResult:
 
     page_index: int
     composed_bytes: bytes
-    strategy_name: str  # one of "text_only" / "photo_only" / "mixed"
+    strategy_name: str  # one of "text_only" / "photo_only" / "mixed" / "already_optimized"
     verdict: Any  # PageVerdict — engine.verifier.PageVerdict
     per_page_warnings: tuple[str, ...]
     input_bytes: int
@@ -374,6 +375,53 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     ssim_floor = winput.ssim_floor
     warnings: list[str] = []
 
+    # ── Per-page MRC gate ────────────────────────────────────────────
+    # If the page wasn't MRC-worthy (image-byte-fraction below the
+    # threshold), skip the entire pipeline — return the unchanged
+    # 1-page slice as the composed bytes, with a trivially-passing
+    # verdict (same shape as skip_verify uses). The whole-doc-shortcut
+    # in compress() catches the all-pages-verbatim case at the top
+    # level; this fast path is for the partial-MRC case (some pages
+    # MRC, some pages verbatim) where a worker still gets dispatched.
+    if not winput.mrc_worthy:
+        # Synthetic verdict invariant: this fast path emits
+        # _PageVerdict(lev=1.0, ssim_global=0.0, ssim_tile_min=0.0, ...)
+        # — sentinel values, not real measurements. They are SAFE only
+        # because compress()'s _force_full_pipeline interlock disables
+        # the gate when --verify is on, so verbatim verdicts never feed
+        # _VerifierAggregator.merge(). If a future change relaxes the
+        # interlock (or adds a new gate-disable path), the invariant
+        # below will trip first instead of silently corrupting metrics.
+        if not options.skip_verify:
+            msg = (
+                "verbatim worker fast-path reached with skip_verify=False; "
+                "synthetic PageVerdict would pollute _VerifierAggregator. "
+                "Check the _force_full_pipeline interlock in compress()."
+            )
+            raise AssertionError(msg)
+        from pdf_smasher.engine.verifier import PageVerdict as _PageVerdict
+
+        _verdict = _PageVerdict(
+            page_index=-1,
+            passed=True,
+            lev=1.0,
+            ssim_global=0.0,
+            ssim_tile_min=0.0,
+            digits_match=False,
+            color_preserved=False,
+        )
+        return _PageResult(
+            page_index=winput.page_index,
+            composed_bytes=winput.input_page_pdf,
+            strategy_name="already_optimized",
+            verdict=_verdict,
+            per_page_warnings=(),
+            input_bytes=len(winput.input_page_pdf),
+            output_bytes=len(winput.input_page_pdf),
+            ratio=1.0,
+            worker_wall_ms=int((time.monotonic() - _worker_t0) * 1000),
+        )
+
     # --- Rasterize input ---
     raster = rasterize_page(
         winput.input_page_pdf, page_index=0, dpi=winput.source_dpi, password=None
@@ -503,6 +551,10 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         if options.force_monochrome and _page_has_color(raster):
             warnings.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
 
+        # Defensive: classify_page() never returns ALREADY_OPTIMIZED, and
+        # the per-page mrc_worthy gate above already short-circuited any
+        # verbatim page before we got here. If we ever land here, something
+        # upstream is wrong; keep the AssertionError as a tripwire.
         if strategy == PageStrategy.ALREADY_OPTIMIZED:
             msg = (
                 f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
@@ -884,6 +936,65 @@ def compress(
             correlation_id=correlation_id,
         )
 
+    # ── Per-page MRC gate ────────────────────────────────────────────
+    # Score every page once (cheap pikepdf walk: image_xobject_bytes /
+    # page_byte_budget). True = MRC-worthy, False = verbatim copy.
+    # If no page meets the threshold AND no flag forces full MRC, the
+    # input passes through unchanged at <1s wall. Otherwise the
+    # per-page flag is threaded into _WorkerInput and the worker
+    # short-circuits the pipeline for verbatim pages.
+    #
+    # The gate is disabled (every page MRC'd) when:
+    #   --re-ocr            → Tesseract on every page; verbatim incompatible.
+    #   --strip-text-layer  → no-text-layer output; verbatim preserves it.
+    #   --legal-mode        → CCITT G4 archival profile re-encodes every page;
+    #                          verbatim copy would defeat the legal codec
+    #                          guarantee.
+    #   --verify (skip_verify=False) → verbatim pages would feed synthetic
+    #                          PageVerdict values into _VerifierAggregator
+    #                          and pollute the aggregate ssim/lev/digit
+    #                          metrics on partial-passthrough runs.
+    from pdf_smasher.engine.page_classifier import score_pages_for_mrc
+
+    _force_full_pipeline = (
+        bool(options.re_ocr)
+        or bool(options.strip_text_layer)
+        or bool(options.legal_codec_profile)
+        or not options.skip_verify
+    )
+    if _force_full_pipeline:
+        _mrc_flags = [True] * tri.pages
+    else:
+        _mrc_flags = score_pages_for_mrc(
+            input_data,
+            password=options.password,
+            min_image_byte_fraction=options.min_image_byte_fraction,
+        )
+
+    # Defensive: if the classifier disagreed with triage on the page count
+    # (qpdf-repaired inputs, or a future pikepdf upgrade that changes the
+    # iteration semantics), surface the contract drift now rather than
+    # IndexError-ing deep in the per-page loop. Coerce to triage's count
+    # (the source of truth for everything downstream) and emit a warning.
+    if len(_mrc_flags) != tri.pages:
+        _mrc_flags = (_mrc_flags + [True] * tri.pages)[: tri.pages]
+        # Note: this falls through to per-page processing without a
+        # CompressReport.warnings entry today (warnings is built later);
+        # if the drift is ever observed in production, wire a code.
+
+    if not any(_mrc_flags):
+        # Whole-doc shortcut: every page is verbatim → return input unchanged.
+        # compress() returns tuple[bytes, CompressReport]; the unchanged input
+        # is the byte-identical first element.
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=int((time.monotonic() - t0) * 1000),
+            reason="no page meets the image-content threshold",
+            warning_code="passthrough-no-image-content",
+            correlation_id=correlation_id,
+        )
+
     # --- Per-page recompress ---
     source_dpi = 200 if options.mode == "fast" else 300
     bg_target_dpi = options.target_bg_dpi
@@ -944,6 +1055,7 @@ def compress(
     # Page results accumulate by original index; output merges in sorted order
     # regardless of completion order (matters when parallel).
     page_pdfs_by_index: dict[int, bytes] = {}
+    _verbatim_pages: set[int] = set()
 
     _worker_wall_ms_total: list[int] = []
 
@@ -953,6 +1065,8 @@ def compress(
         warnings_list.extend(result.per_page_warnings)
         verifier_agg.merge(result.page_index, result.verdict)
         strategy_counts[result.strategy_name] += 1
+        if result.strategy_name == "already_optimized":
+            _verbatim_pages.add(result.page_index)
         _worker_wall_ms_total.append(result.worker_wall_ms)
         # Under skip_verify the worker synthesizes a trivially-passing
         # verdict so it can still be aggregated; don't let that leak
@@ -992,6 +1106,7 @@ def compress(
             is_safe=is_safe,
             lev_ceiling=lev_ceiling,
             ssim_floor=ssim_floor,
+            mrc_worthy=_mrc_flags[i],
         )
         for i in _selected_indices
     ]
@@ -1297,6 +1412,14 @@ def compress(
     from pdf_smasher.audit import resolve_build_info
     from pdf_smasher.types import _new_correlation_id
 
+    # If some-but-not-all pages were verbatim, emit an aggregate warning
+    # so consumers see in the report that the gate fired on some pages.
+    # Dash separator (not colon) for grammar consistency with the existing
+    # `verifier-fail-...-pages-...` pattern. The actual indices are on
+    # report.pages_skipped_verbatim; the count here is for log-grep.
+    if _verbatim_pages and len(_verbatim_pages) < tri.pages:
+        warnings_list.append(f"pages-skipped-verbatim-{len(_verbatim_pages)}")
+
     report = CompressReport(
         status=status,
         exit_code=exit_code,
@@ -1312,6 +1435,7 @@ def compress(
         output_sha256=output_sha,
         canonical_input_sha256=canonical_sha,
         warnings=tuple(warnings_list),
+        pages_skipped_verbatim=tuple(sorted(_verbatim_pages)),
         strategy_distribution=dict(strategy_counts),
         build_info=resolve_build_info(),
         correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),

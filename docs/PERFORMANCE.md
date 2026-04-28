@@ -1,6 +1,6 @@
 # Performance & quality reference
 
-Measured benchmarks across representative inputs and the full settings matrix. Numbers in this doc come from a single run on an Apple Silicon laptop (M-series), Python 3.14, hankpdf at commit `a1bef27`. Re-run via `python /tmp/hankpdf-bench/run_bench.py` (or adapt the script to your inputs).
+Measured benchmarks across representative inputs and the full settings matrix. Numbers in this doc come from a single run on an Apple Silicon laptop (M-series), Python 3.14. The compression numbers are post the per-page selective MRC gate (branch `feat/per-page-selective-mrc` ≈ commit `f8b4253`). Re-run via `python /tmp/hankpdf-bench/bench_full_matrix.py` (matrix script in repo) or adapt the script to your inputs.
 
 ## TL;DR
 
@@ -11,105 +11,128 @@ Measured benchmarks across representative inputs and the full settings matrix. N
 - **Image export beats the PDF pipeline on size for some workflows.** WebP at 150 DPI / quality 80 is the smallest output in our matrix and visually clean.
 - **`--max-workers 0` (auto, default) is correct.** Serial mode is ~4× slower on this hardware; past `cpu_count` of perf-cores there's no further gain.
 - **`--verify` is a strict, slow quality gate.** ~5.8× wall-time cost; will refuse common MRC outputs unless paired with `--ocr` and `--mode safe`. Use only when downstream consumers treat absence-of-drift as a contract.
+- **Per-page MRC gate skips pages with no meaningful image content.** A cheap stream-length signal (`image_xobject_bytes / page_byte_budget`) is computed per page; pages below `--per-page-min-image-fraction` (default 0.30) are emitted verbatim. On a 50-page text-only PDF, this drops wall time from 3.83s to 0.25s (~15×) and avoids 53× output inflation. On image-heavy inputs the gate fires on every page, so wall time is unchanged. `--re-ocr`, `--strip-text-layer`, and `--verify` all disable the gate. See [Per-page MRC gate](#per-page-mrc-gate) below.
+
+## Per-page MRC gate
+
+Every page is scored before the pipeline splits work across workers. A page's `image_byte_fraction` is `image_xobject_bytes / (content_stream_bytes + image_xobject_bytes + other_xobject_bytes)`. Pages with a fraction at or above `--per-page-min-image-fraction` (default `0.30`) go through the full MRC pipeline; pages below are copied verbatim into the output PDF (no rasterize, no classify, no compose, no verify).
+
+When **no** pages meet the threshold, the whole-doc passthrough shortcut fires and the input bytes are returned unchanged — `CompressReport.status == "passed_through"` with the `passthrough-no-image-content` warning. On partial runs, `CompressReport.pages_skipped_verbatim` carries the indices of skipped pages and a `pages-skipped-verbatim-N` warning is emitted.
+
+| Input | Pages | Setting | Wall time | Output | Notes |
+|---|---:|---|---:|---:|---|
+| 50-page text-only synthetic | 50 | gate on (default) | **254 ms** | 20,755 B (== input) | whole-doc passthrough |
+| 50-page text-only synthetic | 50 | `--per-page-min-image-fraction 0 --min-ratio 0` | 3,830 ms | 1,109,406 B | full MRC; 53× **inflation** |
+| I_small (mixed slides + photo) | 18 | gate on (default) | 3.99 s | 2,551,055 B (== input) | every page MRC-worthy → pipeline runs → min-ratio passthrough |
+| I_med (native-export slides) | 190 | gate on (default) | 26.87 s | 11,346,630 B (== input) | every page MRC-worthy → pipeline runs → min-ratio passthrough |
+| I_large (scan-derived) | 30 | gate on (default) | 19.06 s | 8,447,331 B | 27/30 pages MRC-worthy; 3 verbatim |
+
+The gate is a **conservative pre-filter**, not a full whole-doc detector — embedded JPEGs in native-export slides will mark pages as image-heavy even when MRC won't compress further. The downstream `--min-ratio` check is what handles the "ran but didn't help" case. The gate's headline value is on **text-only** inputs, where it converts a 4-second inflate-and-throw-away cycle into a 250 ms passthrough.
+
+Disable the gate any time a forced full pipeline is required:
+
+- `--re-ocr` — force Tesseract on every page; gate is bypassed.
+- `--strip-text-layer` — explicit text-removal request; gate is bypassed.
+- `--verify` — verifier needs the full pipeline output to compare against; gate is bypassed (otherwise the aggregator would see synthetic verdicts).
+- `--per-page-min-image-fraction 0` — sets the threshold to 0 so every page meets it.
 
 ## Test inputs
 
-Three real-world PDFs from a 2026 conference presentation set:
+Three real-world PDFs from a 2026 conference presentation set, plus one synthetic text-only baseline:
 
-| ID | Filename (truncated) | Size | Pages | Content shape |
+| ID | Description | Size | Pages | Content shape |
 |---|---|---|---|---|
-| **I_small** | "Two Sides, One Record …" | 2.5 MB | 18 | Mixed (slides + photo) |
-| **I_med** | "Boot Camp Joint Slides 2026" | 11 MB | 190 | Native-export slides (heavy text + vector) |
+| **I_text50** | 50-page synthetic text-only (no images) | 21 KB | 50 | Native PDF, zero image XObjects — gate's headline use case |
+| **I_small** | "Two Sides, One Record …" | 2.5 MB | 18 | Native-export slides with embedded photos |
+| **I_med** | "Boot Camp Joint Slides 2026" | 11 MB | 190 | Native-export slides (heavy text + vector + small embedded JPEGs) |
 | **I_large** | "Scaling Anesthesia Billing and Compliance" | 23 MB | 30 | Scan-derived slides (rasterized) |
-
-Plus one synthetic baseline:
-
-| ID | Filename | Size | Pages | Content shape |
-|---|---|---|---|---|
-| **I_synth** | `tests/fixtures/smoke_text.pdf` | 175 KB | 2 | Synthetic text-only "scan" at 300 DPI |
 
 ## Settings tested
 
-PDF compress (10 settings):
+PDF compress (7 settings; all run with default `--min-ratio` unless otherwise noted):
 
-- `default` — `--min-ratio 0` (forced through pipeline; no passthrough)
+- `default` — no flags. Exercises the per-page MRC gate AND the `--min-ratio 1.5` passthrough.
 - `fast` — `--mode fast --min-ratio 0`
 - `safe` — `--mode safe --min-ratio 0`
 - `aggressive` — `--target-bg-dpi 100 --target-color-quality 40 --min-ratio 0`
 - `quality` — `--target-bg-dpi 200 --target-color-quality 75 --min-ratio 0`
-- `jp2k` — `--bg-codec jpeg2000 --min-ratio 0`
+- `ocr` — `--ocr --min-ratio 0`
+- `gate_off` — `--per-page-min-image-fraction 0 --min-ratio 0` (disables the per-page gate; baseline for "what would have happened pre-gate")
 
-Image export (4 settings):
+Image export (2 settings, exercised on the realistic inputs):
 
 - `image_jpg_150` — `--output-format jpeg --image-dpi 150 --jpeg-quality 75`
-- `image_jpg_300` — `--output-format jpeg --image-dpi 300 --jpeg-quality 90`
-- `image_png_150` — `--output-format png --image-dpi 150`
 - `image_webp_150` — `--output-format webp --image-dpi 150 --webp-quality 80`
 
 ## Results
 
 Format: `output_bytes (compression_ratio×, wall_seconds)`. Compression ratio is `input_bytes / output_bytes`; values >1 are smaller-than-input, <1 are larger.
 
-### I_small — 2.5 MB native PDF, 18 pages
+> **Note (post per-page-MRC gate, 2026-04-27):** The `default` row in every table below now exercises the per-page gate's whole-doc passthrough whenever the input has no MRC-worthy pages, AND the existing `--min-ratio 1.5` floor when the pipeline runs but doesn't beat the floor. Both are correct behaviors — they show the user "we did not produce a smaller output for this input" by returning the input bytes unchanged. The `gate_off` row replicates the pre-gate behavior for comparison.
+
+### I_text50 — 50-page synthetic text-only PDF, 21 KB ★
+
+This input is the gate's headline use case: a native PDF with **zero image content**. The whole-doc passthrough fires; output is byte-identical to input.
 
 | Setting | Output | Ratio | Time | Notes |
 |---|---:|---:|---:|---|
-| default | 2.5 MB | 1.03× | 4.1s | Pipeline output ≈ source |
-| fast | 2.2 MB | 1.16× | 2.3s | |
-| safe | 2.5 MB | 1.03× | 4.2s | identical to default |
-| aggressive | 1.6 MB | **1.59×** | 4.0s | ★ best PDF compress |
-| quality | 4.3 MB | 0.60× | 4.3s | larger than source |
-| jp2k | 2.1 MB | 1.21× | 5.7s | |
-| image_jpg_150 | 3.8 MB | 0.68× | 1.7s | |
-| image_jpg_300 | 15.0 MB | 0.17× | 4.6s | huge |
-| image_png_150 | 10.1 MB | 0.25× | 2.5s | lossless penalty |
-| image_webp_150 | 1.6 MB | **1.63×** | 3.8s | ★ best size |
+| default | 21 KB | 1.00× | **0.39s** | ★ whole-doc passthrough; status=`passed_through` |
+| fast | 21 KB | 1.00× | 0.35s | gate fires before mode is consulted |
+| safe | 21 KB | 1.00× | 0.36s | same |
+| aggressive | 21 KB | 1.00× | 0.35s | same |
+| quality | 21 KB | 1.00× | 0.35s | same |
+| ocr | 21 KB | 1.00× | 0.36s | same |
+| **gate_off** (`--per-page-min-image-fraction 0 --min-ratio 0`) | **1.15 MB** | **0.02×** | **2.87s** | full pipeline; **53× inflation** |
 
-Take: native-export PDF, mostly text + vector. The MRC pipeline barely beats source. Default `--min-ratio 1.5` would correctly passthrough this input unchanged.
+Take: on text-only inputs the gate is decisive — all settings collapse to the same 250–400 ms passthrough, while the gate-disabled run inflates the file 53× and burns 8× the wall time.
 
-### I_med — 11 MB native PDF, 190 pages
+### I_small — 2.5 MB native PDF, 18 pages (mixed text/photo slide deck)
 
 | Setting | Output | Ratio | Time | Notes |
 |---|---:|---:|---:|---|
-| default | 27.5 MB | 0.41× | 27.6s | **inflated 2.5×** |
-| fast | 25.4 MB | 0.45× | 13.6s | |
-| safe | 27.5 MB | 0.41× | 28.2s | identical to default |
-| aggressive | 18.3 MB | 0.62× | 28.4s | least bad PDF |
-| quality | 45.9 MB | 0.25× | 31.6s | inflated 4× |
-| jp2k | 22.6 MB | 0.50× | 49.7s | |
-| image_jpg_150 | 41.9 MB | 0.27× | 10.9s | |
-| image_jpg_300 | 166.8 MB | 0.07× | 31.7s | enormous |
-| image_png_150 | 106.9 MB | 0.11× | 18.7s | |
-| image_webp_150 | 19.1 MB | 0.59× | 33.1s | least-bad image |
+| default | 2.4 MB | 1.00× | 4.0s | every page MRC-worthy → pipeline runs → min-ratio passthrough |
+| fast | 2.1 MB | 1.15× | 2.4s | ★ best speed/size in PDF mode |
+| safe | 2.4 MB | 1.02× | 3.9s | same as default with explicit min-ratio bypass |
+| aggressive | **1.5 MB** | **1.58×** | 3.9s | ★ best PDF size |
+| quality | 4.1 MB | 0.60× | 4.2s | inflates — vector slides aren't this codec's friend |
+| ocr | 2.4 MB | 1.02× | 4.0s | |
+| gate_off | 2.4 MB | 1.02× | 4.0s | |
+| image_jpg_150 | 3.6 MB | 0.68× | **1.7s** | fastest path |
+| image_webp_150 | **1.5 MB** | **1.63×** | 3.8s | ★ smallest overall |
 
-Take: 190-page slide deck of native-export slides. **Every setting inflates this input.** The MRC pipeline can't beat what's already there. Default `--min-ratio 1.5` would correctly passthrough.
+Take: 18-page slide deck where every page has an embedded photo so the gate engages on every page. The pipeline runs but the input is already efficient; only `aggressive` and image-export-to-WebP beat 1×.
 
-### I_large — 23 MB scan-derived PDF, 30 pages ★
+### I_med — 11 MB native PDF, 190 pages (heavy native-export slides)
 
 | Setting | Output | Ratio | Time | Notes |
 |---|---:|---:|---:|---|
-| default | 8.5 MB | 2.76× | 28.0s | text crisp, photo gradients soft but acceptable |
-| fast | 7.8 MB | 3.03× | 10.2s | ★ same visual as default in **1/3 the time** |
-| safe | 8.5 MB | 2.76× | 28.0s | identical to default |
-| aggressive | **4.9 MB** | **4.75×** | 26.8s | text crisp, gradients more compressed |
-| quality | 16.0 MB | 1.47× | 26.2s | near-source |
-| jp2k | 7.0 MB | 3.35× | 31.9s | comparable visual to default |
-| image_jpg_150 | 11.9 MB | 1.97× | 2.7s | ★ fastest path overall |
-| image_jpg_300 | 56.5 MB | 0.42× | 10.4s | inflated |
-| image_png_150 | 40.0 MB | 0.59× | 6.4s | inflated |
-| image_webp_150 | **4.3 MB** | **5.48×** | 10.0s | ★ smallest output overall |
+| default | 11 MB | 1.00× | **26.3s** | min-ratio passthrough; output == input |
+| fast | 24 MB | 0.44× | 13.4s | inflates 2.2× |
+| safe | 26 MB | 0.41× | 27.1s | inflates 2.4× |
+| aggressive | 18 MB | 0.62× | 26.3s | least-bad |
+| quality | 44 MB | 0.25× | 28.4s | inflates 4× |
+| ocr | 26 MB | 0.41× | 29.8s | |
+| gate_off | 26 MB | 0.41× | 28.3s | |
+| image_jpg_150 | 40 MB | 0.27× | 11.1s | |
+| image_webp_150 | 18 MB | 0.59× | 33.2s | |
 
-Take: scan-derived slide deck — exactly the input HankPDF is built for. All `--mode` settings deliver 2.7×–5.5× compression. Image export to WebP wins on raw size and is faster than the PDF pipeline.
+Take: 190-page native-export slide deck. **Every aggressive setting inflates this input.** The default correctly returns the input unchanged via min-ratio refusal. **Don't run HankPDF on inputs like this.**
 
-### I_synth — 175 KB synthetic-text scan, 2 pages
+### I_large — 23 MB scan-derived PDF, 30 pages ★ (the canonical good case)
 
-| Setting | Output | Ratio | Notes |
-|---|---:|---:|---|
-| default | 89 KB | 2.0× | |
-| fast | 89 KB | 2.0× | |
-| aggressive | 79 KB | 2.3× | |
+| Setting | Output | Ratio | Time | Notes |
+|---|---:|---:|---:|---|
+| default | 8.1 MB | **2.78×** | 22.4s | 27/30 pages MRC-worthy; 3 verbatim |
+| **fast** | **7.4 MB** | **3.04×** | **9.0s** | ★ same compression as default in **1/3 the time** |
+| safe | 8.1 MB | 2.78× | 20.6s | identical to default |
+| aggressive | **4.9 MB** | **4.55×** | 19.1s | text crisp, gradients more compressed |
+| quality | 14.6 MB | 1.53× | 18.8s | near-source |
+| ocr | 8.1 MB | 2.77× | 25.1s | identical compression with searchable text |
+| gate_off | 8.1 MB | 2.76× | 22.6s | gate had no impact (all pages MRC-worthy) |
+| image_jpg_150 | 11.4 MB | 1.97× | **2.6s** | ★ fastest path overall |
+| image_webp_150 | **4.1 MB** | **5.48×** | 10.0s | ★ smallest output overall |
 
-Take: this fixture is pre-compressed at source (87 KB/page is already efficient). **The README's "50-200× on text-only scans" applies to genuinely uncompressed scanner output**, not this synthetic baseline.
+Take: scan-derived slide deck — exactly the input HankPDF is built for. All `--mode` settings deliver 2.8×–5.5× compression. **The new gate has no impact here** (`gate_off` ≈ `default`) because every page is image-heavy — the gate degrades gracefully on the inputs that need the pipeline.
 
 ## Visual quality assessment
 
