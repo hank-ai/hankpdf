@@ -33,6 +33,10 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.14"
+          # Disable cache: this workflow publishes to PyPI; a poisoned
+          # uv cache from a prior run could end up in the published
+          # artifact (zizmor cache-poisoning audit).
+          enable-cache: false
       - name: Build sdist + wheel
         run: uv build
       - name: Publish to PyPI via Trusted Publisher
