@@ -12,7 +12,7 @@ import pikepdf
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from pdf_smasher import compress
+from hankpdf import compress
 
 
 def _wrap_raster_as_pdf_bytes(
@@ -92,9 +92,9 @@ def test_text_only_page_hits_target_ratio() -> None:
     """
     import numpy as np
 
-    from pdf_smasher.engine.mask import build_mask
-    from pdf_smasher.engine.rasterize import rasterize_page
-    from pdf_smasher.engine.strategy import PageStrategy, classify_page
+    from hankpdf.engine.mask import build_mask
+    from hankpdf.engine.rasterize import rasterize_page
+    from hankpdf.engine.strategy import PageStrategy, classify_page
 
     pdf_in = _text_only_fixture()
     _raster = rasterize_page(pdf_in, page_index=0, dpi=150)
@@ -129,7 +129,7 @@ def test_force_monochrome_applies_to_photo_only_pages_too() -> None:
     img = Image.fromarray(arr)
     pdf_in = _wrap_raster_as_pdf_bytes(img)
 
-    from pdf_smasher import CompressOptions
+    from hankpdf import CompressOptions
 
     _, default_report = compress(pdf_in)
     _, mono_report = compress(pdf_in, options=CompressOptions(force_monochrome=True))
@@ -150,7 +150,7 @@ def test_force_monochrome_emits_color_warning_on_colored_page() -> None:
     img = Image.fromarray(arr)
     pdf_in = _wrap_raster_as_pdf_bytes(img, page_width_pt=612, page_height_pt=792)
 
-    from pdf_smasher import CompressOptions
+    from hankpdf import CompressOptions
 
     _, report = compress(pdf_in, options=CompressOptions(force_monochrome=True))
     assert any("color-detected-in-monochrome-mode" in w for w in report.warnings), (
@@ -208,9 +208,9 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
     import numpy as np
     import pikepdf
 
-    from pdf_smasher.engine.mask import build_mask
-    from pdf_smasher.engine.rasterize import rasterize_page
-    from pdf_smasher.engine.strategy import PageStrategy, classify_page
+    from hankpdf.engine.mask import build_mask
+    from hankpdf.engine.rasterize import rasterize_page
+    from hankpdf.engine.strategy import PageStrategy, classify_page
 
     def _text_only_raster() -> Image.Image:
         img = Image.new("RGB", (2550, 3300), "white")
@@ -299,7 +299,7 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
     # rectangles produce legitimately low tile SSIM (crisp JBIG2 vs. anti-aliased
     # JPEG edges); the gate is meant for realistic scanner output, not synthetic
     # high-contrast shapes. This test is about routing + merging, not quality.
-    from pdf_smasher import CompressOptions
+    from hankpdf import CompressOptions
 
     _, report = compress(pdf_in, options=CompressOptions(mode="fast"))
     assert report.pages == 3
@@ -332,7 +332,7 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
 @pytest.mark.integration
 def test_compress_rejects_out_of_range_only_pages() -> None:
     """only_pages must validate against the actual page count."""
-    from pdf_smasher.exceptions import CompressError
+    from hankpdf.exceptions import CompressError
 
     pdf_in = _text_only_fixture()  # 1 page
     with pytest.raises(CompressError, match=r"out of range|only_pages"):
@@ -390,9 +390,9 @@ def test_photo_only_page_does_not_regress() -> None:
     """
     import numpy as np
 
-    from pdf_smasher.engine.mask import build_mask
-    from pdf_smasher.engine.rasterize import rasterize_page
-    from pdf_smasher.engine.strategy import PageStrategy, classify_page
+    from hankpdf.engine.mask import build_mask
+    from hankpdf.engine.rasterize import rasterize_page
+    from hankpdf.engine.strategy import PageStrategy, classify_page
 
     pdf_in = _photo_only_fixture()
     _raster = rasterize_page(pdf_in, page_index=0, dpi=150)
@@ -409,7 +409,7 @@ def test_photo_only_page_does_not_regress() -> None:
     # digit multiset check even though the image itself round-trips correctly.
     # This gate measures the compression ratio, not content preservation —
     # preservation is exercised in test_photo_only_page_preserves_sharp_edges.
-    from pdf_smasher import CompressOptions as _CO  # noqa: N814 — local alias for brevity
+    from hankpdf import CompressOptions as _CO  # noqa: N814 — local alias for brevity
 
     _, report = compress(pdf_in, options=_CO(mode="fast"))
     assert report.ratio >= 3.0, f"photo-only regressed below 3x: got {report.ratio:.2f}x"
@@ -425,7 +425,7 @@ def test_photo_only_page_preserves_sharp_edges() -> None:
     import numpy as np
     import pypdfium2 as pdfium
 
-    from pdf_smasher import CompressOptions as _CO  # noqa: N814 — local alias for brevity
+    from hankpdf import CompressOptions as _CO  # noqa: N814 — local alias for brevity
 
     pdf_in = _photo_with_sharp_edges_fixture()
     pdf_out, _ = compress(pdf_in)

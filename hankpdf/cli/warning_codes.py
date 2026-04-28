@@ -5,7 +5,7 @@ stable bracketed code like ``[W-CHUNKS-EXCEED-CAP]`` so batch scripts that
 tee stderr to a log file can grep by code without depending on exact
 English wording.
 
-These are distinct from :data:`pdf_smasher.CompressReport.warnings`
+These are distinct from :data:`hankpdf.CompressReport.warnings`
 (programmatic JSON codes, kebab-case). Stderr warnings happen in the CLI
 *after* :func:`compress` returns (the chunk split is a CLI concern, not a
 library one), so they never appear in the structured report.
@@ -18,8 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, Literal
 
-from pdf_smasher.audit import get_correlation_id
-from pdf_smasher.utils.log import redact_filename
+from hankpdf.audit import get_correlation_id
+from hankpdf.utils.log import redact_filename
 
 # The full Literal set — if you add a code, add it here too. The Literal
 # makes `emit()` reject typos at type-check time.
@@ -66,7 +66,7 @@ def _corr_suffix() -> str:
 
     Wave 5 / C2: every stderr line includes ``corr=<short-id>`` so an on-
     call can tie a batch log slice back to the structured
-    :class:`~pdf_smasher.types.CompressReport` (which carries the full id).
+    :class:`~hankpdf.types.CompressReport` (which carries the full id).
     When the audit module hasn't set an id yet (library callers skipping
     the CLI entirely), this returns an empty string — the lines still
     work, they just can't be joined post-hoc.
@@ -97,7 +97,7 @@ def emit(
 
     ``input_name`` (optional) prefixes the redacted filename so a batch
     script teeing all stderr to one log file can tell which input a line
-    refers to. Redacted via :func:`pdf_smasher.utils.log.redact_filename`
+    refers to. Redacted via :func:`hankpdf.utils.log.redact_filename`
     (sha1 prefix + last 8 chars) per THREAT_MODEL.md §5. When None the
     filename prefix is omitted (programmatic stdin inputs, --doctor).
     """

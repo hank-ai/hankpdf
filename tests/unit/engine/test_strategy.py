@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.strategy — per-page compression strategy selector.
+"""Tests for hankpdf.engine.strategy — per-page compression strategy selector.
 
 Decides for each page whether to: pass-through (already optimized), run
 MRC (the default mixed pipeline), emit a single-image text-only encoding
@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from pdf_smasher.engine.strategy import PageStrategy, classify_page
+from hankpdf.engine.strategy import PageStrategy, classify_page
 
 
 def _white_page(width: int = 400, height: int = 400) -> Image.Image:

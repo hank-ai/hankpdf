@@ -22,13 +22,13 @@ import pypdfium2 as pdfium
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from pdf_smasher.engine.background import extract_background
-from pdf_smasher.engine.compose import compose_mrc_page
-from pdf_smasher.engine.foreground import extract_foreground
-from pdf_smasher.engine.mask import build_mask
-from pdf_smasher.engine.ocr import tesseract_word_boxes
-from pdf_smasher.engine.rasterize import rasterize_page
-from pdf_smasher.engine.text_layer import add_text_layer
+from hankpdf.engine.background import extract_background
+from hankpdf.engine.compose import compose_mrc_page
+from hankpdf.engine.foreground import extract_foreground
+from hankpdf.engine.mask import build_mask
+from hankpdf.engine.ocr import tesseract_word_boxes
+from hankpdf.engine.rasterize import rasterize_page
+from hankpdf.engine.text_layer import add_text_layer
 
 
 def _make_fake_scanned_pdf(

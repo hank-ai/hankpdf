@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pdf_smasher.cli.main import _parse_pages_spec
+from hankpdf.cli.main import _parse_pages_spec
 
 
 def test_single_page() -> None:

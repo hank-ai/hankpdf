@@ -14,13 +14,13 @@ All TDD-first. Each module has a green unit-test suite; the integration suite va
 
 | Module | Lines | Tests | Responsibility |
 |---|---|---|---|
-| `pdf_smasher.engine.rasterize` | 55 | 6 | PDF page → PIL image via pdfium at target DPI. Thread-safety caveat documented. |
-| `pdf_smasher.engine.ocr` | 68 | 7 | Thin Tesseract wrapper returning `list[WordBox]`. |
-| `pdf_smasher.engine.mask` | 62 | 6 | Adaptive threshold + global-dark + morphological close → 1-bit mask. Word boxes NOT used in mask construction (they're for the text layer only). |
-| `pdf_smasher.engine.foreground` | 45 | 5 | Extracts (ink-color, 1-bit shape) from the mask. Single median ink color for the spike. |
-| `pdf_smasher.engine.background` | 40 | 5 | Inpaints foreground holes (OpenCV Telea) + downsamples bg to target DPI. |
-| `pdf_smasher.engine.compose` | 105 | 5 | Builds 1-page MRC PDF with `/SMask` via pikepdf. |
-| `pdf_smasher.engine.text_layer` | 110 | 3 | Adds invisible OCR text (Helvetica Type 1, rendering mode 3) to an existing page. |
+| `hankpdf.engine.rasterize` | 55 | 6 | PDF page → PIL image via pdfium at target DPI. Thread-safety caveat documented. |
+| `hankpdf.engine.ocr` | 68 | 7 | Thin Tesseract wrapper returning `list[WordBox]`. |
+| `hankpdf.engine.mask` | 62 | 6 | Adaptive threshold + global-dark + morphological close → 1-bit mask. Word boxes NOT used in mask construction (they're for the text layer only). |
+| `hankpdf.engine.foreground` | 45 | 5 | Extracts (ink-color, 1-bit shape) from the mask. Single median ink color for the spike. |
+| `hankpdf.engine.background` | 40 | 5 | Inpaints foreground holes (OpenCV Telea) + downsamples bg to target DPI. |
+| `hankpdf.engine.compose` | 105 | 5 | Builds 1-page MRC PDF with `/SMask` via pikepdf. |
+| `hankpdf.engine.text_layer` | 110 | 3 | Adds invisible OCR text (Helvetica Type 1, rendering mode 3) to an existing page. |
 | `scripts/spike_mrc.py` | 170 | integration only | End-to-end CLI wiring all modules together. |
 
 **Test count:** 62 unit + 4 integration = 66 tests, all green. Ruff clean, mypy clean.
@@ -78,9 +78,9 @@ Sorted by expected ratio-contribution:
 
 ## Risk items surfaced during the spike
 
-1. **pikepdf blank-page `/Contents` absent bug** — blank pages created by pdfium's `new_page()` have no `/Contents` key. `page.Contents` raises `AttributeError` rather than returning `None`. Works around this by probing `page.obj.get("/Contents")`. (`pdf_smasher/engine/text_layer.py`)
-2. **pdfium rendering off-by-one in dimensions** — 8.5×11 in @ 300 DPI rasterizes to 2551×3301 instead of 2550×3300. Worked around by computing exact pixel dimensions ourselves and using Lanczos resample on mismatch. (`pdf_smasher/engine/rasterize.py`)
-3. **Word-box-fill-as-mask was wrong** — initial mask code filled OCR bounding rectangles into the mask. This included whitespace between glyphs, which then dominated the median-ink-color sample, producing near-white "ink" and blank-looking output. Fixed by dropping word-box fill from the mask — word boxes are for the text layer only. Documented clearly in `pdf_smasher/engine/mask.py` docstring.
+1. **pikepdf blank-page `/Contents` absent bug** — blank pages created by pdfium's `new_page()` have no `/Contents` key. `page.Contents` raises `AttributeError` rather than returning `None`. Works around this by probing `page.obj.get("/Contents")`. (`hankpdf/engine/text_layer.py`)
+2. **pdfium rendering off-by-one in dimensions** — 8.5×11 in @ 300 DPI rasterizes to 2551×3301 instead of 2550×3300. Worked around by computing exact pixel dimensions ourselves and using Lanczos resample on mismatch. (`hankpdf/engine/rasterize.py`)
+3. **Word-box-fill-as-mask was wrong** — initial mask code filled OCR bounding rectangles into the mask. This included whitespace between glyphs, which then dominated the median-ink-color sample, producing near-white "ink" and blank-looking output. Fixed by dropping word-box fill from the mask — word boxes are for the text layer only. Documented clearly in `hankpdf/engine/mask.py` docstring.
 4. **Spike compose uses uniform-ink-color foreground** — a single global median ink color. Works for black-text-on-white pages; will look bad on pages with mixed-color text (red stamps on black text, etc.). Phase 2 needs per-connected-component color sampling.
 5. **Tesseract LSTM determinism** — not an issue for the spike but confirmed the caveat: per-word OCR text is stable on one machine; bounding-box pixel exactness is not guaranteed cross-host.
 

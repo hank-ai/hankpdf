@@ -13,8 +13,8 @@ from typing import Literal
 
 import pikepdf
 
-from pdf_smasher.exceptions import CorruptPDFError, MaliciousPDFError
-from pdf_smasher.types import TriageReport
+from hankpdf.exceptions import CorruptPDFError, MaliciousPDFError
+from hankpdf.types import TriageReport
 
 TriageClassification = Literal["proceed", "refuse", "pass-through", "require-password"]
 

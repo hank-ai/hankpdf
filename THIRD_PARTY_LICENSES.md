@@ -1,6 +1,6 @@
 # Third-Party Licenses & Commercial-Use Audit
 
-HankPDF (`pdf-smasher`) is licensed under **Apache-2.0** (see [LICENSE](LICENSE)).
+HankPDF (`hankpdf`) is licensed under **Apache-2.0** (see [LICENSE](LICENSE)).
 This file enumerates every third-party dependency — Python packages, native
 binaries invoked via subprocess, and their transitive system libraries —
 along with the SPDX license identifier and commercial-use status.

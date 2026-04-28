@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.mask — 1-bit mask construction.
+"""Tests for hankpdf.engine.mask — 1-bit mask construction.
 
 The mask identifies ink pixels vs paper pixels. Foreground ink gets lossless
 compression; the rest becomes aggressively-downsampled background. A good
@@ -14,8 +14,8 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from pdf_smasher.engine.mask import build_mask
-from pdf_smasher.engine.ocr import WordBox
+from hankpdf.engine.mask import build_mask
+from hankpdf.engine.ocr import WordBox
 
 
 def _white_canvas(width: int = 400, height: int = 200) -> Image.Image:

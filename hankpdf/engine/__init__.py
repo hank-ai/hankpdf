@@ -1,4 +1,4 @@
-"""Engine package. Public API is in ``pdf_smasher`` at top level.
+"""Engine package. Public API is in ``hankpdf`` at top level.
 
 Phase 0 scaffold: empty. Phase 2 populates:
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from pdf_smasher.cli.main import main
+from hankpdf.cli.main import main
 
 
 @pytest.mark.parametrize(
@@ -50,7 +50,7 @@ def test_timeout_flags_accept_positive_int() -> None:
     so the test stays hermetic (no filesystem, no pipeline) and any
     downstream failure can't mask a regression in the parser.
     """
-    from pdf_smasher.cli.main import _parser
+    from hankpdf.cli.main import _parser
 
     ns = _parser().parse_args(
         [

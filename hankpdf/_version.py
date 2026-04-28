@@ -2,11 +2,11 @@
 
 Resolution order at runtime (module load):
 
-1. ``importlib.metadata.version("pdf-smasher")`` — the installed dist's
+1. ``importlib.metadata.version("hankpdf")`` — the installed dist's
    own PKG-INFO. This is the truth when HankPDF is pip-installed,
    ``uv sync``'d, or pulled from a wheel.
 2. Fall back to the literal below for dev checkouts where no PKG-INFO
-   has been written (e.g., running ``uv run python -m pdf_smasher`` on
+   has been written (e.g., running ``uv run python -m hankpdf`` on
    a fresh clone before any install).
 
 ``__engine_version__`` is a separate knob because the engine's behavior
@@ -30,14 +30,14 @@ from pathlib import Path
 from typing import Any
 
 # Dev fallback. PKG-INFO wins at runtime when the package is installed.
-_DEV_VERSION: str = "0.1.0"
+_DEV_VERSION: str = "0.2.0"
 _BUILD_INFO_PATH = Path("/etc/hankpdf/build-info.json")
 
 
 def _resolve_version() -> str:
     """Return the installed dist version, or the dev fallback."""
     try:
-        return _dist_version("pdf-smasher")
+        return _dist_version("hankpdf")
     except PackageNotFoundError:
         return _DEV_VERSION
 

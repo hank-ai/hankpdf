@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pdf-smasher"
-version = "0.1.0"
+name = "hankpdf"
+version = "0.2.0"
 description = "Aggressive, safety-first PDF shrinker for scanned documents. CLI tool: PDF in, shrunk searchable PDF out."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -47,13 +47,13 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hank-ai/pdf-smasher"
-Documentation = "https://github.com/hank-ai/pdf-smasher/tree/main/docs"
-Repository = "https://github.com/hank-ai/pdf-smasher"
-Issues = "https://github.com/hank-ai/pdf-smasher/issues"
+Homepage = "https://github.com/hank-ai/hankpdf"
+Documentation = "https://github.com/hank-ai/hankpdf/tree/main/docs"
+Repository = "https://github.com/hank-ai/hankpdf"
+Issues = "https://github.com/hank-ai/hankpdf/issues"
 
 [project.scripts]
-hankpdf = "pdf_smasher.cli.main:main"
+hankpdf = "hankpdf.cli.main:main"
 
 [project.optional-dependencies]
 # Placeholder — v1 ships no optional extras yet.
@@ -68,10 +68,14 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["pdf_smasher"]
+# Ship both the canonical `hankpdf` package and the legacy `pdf_smasher`
+# deprecation shim. Shim re-exports public API and emits DeprecationWarning;
+# scheduled for removal in v0.3.0.
+packages = ["hankpdf", "pdf_smasher"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+    "hankpdf/**",
     "pdf_smasher/**",
     "README.md",
     "LICENSE",
@@ -114,13 +118,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"pdf_smasher/__init__.py" = [
+"hankpdf/__init__.py" = [
     "C901",     # compress() is unavoidably complex (full pipeline in one function)
     "PLR0912",
     "PLR0915",
     "PLC0415",  # lazy imports to keep top-level import cheap
 ]
-"pdf_smasher/cli/main.py" = [
+"hankpdf/cli/main.py" = [
     "C901",     # main() has many error-class branches by design
     "PLR0911",  # many exit codes = many returns
     "PLR0912",
@@ -130,14 +134,14 @@ ignore = [
     "S603",     # hardcoded binary names in --doctor
     "SIM108",
 ]
-"pdf_smasher/engine/triage.py" = [
+"hankpdf/engine/triage.py" = [
     "SIM118",   # iterating pikepdf dict keys is more explicit via .keys()
 ]
-"pdf_smasher/engine/image_export.py" = [
+"hankpdf/engine/image_export.py" = [
     "C901",     # per-page try/except + 3 format branches inline is by design
     "TRY301",   # inline raises inside the per-page try are the wrap target
 ]
-"pdf_smasher/engine/codecs/*.py" = [
+"hankpdf/engine/codecs/*.py" = [
     "S603", "S607",  # we invoke binaries like `jbig2` by name on purpose
 ]
 "tests/**" = [
@@ -205,7 +209,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["pdf_smasher"]
+source = ["hankpdf"]
 branch = true
 
 [tool.coverage.report]

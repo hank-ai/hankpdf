@@ -11,7 +11,7 @@ from __future__ import annotations
 import pikepdf
 import pytest
 
-from pdf_smasher.cli.main import main
+from hankpdf.cli.main import main
 
 
 def _make_blank_pdf(path) -> None:  # type: ignore[no-untyped-def]

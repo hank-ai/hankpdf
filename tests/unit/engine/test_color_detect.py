@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from pdf_smasher.engine.foreground import is_effectively_monochrome
+from hankpdf.engine.foreground import is_effectively_monochrome
 
 # ---------- grayscale inputs ----------
 
@@ -79,15 +79,15 @@ def test_monochrome_tolerance_matches_verifier_constant() -> None:
     """is_effectively_monochrome and _page_has_color must use the same
     channel-spread tolerance so a mono-classified page cannot silently fail
     the verifier's color-parity check."""
-    from pdf_smasher.engine.foreground import _MONOCHROME_CHANNEL_SPREAD_TOLERANCE
-    from pdf_smasher.engine.verifier import CHANNEL_SPREAD_COLOR_TOLERANCE
+    from hankpdf.engine.foreground import _MONOCHROME_CHANNEL_SPREAD_TOLERANCE
+    from hankpdf.engine.verifier import CHANNEL_SPREAD_COLOR_TOLERANCE
 
     assert _MONOCHROME_CHANNEL_SPREAD_TOLERANCE == CHANNEL_SPREAD_COLOR_TOLERANCE
 
 
 # ---------- detect_paper_color (Task 2) ----------
 
-from pdf_smasher.engine.foreground import detect_paper_color  # noqa: E402
+from hankpdf.engine.foreground import detect_paper_color  # noqa: E402
 
 
 def test_detect_paper_color_returns_rgb_tuple() -> None:
@@ -117,8 +117,8 @@ def test_detect_paper_color_falls_back_to_white_when_no_light_pixels() -> None:
 
 def test_detect_paper_color_uses_same_threshold_as_strategy_classify() -> None:
     """Both code paths must agree on 'what counts as paper' (Wave 1 B.C4)."""
-    from pdf_smasher.engine.foreground import _PAPER_LIGHT_THRESHOLD
-    from pdf_smasher.engine.strategy import LIGHT_PIXEL_VALUE
+    from hankpdf.engine.foreground import _PAPER_LIGHT_THRESHOLD
+    from hankpdf.engine.strategy import LIGHT_PIXEL_VALUE
 
     assert LIGHT_PIXEL_VALUE == _PAPER_LIGHT_THRESHOLD
 

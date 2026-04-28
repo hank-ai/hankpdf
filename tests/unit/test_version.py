@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher._version (Wave 5 / C1).
+"""Tests for hankpdf._version (Wave 5 / C1).
 
 Confirms the version-resolution chain:
 
@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pdf_smasher._version as vmod
-from pdf_smasher._version import __version__, build_info, version_line
+import hankpdf._version as vmod
+from hankpdf._version import __version__, build_info, version_line
 
 
 def test_version_string_is_nonempty() -> None:

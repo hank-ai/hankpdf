@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pdf_smasher.types import CompressOptions
+from hankpdf.types import CompressOptions
 
 
 def test_default_max_input_mb_is_250() -> None:
@@ -14,7 +14,7 @@ def test_default_max_pages_is_10000() -> None:
 
 
 def test_cli_default_max_input_mb_is_250() -> None:
-    from pdf_smasher.cli.main import _parser
+    from hankpdf.cli.main import _parser
 
     parser = _parser()
     ns = parser.parse_args(["dummy.pdf", "-o", "out.pdf"])
@@ -22,7 +22,7 @@ def test_cli_default_max_input_mb_is_250() -> None:
 
 
 def test_cli_default_max_pages_is_10000() -> None:
-    from pdf_smasher.cli.main import _parser
+    from hankpdf.cli.main import _parser
 
     parser = _parser()
     ns = parser.parse_args(["dummy.pdf", "-o", "out.pdf"])
@@ -30,7 +30,7 @@ def test_cli_default_max_pages_is_10000() -> None:
 
 
 def test_cli_default_per_page_min_image_fraction_is_30_percent() -> None:
-    from pdf_smasher.cli.main import _parser
+    from hankpdf.cli.main import _parser
 
     parser = _parser()
     ns = parser.parse_args(["dummy.pdf", "-o", "out.pdf"])

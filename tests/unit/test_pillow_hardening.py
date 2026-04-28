@@ -16,14 +16,14 @@ def test_pil_max_matches_image_export_bomb_cap() -> None:
     error class instead of our typed exception, routing past the CLI's
     exception-to-exit-code mapping.
     """
-    # Trigger pdf_smasher's side-effect import so MAX_IMAGE_PIXELS is set.
-    import pdf_smasher  # noqa: F401
-    from pdf_smasher.engine.image_export import _MAX_BOMB_PIXELS
+    # Trigger hankpdf's side-effect import so MAX_IMAGE_PIXELS is set.
+    import hankpdf  # noqa: F401
+    from hankpdf.engine.image_export import _MAX_BOMB_PIXELS
 
     assert PIL.Image.MAX_IMAGE_PIXELS == _MAX_BOMB_PIXELS, (
         f"Pillow cap ({PIL.Image.MAX_IMAGE_PIXELS:,}) and image_export "
         f"bomb cap ({_MAX_BOMB_PIXELS:,}) drifted; a single source of "
-        f"truth in pdf_smasher._limits.MAX_BOMB_PIXELS is required."
+        f"truth in hankpdf._limits.MAX_BOMB_PIXELS is required."
     )
 
 
@@ -32,11 +32,11 @@ def test_pil_max_image_pixels_is_set_on_import() -> None:
     cap is set explicitly. Prove it.
 
     Pillow's default (~89 Mpx) would silently raise PIL.Image.DecompressionBombError
-    — a distinct class from pdf_smasher.DecompressionBombError — which the CLI
+    — a distinct class from hankpdf.DecompressionBombError — which the CLI
     wouldn't route to EXIT_DECOMPRESSION_BOMB. Our hardening caps at the same
     ~715 Mpx number the image_export pre-allocation check uses.
     """
-    import pdf_smasher  # noqa: F401 — import side effect sets the cap
+    import hankpdf  # noqa: F401 — import side effect sets the cap
 
     # Must not be None (unlimited) and must be set deliberately.
     assert PIL.Image.MAX_IMAGE_PIXELS is not None

@@ -29,8 +29,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from pdf_smasher._pillow_hardening import ensure_capped
-from pdf_smasher.engine.ocr import WordBox
+from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.engine.ocr import WordBox
 
 ensure_capped()
 

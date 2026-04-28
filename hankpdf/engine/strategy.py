@@ -21,7 +21,7 @@ from enum import Enum
 import numpy as np
 from PIL import Image
 
-from pdf_smasher._pillow_hardening import ensure_capped
+from hankpdf._pillow_hardening import ensure_capped
 
 ensure_capped()
 

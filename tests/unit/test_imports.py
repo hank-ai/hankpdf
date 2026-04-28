@@ -4,24 +4,24 @@ from __future__ import annotations
 
 
 def test_top_level_import() -> None:
-    import pdf_smasher
+    import hankpdf
 
-    assert pdf_smasher.__version__
+    assert hankpdf.__version__
 
 
 def test_public_symbols_exported() -> None:
-    import pdf_smasher
+    import hankpdf
 
     # Types
-    assert hasattr(pdf_smasher, "CompressOptions")
-    assert hasattr(pdf_smasher, "CompressReport")
-    assert hasattr(pdf_smasher, "VerifierResult")
-    assert hasattr(pdf_smasher, "TriageReport")
+    assert hasattr(hankpdf, "CompressOptions")
+    assert hasattr(hankpdf, "CompressReport")
+    assert hasattr(hankpdf, "VerifierResult")
+    assert hasattr(hankpdf, "TriageReport")
 
     # Functions
-    assert callable(pdf_smasher.compress)
-    assert callable(pdf_smasher.compress_stream)
-    assert callable(pdf_smasher.triage)
+    assert callable(hankpdf.compress)
+    assert callable(hankpdf.compress_stream)
+    assert callable(hankpdf.triage)
 
     # Exceptions
     for name in (
@@ -36,16 +36,16 @@ def test_public_symbols_exported() -> None:
         "CorruptPDFError",
         "EnvironmentError",
     ):
-        assert hasattr(pdf_smasher, name), f"missing exception: {name}"
+        assert hasattr(hankpdf, name), f"missing exception: {name}"
 
 
 def test_compress_is_implemented_and_rejects_garbage() -> None:
     """Engine is wired — bogus input must raise CorruptPDFError, not NotImplementedError."""
     import pytest
 
-    import pdf_smasher
+    import hankpdf
 
-    with pytest.raises(pdf_smasher.CorruptPDFError):
-        pdf_smasher.triage(b"not a pdf")
-    with pytest.raises(pdf_smasher.CorruptPDFError):
-        pdf_smasher.compress(b"not a pdf")
+    with pytest.raises(hankpdf.CorruptPDFError):
+        hankpdf.triage(b"not a pdf")
+    with pytest.raises(hankpdf.CorruptPDFError):
+        hankpdf.compress(b"not a pdf")

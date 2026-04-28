@@ -480,7 +480,7 @@ On partial runs, `pages_skipped_verbatim` carries the 0-indexed page indices of 
 
 **Conservative bias.** The classifier walks each page's *direct* `/Resources/XObject` dict only. Image bytes inside Form XObject sub-resources are NOT counted (no recursive walk), and resources inherited from the parent `/Pages` tree are NOT consulted. Both biases push toward conservatism (more pages routed to MRC), which is the safe direction — the gate is a pre-filter, not a verifier.
 
-The gate is the union of two early-exit signals that previously lived only at the whole-doc level: the legacy "no image content" passthrough (now collapses naturally to "every page below threshold"), and the per-page MRC selection (skip individual text pages within a mixed doc). See `pdf_smasher/engine/page_classifier.py` and `docs/superpowers/specs/2026-04-27-per-page-selective-mrc-design.md`.
+The gate is the union of two early-exit signals that previously lived only at the whole-doc level: the legacy "no image content" passthrough (now collapses naturally to "every page below threshold"), and the per-page MRC selection (skip individual text pages within a mixed doc). See `hankpdf/engine/page_classifier.py` and `docs/superpowers/specs/2026-04-27-per-page-selective-mrc-design.md`.
 
 ### 4.4 Strip log format
 
@@ -649,7 +649,7 @@ Phase 2b adds the following per-page and per-job counters / warnings:
 - `bg-codec-jpeg2000-demoted-fast-mode` — emitted once per job when the user requested `bg_codec=jpeg2000` but `mode=fast` demoted it to JPEG for latency reasons.
 - `verifier-skipped` — emitted once per job when `options.skip_verify` is True (the default; also the `--skip-verify` / absence-of-`--verify` CLI path).
 - `verifier-fail-{accept-drift|fast-mode}-pages-[…]` — emitted when the verifier flagged drift but the job was configured to warn instead of abort (`options.accept_drift=True` or `options.mode="fast"`). Lists 1-indexed failing pages.
-- `forkserver-preload-failed-<ExceptionType>` — emitted when `set_forkserver_preload(["pdf_smasher.engine", …])` raises `ValueError` or `RuntimeError` (typically because a preloaded module instantiates multiprocessing objects at import time). Workers still function, but each re-imports the heavy module chain (numpy/cv2/pikepdf ~ 2-3 s each per worker). Exception-type suffix lets ops grep for the specific cause.
+- `forkserver-preload-failed-<ExceptionType>` — emitted when `set_forkserver_preload(["hankpdf.engine", …])` raises `ValueError` or `RuntimeError` (typically because a preloaded module instantiates multiprocessing objects at import time). Workers still function, but each re-imports the heavy module chain (numpy/cv2/pikepdf ~ 2-3 s each per worker). Exception-type suffix lets ops grep for the specific cause.
 
 #### 8.5.1 Stderr-only CLI warnings (not part of CompressReport.warnings)
 
@@ -661,7 +661,7 @@ Every stderr warning line starts with `[hankpdf] warning [CODE]:` and every stde
 grep -F "[W-CHUNKS-EXCEED-CAP]" job.log   # portable + stable across releases
 ```
 
-Stable codes (see `pdf_smasher/cli/warning_codes.py` — the `CliWarningCode` Literal is the source of truth):
+Stable codes (see `hankpdf/cli/warning_codes.py` — the `CliWarningCode` Literal is the source of truth):
 
 - `W-MAX-OUTPUT-MB-IMAGE-MODE` — `--max-output-mb` is combined with an image-export format. The flag is PDF-only; image-export mode ignores it.
 - `W-MAX-OUTPUT-MB-STDOUT` — `--max-output-mb` is combined with `-o -` (stdout) AND the merged output exceeds the cap. Stdout can't be split; the merged bytes are emitted.

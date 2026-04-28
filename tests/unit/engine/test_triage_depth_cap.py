@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from pdf_smasher.engine.triage import _walk_dict_for_names
-from pdf_smasher.exceptions import MaliciousPDFError
+from hankpdf.engine.triage import _walk_dict_for_names
+from hankpdf.exceptions import MaliciousPDFError
 
 
 def test_walk_dict_at_cap_boundary_passes() -> None:

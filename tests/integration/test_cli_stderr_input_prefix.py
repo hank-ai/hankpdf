@@ -12,8 +12,8 @@ from __future__ import annotations
 import pikepdf
 import pytest
 
-from pdf_smasher.cli.main import main
-from pdf_smasher.utils.log import redact_filename
+from hankpdf.cli.main import main
+from hankpdf.utils.log import redact_filename
 
 
 def _make_pdf(tmp_path, n_pages: int = 2, name: str = "weird-input-2026-04.pdf"):  # type: ignore[no-untyped-def]

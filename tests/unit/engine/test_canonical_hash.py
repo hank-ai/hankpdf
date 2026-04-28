@@ -10,7 +10,7 @@ import io
 
 import pikepdf
 
-from pdf_smasher.engine.canonical import canonical_input_sha256
+from hankpdf.engine.canonical import canonical_input_sha256
 
 
 def _pdf_with(*, producer: str = "pdftest") -> bytes:

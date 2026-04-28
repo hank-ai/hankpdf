@@ -14,7 +14,7 @@ from __future__ import annotations
 import pikepdf
 import pytest
 
-from pdf_smasher.cli.main import main
+from hankpdf.cli.main import main
 
 
 def _make_pdf(tmp_path, n_pages: int = 2):  # type: ignore[no-untyped-def]

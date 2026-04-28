@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.rasterize.
+"""Tests for hankpdf.engine.rasterize.
 
 First spike task (Phase 1 T1.1): rasterize a PDF page via pdfium at a given
 DPI into a PIL image we can hand to OpenCV + Tesseract downstream.
@@ -10,7 +10,7 @@ import pypdfium2 as pdfium
 import pytest
 from PIL import Image
 
-from pdf_smasher.engine.rasterize import rasterize_page
+from hankpdf.engine.rasterize import rasterize_page
 
 
 def _make_minimal_pdf(width_points: int = 612, height_points: int = 792) -> bytes:

@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.ocr — thin Tesseract wrapper."""
+"""Tests for hankpdf.engine.ocr — thin Tesseract wrapper."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import shutil
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from pdf_smasher.engine.ocr import WordBox, tesseract_word_boxes
+from hankpdf.engine.ocr import WordBox, tesseract_word_boxes
 
 pytestmark = pytest.mark.skipif(
     shutil.which("tesseract") is None,

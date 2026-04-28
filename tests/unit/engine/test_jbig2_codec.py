@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.codecs.jbig2 — 1-bit image -> JBIG2 bytes.
+"""Tests for hankpdf.engine.codecs.jbig2 — 1-bit image -> JBIG2 bytes.
 
 Uses the system ``jbig2`` binary (jbig2enc) via subprocess. Generic region
 coding only — no symbol mode, no refinement (`-r`) — per the safety
@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from pdf_smasher.engine.codecs.jbig2 import encode_1bit_jbig2
+from hankpdf.engine.codecs.jbig2 import encode_1bit_jbig2
 
 
 def _jbig2_available() -> bool:

@@ -8,7 +8,7 @@ Scanned PDFs are massively oversized. Scanners default to 300 DPI color and embe
 
 HankPDF ships as a **local command-line tool**: PDF in, shrunk/resized searchable PDF out. Runs on the user's machine. No network calls, no telemetry, no persistent storage beyond the output and an optional sidecar report. Distributed as:
 
-1. **Python package** — `pip install pdf-smasher`. Brings `from pdf_smasher import compress` and the `hankpdf` CLI. User installs Tesseract + jbig2enc via their OS package manager (documented).
+1. **Python package** — `pip install hankpdf`. Brings `from hankpdf import compress` and the `hankpdf` CLI. User installs Tesseract + jbig2enc via their OS package manager (documented).
 2. **Docker image** — sealed runtime with all native deps baked in. For CI/CD, SFTP wrappers, batch jobs, and any host where you'd rather not install Tesseract.
 
 No GUI. No standalone binary. No platform installers. No code-signing. Users who want a drag-drop experience can wire `hankpdf` into their shell's "Send To" / Shortcuts / `.desktop` flow themselves.
@@ -93,7 +93,7 @@ Output: a `TriageReport` structure consumed by the input-policy gate and Sanitiz
 
 ### 4.1a Input-policy gate
 
-Immediately after Triage and before any destructive operation, `_enforce_input_policy(tri, options, input_data)` in `pdf_smasher/__init__.py` is the single decision point for all early-exit conditions. This avoids scattered refusal logic and ensures both `compress()` and the CLI image-export path enforce the same rules.
+Immediately after Triage and before any destructive operation, `_enforce_input_policy(tri, options, input_data)` in `hankpdf/__init__.py` is the single decision point for all early-exit conditions. This avoids scattered refusal logic and ensures both `compress()` and the CLI image-export path enforce the same rules.
 
 Conditions that cause immediate exit here:
 - Encrypted (user-password, certificate, or owner-restriction) — raises `EncryptedPdfError`
@@ -104,7 +104,7 @@ Conditions that cause immediate exit here:
 
 ### 4.1b Per-page MRC gate
 
-Immediately after the input-policy gate and before Sanitize/Recompress, every page is scored once for MRC-worthiness via `score_pages_for_mrc(pdf_bytes, *, password, min_image_byte_fraction)` in `pdf_smasher/engine/page_classifier.py`. The gate is a cheap pre-filter — no decode, no render, just a pikepdf walk of each page's `/Resources/XObject` dict.
+Immediately after the input-policy gate and before Sanitize/Recompress, every page is scored once for MRC-worthiness via `score_pages_for_mrc(pdf_bytes, *, password, min_image_byte_fraction)` in `hankpdf/engine/page_classifier.py`. The gate is a cheap pre-filter — no decode, no render, just a pikepdf walk of each page's `/Resources/XObject` dict.
 
 - **Signal**: `image_xobject_bytes / page_byte_budget` per page, where the numerator is the sum of `/Length` for every `/XObject /Image` stream and the denominator is `len(/Contents) + sum(referenced_xobject_lengths)` (image + form XObjects, floored at 1 byte). Native-export PDFs (PowerPoint/Word) sit at 0–15%; scan-derived PDFs sit at 70–95%.
 - **Threshold**: `--per-page-min-image-fraction` (CLI), `CompressOptions.min_image_byte_fraction` (API). Default `0.30`. Pages at or above the threshold are MRC-worthy; pages below are emitted **verbatim** in the worker fast-path (1-page slice copied from the input with a sentinel `PageVerdict`, no rasterize, no Tesseract).
@@ -129,7 +129,7 @@ Output: a "clean" in-memory `pikepdf.Pdf` object ready for page-level work.
 
 ### 4.3 Recompress (or image-export alternate exit)
 
-If `--output-format jpeg|png|webp` is specified, the pipeline exits Sanitize and **bypasses the MRC pipeline entirely**. Pages are rasterized via pdfium and encoded to the requested image format by Pillow (libjpeg-turbo for JPEG, libpng+zlib for PNG, libwebp for WebP). The streaming generator `iter_pages_as_images` yields encoded page bytes one at a time; the eager wrapper `render_pages_as_images` materializes all pages into a list. Both live in `pdf_smasher/engine/image_export.py`. The input-policy gate (§4.1a) still applies before this path; the MRC verifier does not.
+If `--output-format jpeg|png|webp` is specified, the pipeline exits Sanitize and **bypasses the MRC pipeline entirely**. Pages are rasterized via pdfium and encoded to the requested image format by Pillow (libjpeg-turbo for JPEG, libpng+zlib for PNG, libwebp for WebP). The streaming generator `iter_pages_as_images` yields encoded page bytes one at a time; the eager wrapper `render_pages_as_images` materializes all pages into a list. Both live in `hankpdf/engine/image_export.py`. The input-policy gate (§4.1a) still applies before this path; the MRC verifier does not.
 
 For the standard PDF-in, PDF-out case:
 
@@ -192,7 +192,7 @@ All three conditions are declared in `CompressOptions`. Callers can detect passt
 
 ### 4.5 Chunked output
 
-When `--max-output-mb` is set, the output is split into multiple files rather than one potentially large PDF. The greedy per-page packer in `pdf_smasher/engine/chunking.py` accumulates pages into a chunk until adding the next page would exceed the byte budget, then flushes and starts a new chunk.
+When `--max-output-mb` is set, the output is split into multiple files rather than one potentially large PDF. The greedy per-page packer in `hankpdf/engine/chunking.py` accumulates pages into a chunk until adding the next page would exceed the byte budget, then flushes and starts a new chunk.
 
 Output filenames follow the pattern `{base}_{NNN}{ext}` where `NNN` is 1-indexed and zero-padded to the number of digits needed for the total chunk count (e.g. `report_01.pdf`, `report_02.pdf`). This applies to both the MRC path and the image-export path.
 
@@ -234,7 +234,7 @@ Checks (all must pass):
 
 **Invalid UTF-8 handling**: Tesseract occasionally emits invalid UTF-8 bytes; decode with `errors='replace'` both sides to maintain symmetry and avoid exceptions.
 
-**Decompression-bomb guard** (runs before any SSIM): `PIL.Image.MAX_IMAGE_PIXELS` is set at import time by `pdf_smasher/_pillow_hardening.py`. The cap value is declared once in `pdf_smasher/_limits.py` (`MAX_BOMB_PIXELS`) and shared between Pillow's import-time cap and image-export's pre-allocation pixel budget check, so the two limits cannot diverge. Decode is wrapped in try/except; Pillow's `DecompressionBombError` is translated to our typed `DecompressionBombError` subclass so the CLI can route to its dedicated exit code (`EXIT_DECOMPRESSION_BOMB=16`). Structured counter: `rejected:decompression_bomb`.
+**Decompression-bomb guard** (runs before any SSIM): `PIL.Image.MAX_IMAGE_PIXELS` is set at import time by `hankpdf/_pillow_hardening.py`. The cap value is declared once in `hankpdf/_limits.py` (`MAX_BOMB_PIXELS`) and shared between Pillow's import-time cap and image-export's pre-allocation pixel budget check, so the two limits cannot diverge. Decode is wrapped in try/except; Pillow's `DecompressionBombError` is translated to our typed `DecompressionBombError` subclass so the CLI can route to its dedicated exit code (`EXIT_DECOMPRESSION_BOMB=16`). Structured counter: `rejected:decompression_bomb`.
 
 ## 6. Weird-PDF handling matrix
 
@@ -260,7 +260,7 @@ Every output is accompanied by a `<input-basename>.hankpdf.json` sidecar contain
 - Per-page warnings
 
 We do **not** write engine-version or strip-records into the output PDF's XMP metadata because:
-- XMP survives forwarding and forensic analysis — leaking "processed by pdf-smasher vX" is an OSINT signal attackers can use.
+- XMP survives forwarding and forensic analysis — leaking "processed by hankpdf vX" is an OSINT signal attackers can use.
 - Writing XMP modifies the PDF byte range, invalidating any digital signature — even the "pass-through signed PDFs" case would break if we also wrote XMP.
 
 ## 8. Sandboxing
@@ -296,7 +296,7 @@ Both shapes run the engine **locally** on the user's machine. No network, no ser
 
 Same engine, two ways to get it onto a machine:
 
-- **Python package** (`pip install pdf-smasher`) — installs the `hankpdf` console script plus the importable Python API (`from pdf_smasher import compress, CompressOptions`). Primary target. Users install the non-Python native deps (Tesseract, jbig2enc) via their system package manager — one line on every major OS, documented in `docs/INSTALL.md`. Wheel is published to PyPI.
+- **Python package** (`pip install hankpdf`) — installs the `hankpdf` console script plus the importable Python API (`from hankpdf import compress, CompressOptions`). Primary target. Users install the non-Python native deps (Tesseract, jbig2enc) via their system package manager — one line on every major OS, documented in `docs/INSTALL.md`. Wheel is published to PyPI.
 - **Docker image** (`ghcr.io/hank-ai/hankpdf:X.Y`) — ~300 MB multi-arch image with all native deps (pdfium, Tesseract, jbig2enc, OpenJPEG, qpdf) baked in. For users who don't want to manage native deps on the host; for CI pipelines; for SFTP upload wrappers; for sealed execution environments. Non-root user, writable `/tmp`, read-only rootfs friendly.
 
 Contract details — flags, exit codes, JSON report schema — in [SPEC.md §2](SPEC.md).
@@ -309,7 +309,7 @@ To keep scope honest:
 - **No hosted service.** No SaaS, no API endpoint, no tenant system, no account system, no authentication, no sign-in flow.
 - **No telemetry.** No analytics, crash reporting, usage tracking, or phone-home. `--doctor` emits diagnostics to stdout only when the user runs it.
 - **No integration with any specific upstream.** HankPDF doesn't know or care where the input PDF came from or where the output is going.
-- **No auto-update.** Python users upgrade via `pip install -U pdf-smasher`. Docker users repin a tag. That's the whole mechanism.
+- **No auto-update.** Python users upgrade via `pip install -U hankpdf`. Docker users repin a tag. That's the whole mechanism.
 
 Users who want to wrap HankPDF inside their own ingestion pipeline, desktop app, or distribution can do so trivially via the CLI or Python API. That's their infrastructure, not ours.
 
@@ -329,9 +329,9 @@ HankPDF runs on the user's machine. We are not a Business Associate, HIPAA cover
 
 - **No network calls.** Engine makes zero outbound network requests during compression. The only network activity involved with HankPDF at all is whatever the user does with the output (we don't initiate any).
 - **No persistent storage outside user-requested output.** Input is read, output is written to the path the user specified, sidecar manifest (optional) sits next to output. `TemporaryDirectory()` context manager cleans intermediate files even on SIGKILL.
-- **Atomic output writes.** Every user-facing output file (compressed PDF, image-export frames, chunked outputs) is written via `pdf_smasher/utils/atomic.py::_atomic_write_bytes`, which writes to a `.partial` sibling first and then calls `Path.replace()`. On POSIX, `rename(2)` is atomic, so a partially-written output file is never observable to the user — interrupted runs do not corrupt the destination path.
+- **Atomic output writes.** Every user-facing output file (compressed PDF, image-export frames, chunked outputs) is written via `hankpdf/utils/atomic.py::_atomic_write_bytes`, which writes to a `.partial` sibling first and then calls `Path.replace()`. On POSIX, `rename(2)` is atomic, so a partially-written output file is never observable to the user — interrupted runs do not corrupt the destination path.
 - **Passwords**: never on argv (subprocess argv is `ps`-visible). Passed via `--password-file` or `HANKPDF_PASSWORD` env var. Held in a bytes buffer, zeroed on exit. `PR_SET_DUMPABLE=0` on Linux to block password leak via core dumps.
-- **Logs** stay on the user's machine. Every `[hankpdf]` stderr line carries a stable `[W-*]` (warning) or `[E-*]` (error) code from `pdf_smasher/cli/warning_codes.py`, plus a SHA-redacted input filename prefix. Ten warning codes and thirteen error codes are documented in SPEC §8.5.1. Stable codes let scripts and log aggregators key on codes rather than free-text messages; the SHA prefix lets users correlate warnings to inputs without exposing the raw filename. OCR text is never logged.
+- **Logs** stay on the user's machine. Every `[hankpdf]` stderr line carries a stable `[W-*]` (warning) or `[E-*]` (error) code from `hankpdf/cli/warning_codes.py`, plus a SHA-redacted input filename prefix. Ten warning codes and thirteen error codes are documented in SPEC §8.5.1. Stable codes let scripts and log aggregators key on codes rather than free-text messages; the SHA prefix lets users correlate warnings to inputs without exposing the raw filename. OCR text is never logged.
 - **Sandboxing** of the engine subprocess (see §8) protects the user's machine from hostile PDFs — not us from their content. If a malformed PDF would crash or RCE a parser, the sandbox contains it.
 - **CVE hygiene**: tight dependency pins (qpdf ≥11.6.3, OpenJPEG ≥2.5.4, pdfium tracked weekly). See [KNOWLEDGE.md §7](KNOWLEDGE.md).
 - **Release artifact integrity**: PyPI upload via trusted publishing (GitHub OIDC, no long-lived tokens); GHCR image via GitHub OIDC; GitHub Releases with SHA-256 checksums in release notes. Users can verify downloaded artifacts against published checksums. No separate code-signing infrastructure because we don't ship platform-native binaries.
@@ -342,10 +342,10 @@ HankPDF runs on the user's machine. We are not a Business Associate, HIPAA cover
 
 Two independent caps protect against decompression-bomb PDFs that would allocate billions of pixels:
 
-1. **Pre-allocation pixel-count guard.** `pdf_smasher.engine._render_safety.check_render_size(width_pt, height_pt, dpi)` is called BEFORE pdfium allocates the bitmap. It computes the target pixel dimensions from the page geometry and refuses with `pdf_smasher.exceptions.DecompressionBombError` if the product would exceed `pdf_smasher._limits.MAX_BOMB_PIXELS` (~715 Mpx, sized so an RGB raster fits in 2 GiB). Both the compress path (`rasterize.rasterize_page`) and the image-export path (`image_export._iter_pages_impl`) call this helper. Tests in `tests/unit/engine/test_render_safety.py`.
-2. **Post-decode Pillow guard.** `PIL.Image.MAX_IMAGE_PIXELS` is set to the SAME value by `pdf_smasher._pillow_hardening.ensure_capped()` so any image opened through Pillow (e.g., a per-page raster being re-encoded) hits the same ceiling. Pillow raises `PIL.Image.DecompressionBombError`, which our engine modules re-raise as our typed `DecompressionBombError` for consistent CLI exit-code mapping (`EXIT_DECOMPRESSION_BOMB=16`).
+1. **Pre-allocation pixel-count guard.** `hankpdf.engine._render_safety.check_render_size(width_pt, height_pt, dpi)` is called BEFORE pdfium allocates the bitmap. It computes the target pixel dimensions from the page geometry and refuses with `hankpdf.exceptions.DecompressionBombError` if the product would exceed `hankpdf._limits.MAX_BOMB_PIXELS` (~715 Mpx, sized so an RGB raster fits in 2 GiB). Both the compress path (`rasterize.rasterize_page`) and the image-export path (`image_export._iter_pages_impl`) call this helper. Tests in `tests/unit/engine/test_render_safety.py`.
+2. **Post-decode Pillow guard.** `PIL.Image.MAX_IMAGE_PIXELS` is set to the SAME value by `hankpdf._pillow_hardening.ensure_capped()` so any image opened through Pillow (e.g., a per-page raster being re-encoded) hits the same ceiling. Pillow raises `PIL.Image.DecompressionBombError`, which our engine modules re-raise as our typed `DecompressionBombError` for consistent CLI exit-code mapping (`EXIT_DECOMPRESSION_BOMB=16`).
 
-Both caps share `pdf_smasher._limits.MAX_BOMB_PIXELS` as the canonical numeric value — the `tests/unit/test_pillow_hardening.py` suite asserts they don't drift apart.
+Both caps share `hankpdf._limits.MAX_BOMB_PIXELS` as the canonical numeric value — the `tests/unit/test_pillow_hardening.py` suite asserts they don't drift apart.
 
 Callers that knowingly need a higher ceiling (e.g., a future per-page render CLI for engineering drawings) can pass `max_pixels=N` to `check_render_size` for a per-call override; there is intentionally no override for the Pillow cap (it's a global SECURITY boundary, not a tuning knob).
 
@@ -365,7 +365,7 @@ To keep scope honest:
 
 ### Decided
 - **Product brand**: HankPDF.
-- **Repo/package name**: `pdf-smasher` (internal); CLI binary and all user-visible strings use `hankpdf` / HankPDF.
+- **Repo/package name**: `hankpdf` (internal); CLI binary and all user-visible strings use `hankpdf` / HankPDF.
 - **Safe mode** (formerly working title "medical mode"): explicit opt-in via `--mode safe` flag or `mode="safe"` option. Default is `standard`.
 - **Test corpus strategy**: URL-referenced. Files live in an S3 bucket we control; the repo holds a manifest (filename + URL + SHA-256). CI caches; developers run `scripts/fetch_corpus.py` on demand. No Git LFS, no committed binaries.
 - **Real-corpus validation**: sample of PDFs collected from the open internet (Internet Archive, govinfo.gov, public-domain book scans, USPTO patents) plus synthetic edge-case fixtures we generate ourselves. No customer data, no DPAs, no BAAs — nothing to carry.
@@ -380,5 +380,5 @@ To keep scope honest:
 - **Passthrough floors implemented** (§4.4). `min_input_mb` and `min_ratio` are both in `CompressOptions` and enforced in production. Default `min_ratio=1.5`.
 - **Input-policy gate centralized** (§4.1a). All early-exit refusal logic consolidated into `_enforce_input_policy`; the gate is called identically from `compress()` and the CLI image-export path, eliminating dual-maintenance risk.
 - **Atomic writes everywhere** (§11). All output paths use `_atomic_write_bytes`; no half-written files observable to user or downstream scripts.
-- **Stable warning/error codes on all stderr output** (§11). Ten `[W-*]` and thirteen `[E-*]` codes in `pdf_smasher/cli/warning_codes.py`; scripts can key on codes rather than parsing message text.
+- **Stable warning/error codes on all stderr output** (§11). Ten `[W-*]` and thirteen `[E-*]` codes in `hankpdf/cli/warning_codes.py`; scripts can key on codes rather than parsing message text.
 - **Pillow decompression-bomb cap centralized in `_limits.py`**. `MAX_BOMB_PIXELS` is the single source shared between `_pillow_hardening.py` and image-export's pre-allocation budget. The two limits cannot diverge silently.

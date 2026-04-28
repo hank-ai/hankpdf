@@ -1,6 +1,6 @@
 """Audit-sidecar support (Wave 5 / C2 + C3).
 
-Builds the :class:`~pdf_smasher.types.BuildInfo` snapshot that pins every
+Builds the :class:`~hankpdf.types.BuildInfo` snapshot that pins every
 CompressReport to the exact binary + native-dep versions that produced
 it, and wires the process-wide correlation-id that stamps stderr lines
 so an on-call can tie a log slice back to the structured report.
@@ -17,8 +17,8 @@ import shutil
 import subprocess
 from functools import lru_cache
 
-from pdf_smasher._version import __version__, build_info
-from pdf_smasher.types import BuildInfo
+from hankpdf._version import __version__, build_info
+from hankpdf.types import BuildInfo
 
 _PROBE_TIMEOUT_SEC = 5
 

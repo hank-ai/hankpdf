@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from pdf_smasher.utils.atomic import PARTIAL_SUFFIX, _atomic_write_bytes
+from hankpdf.utils.atomic import PARTIAL_SUFFIX, _atomic_write_bytes
 
 
 @pytest.mark.skipif(os.name == "nt", reason="O_NOFOLLOW is POSIX-only")

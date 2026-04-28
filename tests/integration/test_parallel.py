@@ -17,7 +17,7 @@ import pypdfium2 as pdfium
 import pytest
 from PIL import Image
 
-from pdf_smasher import CompressOptions, compress
+from hankpdf import CompressOptions, compress
 
 
 def _make_multi_page_pdf(n_pages: int = 5) -> bytes:

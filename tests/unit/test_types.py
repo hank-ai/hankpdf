@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pdf_smasher.types import (
+from hankpdf.types import (
     CompressOptions,
     CompressReport,
     TriageReport,
@@ -152,7 +152,7 @@ def test_build_info_dataclass_round_trip() -> None:
 
     import pytest
 
-    from pdf_smasher.types import BuildInfo
+    from hankpdf.types import BuildInfo
 
     info = BuildInfo(
         version="1.2.3",
