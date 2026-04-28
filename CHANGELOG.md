@@ -4,6 +4,10 @@ All notable changes to `pdf-smasher` (HankPDF) are documented here. The format i
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-04-28
+
+First public release. Pre-1.0 SemVer applies — anything may break between minor versions until 1.0. CLI + library APIs are documented in `docs/SPEC.md`; `CompressReport.schema_version` is the wire-contract version (currently `4`).
+
 ### Added
 - **Per-page MRC gate (`--per-page-min-image-fraction`, default `0.30`).** Before the pipeline splits work across workers, each page is scored on `image_xobject_bytes / page_byte_budget` (a cheap stream-length signal — no decode, no render). Pages below the threshold are emitted verbatim; pages at or above go through the full MRC pipeline. When no page meets the threshold, the whole-doc passthrough shortcut fires (input bytes returned unchanged, `status="passed_through"`, warning `passthrough-no-image-content`). Native-export and text-only PDFs see ~15× faster wall time (3.83s → 0.25s on a 50-page text-only PDF) and avoid the 53× inflate-and-discard cycle. Image-heavy inputs are unchanged. `--re-ocr`, `--strip-text-layer`, and `--verify` all disable the gate. See `docs/superpowers/specs/2026-04-27-per-page-selective-mrc-design.md` and the new "Per-page MRC gate" section in `docs/PERFORMANCE.md`.
 - `CompressReport.pages_skipped_verbatim: tuple[int, ...]` — page indices skipped by the per-page gate. Empty tuple on full-pipeline runs and on whole-doc passthrough.
