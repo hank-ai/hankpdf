@@ -29,4 +29,20 @@ from pdf_smasher._limits import MAX_BOMB_PIXELS
 # layers of defense.
 MAX_IMAGE_PIXELS: int = MAX_BOMB_PIXELS
 
-PIL.Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
+def ensure_capped() -> None:
+    """Idempotent installer of Pillow's decompression-bomb cap.
+
+    Engine modules call this at module-load time so a programmatic
+    caller that imports only ``pdf_smasher.engine.<x>`` (without going
+    through ``pdf_smasher.__init__``) still gets the cap installed.
+    Calling more than once is a no-op.
+    """
+    if PIL.Image.MAX_IMAGE_PIXELS != MAX_IMAGE_PIXELS:
+        PIL.Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
+
+# Side-effect call kept so `import pdf_smasher` still installs the cap;
+# call sites that import only an engine submodule call ensure_capped()
+# themselves at module top.
+ensure_capped()

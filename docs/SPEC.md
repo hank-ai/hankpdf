@@ -41,6 +41,7 @@ class CompressOptions:
     # Thresholds
     min_input_mb: float = 0.0           # below this, skip compression and pass through
     min_ratio: float = 1.5              # if achieved ratio < this, return original
+    min_image_byte_fraction: float = 0.30  # per-page MRC gate; pages below this fraction are emitted verbatim. See §4.1b.
 
     # Limits
     max_pages: int | None = None        # refuse inputs over this page count
@@ -74,11 +75,12 @@ class CompressReport:
     warnings: tuple[str, ...] = ()      # structured warning codes; see §8.5
     strips: tuple[str, ...] = ()        # what was stripped; see §4.4
     reason: str | None = None           # human-readable reason if refused/drift
-    schema_version: int = 2             # sidecar / JSON report schema version (see §11)
+    schema_version: int = 4             # sidecar / JSON report schema version (see §11)
     strategy_distribution: Mapping[str, int] = field(default_factory=dict)
     # strategy_distribution: per-page strategy counts — keys are
     # "text_only", "photo_only", "mixed", "already_optimized"; values are
     # page counts. Emitted by compress() for ratio post-mortems. See §8.5.
+    pages_skipped_verbatim: tuple[int, ...] = ()  # 0-indexed page indices skipped by the per-page MRC gate; empty on full-pipeline runs and on whole-doc passthrough. See §4.1b.
 
 @dataclass(frozen=True)
 class VerifierResult:
@@ -284,6 +286,22 @@ Verifier (content-drift gate):
                                  report.warnings. Use only after visually
                                  verifying the output.
 
+Per-page MRC gate:
+  --per-page-min-image-fraction FLOAT  Default: 0.30. Per-page threshold on
+                                 image_xobject_bytes / page_byte_budget.
+                                 Pages below this fraction are emitted
+                                 verbatim into the output PDF (no rasterize,
+                                 no compose, no verify); pages at or above
+                                 go through the full MRC pipeline. When NO
+                                 page meets the threshold, the whole-doc
+                                 passthrough shortcut returns the input
+                                 bytes unchanged with status="passed_through"
+                                 and warning passthrough-no-image-content.
+                                 Set to 0.0 to disable the gate (force every
+                                 page through the pipeline). The gate is
+                                 also disabled by --re-ocr, --strip-text-layer,
+                                 --legal-mode, and --verify (see §4.1b).
+
 Selection:
   --pages SPEC               Restrict processing to a subset of pages.
                              1-indexed. Accepts comma-separated single
@@ -343,7 +361,7 @@ Stable across versions. Scripts MUST branch on these, not on parsed stdout.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "input": "chart-2026-04-21.pdf",
   "output": "chart-2026-04-21.compressed.pdf",
   "status": "ok",
@@ -365,11 +383,12 @@ Stable across versions. Scripts MUST branch on these, not on parsed stdout.
     "failing_pages": [],
     "color_preserved": true
   },
-  "warnings": ["page-47-skipped-small-print"],
+  "warnings": ["page-47-skipped-small-print", "pages-skipped-verbatim-3"],
   "strips": ["/JavaScript", "/OpenAction"],
   "input_sha256": "3a7b...",
   "output_sha256": "9f2c...",
-  "reason": null
+  "reason": null,
+  "pages_skipped_verbatim": [12, 47, 88]
 }
 ```
 
@@ -443,6 +462,26 @@ Complete enumeration of classes and the policy each receives.
 | Huge `/ObjStm` (> 10,000 objects in single ObjStm) | ObjStm size walk | Refuse as resource-bomb candidate | 14 |
 | Filename contains non-NFC Unicode | Unicode normalization check at ingest | Normalize to NFC; log `filename_renormalized` counter (macOS NFD → Linux NFC silent data-loss class) | 0 |
 
+### 4.1b Per-page MRC gate
+
+Before the parallel page split, every page is scored on a cheap stream-length signal: `image_xobject_bytes / page_byte_budget`, where `page_byte_budget = len(content_stream) + sum(/XObject /Image /Length) + sum(/XObject /Form /Length)`. Pages at or above `--per-page-min-image-fraction` (default `0.30`) go through the full MRC pipeline; pages below are emitted verbatim into the output PDF (no rasterize, no classify, no compose, no verify).
+
+When **no** page meets the threshold, `compress()` returns the input bytes unchanged via the whole-doc passthrough shortcut: `status="passed_through"`, `exit_code=2`, warning `passthrough-no-image-content`, and `pages_skipped_verbatim=()` (empty — there's nothing to skip when the whole doc is the passthrough).
+
+On partial runs, `pages_skipped_verbatim` carries the 0-indexed page indices of skipped pages and the aggregate warning `pages-skipped-verbatim-N` is emitted, where N is the count.
+
+**Disable conditions.** The gate is bypassed (every page goes through the full pipeline) when any of:
+
+- `--re-ocr` (force Tesseract on every page)
+- `--strip-text-layer` (explicit text removal request)
+- `--legal-mode` (CCITT G4 / archival profile — every page must be re-encoded)
+- `--verify` (verifier needs full-pipeline output to compare against; otherwise synthetic per-page verdicts would pollute the aggregate metrics)
+- `--per-page-min-image-fraction 0.0` (threshold meets every page)
+
+**Conservative bias.** The classifier walks each page's *direct* `/Resources/XObject` dict only. Image bytes inside Form XObject sub-resources are NOT counted (no recursive walk), and resources inherited from the parent `/Pages` tree are NOT consulted. Both biases push toward conservatism (more pages routed to MRC), which is the safe direction — the gate is a pre-filter, not a verifier.
+
+The gate is the union of two early-exit signals that previously lived only at the whole-doc level: the legacy "no image content" passthrough (now collapses naturally to "every page below threshold"), and the per-page MRC selection (skip individual text pages within a mixed doc). See `pdf_smasher/engine/page_classifier.py` and `docs/superpowers/specs/2026-04-27-per-page-selective-mrc-design.md`.
+
 ### 4.4 Strip log format
 
 Each strip is recorded in `report.strips` as a stable enum name:
@@ -487,7 +526,7 @@ Written alongside every successful output as `<output-basename>.hankpdf.json`.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "input_sha256": "...",
   "canonical_input_sha256": "...",
   "output_sha256": "...",
@@ -600,7 +639,9 @@ By default, nothing persists between runs. Users who want to see cumulative stat
 
 Phase 2b adds the following per-page and per-job counters / warnings:
 
-- `strategy_distribution{class="text_only"|"photo_only"|"mixed"}` — emitted by `compress()` once per page (see `CompressReport.strategy_distribution`). `ALREADY_OPTIMIZED` is not emitted by `classify_page`; triage pass-through pages bypass this loop entirely.
+- `strategy_distribution{class="text_only"|"photo_only"|"mixed"|"already_optimized"}` — emitted by `compress()` once per page (see `CompressReport.strategy_distribution`). The `"already_optimized"` count comes from the per-page MRC gate (introduced in v4) and may be non-zero on partial-passthrough runs where some pages were copied verbatim from the input.
+- `passthrough-no-image-content` — emitted when every page in the input has image-byte-fraction below `min_image_byte_fraction` (default 0.30); whole-doc passthrough fires at the top of `compress()` and the input is returned unchanged. Co-emitted with `status="passed_through"`.
+- `pages-skipped-verbatim-N` — emitted when SOME but not all pages were copied verbatim (partial run). N is the count; the 0-indexed page numbers are in `report.pages_skipped_verbatim`. Status remains `"ok"` because the MRC pages produced real output.
 - `page-N-jbig2-fallback-to-flate` — emitted when jbig2enc errored on page N and compose fell back to flate. Distinct from `jbig2enc-unavailable-using-flate-fallback` (job-wide, emitted once up front when the jbig2 binary is missing).
 - `page-N-color-detected-in-monochrome-mode` — emitted when `force_monochrome=True` flattened a page that contained color content. `force-monochrome-discarded-color-on-N-pages` is the job-wide aggregate.
 - `page-N-text-only-demoted-to-mixed-color-detected` — emitted when classify_page routed a page to TEXT_ONLY but the channel-parity check detected color, forcing fallback to the MRC route.
@@ -674,6 +715,8 @@ Exit codes disambiguate the refusal class for scripts that key on `$?`; the `E-*
   - `CompressReport.build_info` added (`BuildInfo | None`). Non-null when the process can resolve either an installed dist's `PKG-INFO` or the `/etc/hankpdf/build-info.json` shipped inside the Docker image. Carries `version`, `git_sha`, `build_date`, `base_image_digest`, `jbig2enc_commit`, `qpdf_version`, `tesseract_version`, `leptonica_version`, `python_version`, `os_platform`. Readers can tie a report back to the exact binary + native-dep versions that produced it; on-call uses it to diagnose "does this output predate the qpdf #1050 fix?"
   - `CompressReport.correlation_id` added (str, UUID4 hex). Auto-generated per-report via `default_factory`. CLI stamps every stderr line with a short form (`corr=<first-8-chars>`) so an on-call can grep a batch log slice and join it to a specific report. Library callers can pass their own id via `compress(..., correlation_id=...)`.
   - `schema_version` bumped from 2 to 3.
+- v3 → v4 (additive): `pages_skipped_verbatim: tuple[int, ...]` field on `CompressReport`. `"already_optimized"` key in `strategy_distribution` may now be non-zero (was pre-allocated as 0 since v2). New warning codes `passthrough-no-image-content` and `pages-skipped-verbatim-N`. Per-page MRC gate documented above (§8.5).
+  - `schema_version` bumped from 3 to 4.
   - No breaking field removals or renames — additive only.
 
 - **v1 → v2** (DCR Wave 3, 2026-04-23):

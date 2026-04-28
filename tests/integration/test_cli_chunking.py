@@ -19,7 +19,19 @@ def _make_big_pdf(tmp_path, n_pages: int = 4, payload_kb_per_page: int = 250):  
     """
     pdf = pikepdf.new()
     for _ in range(n_pages):
-        pdf.add_blank_page(page_size=(612, 792))
+        page = pdf.add_blank_page(page_size=(612, 792))
+        img = pdf.make_stream(
+            b"\x00" * 2048,
+            Type=pikepdf.Name.XObject,
+            Subtype=pikepdf.Name.Image,
+            Width=10,
+            Height=10,
+            BitsPerComponent=8,
+            ColorSpace=pikepdf.Name.DeviceRGB,
+            Filter=pikepdf.Name.FlateDecode,
+        )
+        page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im0=img))
+        page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Im0 Do Q\n")
     path = tmp_path / "big.pdf"
     pdf.save(path)
     return path

@@ -247,10 +247,29 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # OCR — off by default. --ocr embeds a searchable text layer (adds ~5s/pg).
+    # OCR — see CompressOptions docstring for the full semantics.
+    # Default: existing text layer is preserved verbatim (no Tesseract).
+    # --ocr: ensure output is searchable; run Tesseract only if native text
+    #        is missing or fails the quality heuristic.
+    # --strip-text-layer: explicitly drop any text layer (size-only workflow).
+    # --re-ocr: force Tesseract even when the input has a usable text layer.
     p.add_argument("--ocr", dest="ocr", action="store_true", default=False)
     p.add_argument("--no-ocr", dest="ocr", action="store_false")
     p.add_argument("--ocr-language", default="eng")
+    p.add_argument("--strip-text-layer", action="store_true", default=False)
+    p.add_argument("--re-ocr", action="store_true", default=False)
+    p.add_argument(
+        "--per-page-min-image-fraction",
+        type=float,
+        default=0.30,
+        help=(
+            "Per-page MRC gate threshold. Pages with image_xobject_bytes / "
+            "page_byte_budget below this fraction are copied verbatim instead "
+            "of recompressed. Default 0.30 — catches native-export PDFs and "
+            "skips them. Set to 0.0 to force the full MRC pipeline on every "
+            "page."
+        ),
+    )
 
     # Safety gates
     p.add_argument("--allow-signed-invalidation", action="store_true")
@@ -259,8 +278,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--password-file", type=Path, help="Read password from file")
 
     # Limits + passthrough floors
-    p.add_argument("--max-pages", type=int)
-    p.add_argument("--max-input-mb", type=float, default=2000.0)
+    p.add_argument("--max-pages", type=int, default=10000)
+    p.add_argument("--max-input-mb", type=float, default=250.0)
     p.add_argument(
         "--min-input-mb",
         type=float,
@@ -497,7 +516,15 @@ def _parse_pages_spec(spec: str) -> set[int]:
 
 def _read_password(args: argparse.Namespace) -> str | None:
     if args.password_file is not None:
-        return args.password_file.read_text().strip() or None
+        content = args.password_file.read_text(encoding="utf-8")
+        # Strip exactly one trailing newline (CR, LF, or CRLF). Don't use
+        # .strip() — that would also eat leading/trailing spaces inside the
+        # password itself.
+        if content.endswith("\r\n"):
+            content = content[:-2]
+        elif content.endswith(("\n", "\r")):
+            content = content[:-1]
+        return content or None
     return os.environ.get("HANKPDF_PASSWORD")
 
 
@@ -518,6 +545,9 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         target_pdf_a=args.target_pdfa,
         ocr=args.ocr,
         ocr_language=args.ocr_language,
+        strip_text_layer=args.strip_text_layer,
+        re_ocr=args.re_ocr,
+        min_image_byte_fraction=args.per_page_min_image_fraction,
         allow_signed_invalidation=args.allow_signed_invalidation,
         allow_certified_invalidation=args.allow_certified_invalidation,
         allow_embedded_files=args.allow_embedded_files,
@@ -707,6 +737,7 @@ def _run_image_export(
     """
     _label = _input_label(args.input)
     _prefix = _line_prefix(_label)
+    password = _read_password(args)
 
     # --max-output-mb is a PDF-only concept (it splits a merged PDF into
     # size-bounded sibling files). In image-export mode each page is
@@ -727,7 +758,7 @@ def _run_image_export(
     # generic catch-all, so upstream can distinguish a decompression
     # bomb or malicious PDF from a plain corrupt one.
     try:
-        tri = triage(input_bytes)
+        tri = triage(input_bytes, password=password)
     except MaliciousPDFError as e:
         print(
             _refuse("E-INPUT-MALICIOUS", f"malicious PDF ({e})", input_name=_label), file=sys.stderr
@@ -850,6 +881,7 @@ def _run_image_export(
             webp_quality=args.webp_quality,
             webp_lossless=args.webp_lossless,
             progress_callback=_progress,
+            password=password,
         )
 
         if n == 1:
@@ -981,6 +1013,19 @@ def main(argv: list[str] | None = None) -> int:
     if str(args.input) == "-":
         input_bytes = sys.stdin.buffer.read()
     else:
+        size_mb = args.input.stat().st_size / (1024 * 1024)
+        if size_mb > args.max_input_mb:
+            print(
+                _refuse(
+                    "E-INPUT-OVERSIZE",
+                    f"input is {size_mb:.1f} MB, exceeds --max-input-mb={args.max_input_mb} "
+                    f"(default tightened from 2000.0; pass --max-input-mb 2000 to restore "
+                    f"the previous behavior)",
+                    input_name=_input_label(args.input),
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_OVERSIZE
         input_bytes = args.input.read_bytes()
 
     # Resolve the log-label once so every stderr line this run emits

@@ -5,7 +5,6 @@
 If you think you've found a security issue in HankPDF, **please do not open a public GitHub issue**. Report it privately:
 
 - GitHub Security Advisories (once the repo is public) — preferred: https://github.com/hank-ai/hankpdf/security/advisories/new
-- Email: security@TBD.example
 
 We'll acknowledge within 72 hours and aim for a triage decision within a week. Coordinated disclosure preferred.
 
@@ -21,11 +20,15 @@ Out of scope:
 - DoS via deliberately-pathological PDFs that trip our resource caps (SIGKILL on `RLIMIT_AS` exceedance is working as designed).
 - Vulnerabilities in dependencies we've already updated past — report those upstream.
 
+## Operational assumptions
+
+- The output directory passed via `-o`/`--output-dir` is assumed to be writable only by the running user. On POSIX, partial-write paths use `O_NOFOLLOW` so a pre-placed symlink at the partial path is refused; on Windows the partial path is written without a symlink check (no `O_NOFOLLOW` equivalent without ctypes).
+
 ## Release integrity
 
 We don't ship platform-native code-signing CA certs. Instead:
 
-- **PyPI** — `pip install pdf-smasher` uses PyPI's checksum + GitHub OIDC trusted-publishing provenance.
+- **PyPI** — `pip install pdf-smasher` uses PyPI's checksum + GitHub OIDC trusted-publishing provenance. The publish workflow is `.github/workflows/release.yml`; it triggers only on a published GitHub Release.
 - **Docker** — `ghcr.io/hank-ai/hankpdf@sha256:…` pins to immutable digests. Every pushed image is signed with cosign (keyless, via GitHub's OIDC issuer) and carries a SLSA v1 build-provenance attestation + SPDX SBOM. Verify via `cosign verify ghcr.io/hank-ai/hankpdf:<tag> --certificate-identity-regexp 'https://github\\.com/hank-ai/hankpdf/\\.github/workflows/docker\\.yml@refs/.+' --certificate-oidc-issuer https://token.actions.githubusercontent.com` and `gh attestation verify oci://ghcr.io/hank-ai/hankpdf:<tag> --owner hank-ai`.
 - **Windows jbig2.exe bundle** — release assets include a SHA-256 sidecar (`jbig2-windows-x64.zip.sha256`) plus SLSA build-provenance attestation. The installer script refuses to install any download whose digest doesn't match the sidecar. The installer script itself is published as a release asset with its own `.sha256`, and users should install via the tagged URL (`releases/download/jbig2-windows-vX.Y.Z/install_jbig2_windows.ps1`) — never the mutable `raw/main/…` URL.
 - **GitHub Releases** — SHA-256 checksums for every asset are published alongside the asset. Image digests appear in the Docker publish workflow summary.

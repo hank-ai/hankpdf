@@ -8,6 +8,14 @@ visual effect.
 Coordinates: OCR word boxes are in *raster pixels* (top-left origin, Y
 down). PDF text coordinates are in *points* (bottom-left origin, Y up).
 We convert one to the other.
+
+Source of word boxes:
+
+- :func:`pdf_smasher.engine.ocr.tesseract_word_boxes` — re-OCR the raster
+  via Tesseract. Used for true scans (no upstream text layer).
+- :func:`extract_native_word_boxes` (this module) — read text + bboxes
+  from the input PDF's existing content stream via pdfium. Faithful and
+  Tesseract-free for inputs that already have a searchable text layer.
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ import io
 from collections.abc import Sequence
 
 import pikepdf
+import pypdfium2 as pdfium
 
 from pdf_smasher.engine.ocr import WordBox
 
@@ -125,3 +134,177 @@ def add_text_layer(
         buf = io.BytesIO()
         pdf.save(buf, linearize=False, deterministic_id=True)
         return buf.getvalue()
+
+
+# Tuning constants for is_native_text_decent. Centralized so they're greppable
+# and so adjustments can be made without scattering magic numbers.
+_NATIVE_DECENCY_SPARSE_THRESHOLD = (
+    30  # below this many chars, treat the page as too sparse to judge
+)
+_NATIVE_DECENCY_MIN_ALPHA_RATIO = 0.5  # at least half the chars must be letters or whitespace
+_NATIVE_DECENCY_MIN_AVG_WORD_LEN = 2.0
+_NATIVE_DECENCY_MAX_AVG_WORD_LEN = 12.0
+_NATIVE_DECENCY_MAX_SINGLE_CHAR_RATIO = 0.4  # ">40% single-char words" = "S c a l i n g" pattern
+
+
+def is_native_text_decent(boxes: Sequence[WordBox]) -> bool:
+    """Heuristic: is a native text layer reasonable enough to keep?
+
+    Returns ``True`` for text that looks like real words; ``False`` for
+    OCR-garbage signatures. Used to decide whether ``--ocr`` should
+    accept the existing text or replace it with a fresh Tesseract pass.
+
+    Rejects:
+      - Mostly-non-alphabetic content (punctuation/symbol noise) — e.g.
+        a corrupted text layer where most chars are ``?`` or unicode
+        replacement markers.
+      - Average word length outside 2-12 chars — gibberish OCR often
+        produces single-char tokens or long runs of garbage.
+      - High single-char-word ratio (>40%) — the "S c a l i n g" pattern
+        you get when an OCR engine treats every glyph as its own word
+        because it couldn't infer word boundaries.
+
+    Sparse pages (covers, dividers) with very little text pass — light
+    text density alone isn't a quality signal. The minimum gate is that
+    SOME text exists; below 30 chars we return ``True`` rather than
+    forcing a Tesseract pass on a near-blank page.
+    """
+    if not boxes:
+        return False
+    full_text = " ".join(b.text for b in boxes)
+    if len(full_text) < _NATIVE_DECENCY_SPARSE_THRESHOLD:
+        return True  # too sparse to judge; keep what's there
+    alpha_or_space = sum(1 for c in full_text if c.isalpha() or c.isspace())
+    if alpha_or_space / len(full_text) < _NATIVE_DECENCY_MIN_ALPHA_RATIO:
+        return False
+    words = [w for w in full_text.split() if w.isalpha()]
+    if not words:
+        return False
+    avg_len = sum(len(w) for w in words) / len(words)
+    if avg_len < _NATIVE_DECENCY_MIN_AVG_WORD_LEN or avg_len > _NATIVE_DECENCY_MAX_AVG_WORD_LEN:
+        return False
+    single_char_ratio = sum(1 for w in words if len(w) == 1) / len(words)
+    return single_char_ratio <= _NATIVE_DECENCY_MAX_SINGLE_CHAR_RATIO
+
+
+def extract_native_word_boxes(
+    pdf_bytes: bytes,
+    *,
+    page_index: int,
+    raster_width_px: int,
+    raster_height_px: int,
+    password: str | None = None,
+) -> list[WordBox]:
+    """Read text + bounding boxes from an input page's existing text layer.
+
+    Walks pdfium's per-character API and groups consecutive non-whitespace
+    chars into word-level :class:`WordBox` records. Coordinates are
+    converted from PDF points (bottom-left origin) to raster pixels
+    (top-left origin) so the result is drop-in compatible with
+    :func:`add_text_layer`.
+
+    A new word starts on:
+      - whitespace (the whitespace itself is not emitted)
+      - a Y-baseline jump greater than half the current word's height
+        (line break)
+      - a horizontal gap to the next char larger than ``GAP_FACTOR x
+        the current word's height`` (column / wide-spacing break)
+
+    Returns an empty list when the page has no text layer (true scan).
+    Callers should fall back to :func:`tesseract_word_boxes` in that
+    case. Confidence is set to ``100.0`` — native extraction is faithful
+    by construction (no recognition step).
+    """
+    pdf = pdfium.PdfDocument(pdf_bytes, password=password)
+    try:
+        page = pdf[page_index]
+        page_width_pt, page_height_pt = page.get_size()
+        if page_width_pt <= 0 or page_height_pt <= 0:
+            return []
+        tp = page.get_textpage()
+        try:
+            return _walk_chars_into_words(
+                tp,
+                raster_width_px=raster_width_px,
+                raster_height_px=raster_height_px,
+                page_width_pt=page_width_pt,
+                page_height_pt=page_height_pt,
+            )
+        finally:
+            tp.close()
+    finally:
+        pdf.close()
+
+
+def _walk_chars_into_words(
+    tp: object,
+    *,
+    raster_width_px: int,
+    raster_height_px: int,
+    page_width_pt: float,
+    page_height_pt: float,
+) -> list[WordBox]:
+    """Walk the textpage's per-char API and group runs into word-level boxes.
+
+    Split out so :func:`extract_native_word_boxes` stays small enough for
+    ruff's PLR0915. Caller owns the textpage lifecycle.
+    """
+    gap_factor = 0.6  # tuned on slide-deck inputs; chars within 0.6 line-height
+    # of the previous char are part of the same word.
+    sx = raster_width_px / page_width_pt
+    sy = raster_height_px / page_height_pt
+    n_chars = tp.count_chars()  # type: ignore[attr-defined]
+    boxes: list[WordBox] = []
+    cur_text: list[str] = []
+    cur_left = cur_right = cur_bottom = cur_top = 0.0
+    prev_baseline = -1.0
+    prev_right = -1.0
+    prev_height = 0.0
+
+    def flush() -> None:
+        if not cur_text:
+            return
+        text = "".join(cur_text)
+        if not text.strip():
+            cur_text.clear()
+            return
+        x_px = round(cur_left * sx)
+        y_px = round((page_height_pt - cur_top) * sy)
+        w_px = max(1, round((cur_right - cur_left) * sx))
+        h_px = max(1, round((cur_top - cur_bottom) * sy))
+        boxes.append(WordBox(text=text, x=x_px, y=y_px, width=w_px, height=h_px, confidence=100.0))
+        cur_text.clear()
+
+    for i in range(n_chars):
+        ch = tp.get_text_range(i, 1)  # type: ignore[attr-defined]
+        if ch.isspace():
+            flush()
+            prev_baseline = -1.0
+            prev_right = -1.0
+            continue
+        left, bottom, right, top = tp.get_charbox(i)  # type: ignore[attr-defined]
+        height = top - bottom
+        # Word break on either:
+        #   - Line break: baseline jump greater than half the line height, OR
+        #   - Wide horizontal gap (column / inter-word break)
+        line_break = prev_baseline >= 0 and abs(bottom - prev_baseline) > 0.5 * max(
+            prev_height, height
+        )
+        column_break = prev_right >= 0 and (left - prev_right) > gap_factor * max(
+            prev_height, height
+        )
+        if line_break or column_break:
+            flush()
+        if not cur_text:
+            cur_left, cur_bottom, cur_right, cur_top = left, bottom, right, top
+        else:
+            cur_left = min(cur_left, left)
+            cur_right = max(cur_right, right)
+            cur_bottom = min(cur_bottom, bottom)
+            cur_top = max(cur_top, top)
+        cur_text.append(ch)
+        prev_baseline = bottom
+        prev_right = right
+        prev_height = height
+    flush()
+    return boxes

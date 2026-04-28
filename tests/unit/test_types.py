@@ -21,7 +21,9 @@ def test_compress_options_defaults() -> None:
     assert opts.ocr_language == "eng"
     assert opts.allow_signed_invalidation is False
     assert opts.allow_certified_invalidation is False
-    assert opts.max_input_mb == 2000.0
+    assert opts.max_input_mb == 250.0
+    assert opts.max_pages == 10000
+    assert opts.min_image_byte_fraction == 0.30
     assert opts.password is None
 
 
@@ -100,7 +102,7 @@ def test_compress_report_construct() -> None:
     #   - VerifierResult.status "skipped" literal
     #   - CompressReport.warnings kebab-case codes (e.g. verifier-skipped)
     #   - CompressReport.strategy_distribution populated
-    assert report.schema_version == 3
+    assert report.schema_version == 4
     assert report.ratio == 2.0
     # correlation_id auto-generates via default_factory — shouldn't be empty.
     assert report.correlation_id

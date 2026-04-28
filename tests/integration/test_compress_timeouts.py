@@ -15,9 +15,25 @@ import pytest
 
 
 def _make_pdf(n: int = 1, with_payload: bool = False) -> bytes:
+    """Create a multi-page PDF whose pages are MRC-worthy (image XObject
+    attached) so the per-page gate doesn't short-circuit to whole-doc
+    passthrough — these tests exercise the pipeline below the gate.
+    """
     pdf = pikepdf.new()
     for _ in range(n):
-        pdf.add_blank_page(page_size=(612, 792))
+        page = pdf.add_blank_page(page_size=(612, 792))
+        img = pdf.make_stream(
+            b"\x00" * 2048,
+            Type=pikepdf.Name.XObject,
+            Subtype=pikepdf.Name.Image,
+            Width=10,
+            Height=10,
+            BitsPerComponent=8,
+            ColorSpace=pikepdf.Name.DeviceRGB,
+            Filter=pikepdf.Name.FlateDecode,
+        )
+        page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im0=img))
+        page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Im0 Do Q\n")
     if with_payload:
         # Stuff a dummy stream so the PDF isn't trivially small.
         _ = pdf.make_stream(b"X" * 1024, Type=pikepdf.Name.Metadata)

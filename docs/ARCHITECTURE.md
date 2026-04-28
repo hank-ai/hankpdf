@@ -102,6 +102,18 @@ Conditions that cause immediate exit here:
 - Input exceeds the configured size ceiling — raises `InputTooLargeError`
 - Input is below `min_input_mb` — returns with `status="passed_through"` (see §4.5 on passthrough semantics)
 
+### 4.1b Per-page MRC gate
+
+Immediately after the input-policy gate and before Sanitize/Recompress, every page is scored once for MRC-worthiness via `score_pages_for_mrc(pdf_bytes, *, password, min_image_byte_fraction)` in `pdf_smasher/engine/page_classifier.py`. The gate is a cheap pre-filter — no decode, no render, just a pikepdf walk of each page's `/Resources/XObject` dict.
+
+- **Signal**: `image_xobject_bytes / page_byte_budget` per page, where the numerator is the sum of `/Length` for every `/XObject /Image` stream and the denominator is `len(/Contents) + sum(referenced_xobject_lengths)` (image + form XObjects, floored at 1 byte). Native-export PDFs (PowerPoint/Word) sit at 0–15%; scan-derived PDFs sit at 70–95%.
+- **Threshold**: `--per-page-min-image-fraction` (CLI), `CompressOptions.min_image_byte_fraction` (API). Default `0.30`. Pages at or above the threshold are MRC-worthy; pages below are emitted **verbatim** in the worker fast-path (1-page slice copied from the input with a sentinel `PageVerdict`, no rasterize, no Tesseract).
+- **Whole-doc shortcut**: when **no** page meets the threshold, `compress()` skips Sanitize/Recompress entirely and returns the input bytes unchanged with `status="passed_through"` and warning code `passthrough-no-image-content`. This is distinct from the partial-passthrough case where some pages are verbatim and others are MRC'd; partial passthrough still produces a recompressed output and records the verbatim page indices in `CompressReport.pages_skipped_verbatim` (0-indexed).
+- **Disable conditions**: the gate is bypassed (every page forced through full MRC) when `--re-ocr`, `--strip-text-layer`, `--legal-mode`, or `--verify` (i.e. `skip_verify=False`) is set, or when `--per-page-min-image-fraction 0` is passed. `--verify` disables the gate because a verbatim page would feed a synthetic `PageVerdict` into `_VerifierAggregator` and pollute the aggregate ssim/lev/digit metrics. A defensive assert in the worker fast-path traps any future regression that lets `skip_verify=False` leak into a verbatim slice.
+- **Conservative biases**: nested Form XObjects are not recursively walked (image bytes hidden inside a Form sub-resource don't count toward the numerator), and parent-inherited `/Resources` from the `/Pages` tree are not consulted (only the page's direct `/Resources/XObject` dict). Both biases under-count image bytes, pushing borderline pages toward MRC — the safe direction for a pre-filter.
+
+See SPEC.md §4.1b for the precise behavior contract.
+
 ### 4.2 Sanitize
 
 Goals: strip hostile or unneeded content, pre-repair structural issues, normalize to a canonical form that Recompress can operate on safely.
@@ -170,12 +182,13 @@ Ratio comes primarily from aggressive background downsampling + color→mono det
 
 ### 4.4 Passthrough floors
 
-After Recompress, `compress()` checks two passthrough conditions before returning the compressed result:
+`compress()` checks three passthrough conditions across the pipeline; any one returning `status="passed_through"` short-circuits everything downstream:
 
-- **`min_input_mb`**: if the raw input is smaller than this floor, no compression is attempted at all; the input bytes are returned unchanged with `status="passed_through"`. Checked in the input-policy gate (§4.1a), not post-compression.
-- **`min_ratio`**: if the achieved compression ratio falls below this floor (default `1.5×`), the input bytes are returned unchanged with `status="passed_through"`. This avoids delivering a "compressed" output that is actually larger or only marginally smaller than the original.
+- **`min_input_mb`** (pre-Sanitize): if the raw input is smaller than this floor, no compression is attempted at all; the input bytes are returned unchanged. Checked in the input-policy gate (§4.1a).
+- **`min_image_byte_fraction`** (pre-Sanitize): if no page meets the per-page MRC gate's image-byte threshold, the whole document is returned unchanged with warning `passthrough-no-image-content`. Checked in the per-page MRC gate (§4.1b).
+- **`min_ratio`** (post-Recompress): if the achieved compression ratio falls below this floor (default `1.5×`), the input bytes are returned unchanged. This avoids delivering a "compressed" output that is actually larger or only marginally smaller than the original.
 
-Both conditions are declared in `CompressOptions`. Callers can detect passthrough via `CompressReport.status`.
+All three conditions are declared in `CompressOptions`. Callers can detect passthrough via `CompressReport.status`.
 
 ### 4.5 Chunked output
 
@@ -284,7 +297,7 @@ Both shapes run the engine **locally** on the user's machine. No network, no ser
 Same engine, two ways to get it onto a machine:
 
 - **Python package** (`pip install pdf-smasher`) — installs the `hankpdf` console script plus the importable Python API (`from pdf_smasher import compress, CompressOptions`). Primary target. Users install the non-Python native deps (Tesseract, jbig2enc) via their system package manager — one line on every major OS, documented in `docs/INSTALL.md`. Wheel is published to PyPI.
-- **Docker image** (`ghcr.io/ourorg/pdf-smasher:X.Y`) — ~300 MB multi-arch image with all native deps (pdfium, Tesseract, jbig2enc, OpenJPEG, qpdf) baked in. For users who don't want to manage native deps on the host; for CI pipelines; for SFTP upload wrappers; for sealed execution environments. Non-root user, writable `/tmp`, read-only rootfs friendly.
+- **Docker image** (`ghcr.io/hank-ai/hankpdf:X.Y`) — ~300 MB multi-arch image with all native deps (pdfium, Tesseract, jbig2enc, OpenJPEG, qpdf) baked in. For users who don't want to manage native deps on the host; for CI pipelines; for SFTP upload wrappers; for sealed execution environments. Non-root user, writable `/tmp`, read-only rootfs friendly.
 
 Contract details — flags, exit codes, JSON report schema — in [SPEC.md §2](SPEC.md).
 
@@ -306,7 +319,7 @@ The single engine is exposed through a unified `compress(bytes, CompressOptions)
 
 `compress()` also accepts an optional `progress_callback: Callable[[ProgressEvent], None]` argument. The CLI wires this to tqdm progress bars for both the MRC and image-export paths. `ProgressEvent` carries a `verifier` field that distinguishes `"skipped"` when `skip_verify=True` is set, so the live bar never reports false verifier progress (see §5 on verifier honesty).
 
-`CompressReport.schema_version` is currently **2**. A migration note for consumers reading v1 reports is in SPEC §11.1.
+`CompressReport.schema_version` is currently **4**. v4 (additive over v3) adds `pages_skipped_verbatim: tuple[int, ...]` and the per-page-gate warning codes (`passthrough-no-image-content`, `pages-skipped-verbatim-N`). A migration note for consumers reading earlier-version reports is in SPEC §11.1.
 
 Configuration precedence: command-line flag > environment variable > config file > built-in default.
 
@@ -324,6 +337,19 @@ HankPDF runs on the user's machine. We are not a Business Associate, HIPAA cover
 - **Release artifact integrity**: PyPI upload via trusted publishing (GitHub OIDC, no long-lived tokens); GHCR image via GitHub OIDC; GitHub Releases with SHA-256 checksums in release notes. Users can verify downloaded artifacts against published checksums. No separate code-signing infrastructure because we don't ship platform-native binaries.
 
 **If a user embeds HankPDF inside their own HIPAA-covered pipeline**, that pipeline's compliance is the user's responsibility. HankPDF makes that easier by never reaching off-machine, but we don't carry a BAA because there's no service to carry one against.
+
+### 11.1 Render-size protection (two-tier)
+
+Two independent caps protect against decompression-bomb PDFs that would allocate billions of pixels:
+
+1. **Pre-allocation pixel-count guard.** `pdf_smasher.engine._render_safety.check_render_size(width_pt, height_pt, dpi)` is called BEFORE pdfium allocates the bitmap. It computes the target pixel dimensions from the page geometry and refuses with `pdf_smasher.exceptions.DecompressionBombError` if the product would exceed `pdf_smasher._limits.MAX_BOMB_PIXELS` (~715 Mpx, sized so an RGB raster fits in 2 GiB). Both the compress path (`rasterize.rasterize_page`) and the image-export path (`image_export._iter_pages_impl`) call this helper. Tests in `tests/unit/engine/test_render_safety.py`.
+2. **Post-decode Pillow guard.** `PIL.Image.MAX_IMAGE_PIXELS` is set to the SAME value by `pdf_smasher._pillow_hardening.ensure_capped()` so any image opened through Pillow (e.g., a per-page raster being re-encoded) hits the same ceiling. Pillow raises `PIL.Image.DecompressionBombError`, which our engine modules re-raise as our typed `DecompressionBombError` for consistent CLI exit-code mapping (`EXIT_DECOMPRESSION_BOMB=16`).
+
+Both caps share `pdf_smasher._limits.MAX_BOMB_PIXELS` as the canonical numeric value — the `tests/unit/test_pillow_hardening.py` suite asserts they don't drift apart.
+
+Callers that knowingly need a higher ceiling (e.g., a future per-page render CLI for engineering drawings) can pass `max_pixels=N` to `check_render_size` for a per-call override; there is intentionally no override for the Pillow cap (it's a global SECURITY boundary, not a tuning knob).
+
+**Operational note.** The Pillow cap (`PIL.Image.MAX_IMAGE_PIXELS`) is a process-global value installed at import time. There is currently no public API to relax it for a specific job — the per-call `max_pixels` override on `check_render_size` only affects our pre-allocation guard, not Pillow's. Workloads needing pages larger than ~715 Mpx require either an external pre-rasterization step or a forked build that adjusts `_limits.MAX_BOMB_PIXELS`. We may add a context-manager API in a future major version if the use-case shows up.
 
 ## 12. What we're explicitly not building
 

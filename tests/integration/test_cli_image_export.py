@@ -186,7 +186,7 @@ def test_image_export_routes_malicious_to_specific_exit(tmp_path, monkeypatch) -
     import pdf_smasher.cli.main as cli_main
     from pdf_smasher.exceptions import MaliciousPDFError
 
-    def fake_triage(_b):  # type: ignore[no-untyped-def]
+    def fake_triage(_b, **_kwargs):  # type: ignore[no-untyped-def]
         msg = "synthetic malicious content"
         raise MaliciousPDFError(msg)
 
@@ -205,7 +205,7 @@ def test_image_export_routes_bomb_to_specific_exit(tmp_path, monkeypatch) -> Non
     import pdf_smasher.cli.main as cli_main
     from pdf_smasher.exceptions import DecompressionBombError
 
-    def fake_triage(_b):  # type: ignore[no-untyped-def]
+    def fake_triage(_b, **_kwargs):  # type: ignore[no-untyped-def]
         msg = "synthetic bomb"
         raise DecompressionBombError(msg)
 
@@ -237,7 +237,7 @@ def test_image_export_pad_width_scales_past_999(tmp_path, monkeypatch) -> None: 
         is_certified_signature = False
         is_oversize = False
 
-    def fake_triage(_pdf_bytes):  # type: ignore[no-untyped-def]
+    def fake_triage(_pdf_bytes, **_kwargs):  # type: ignore[no-untyped-def]
         return _FakeTri
 
     def fake_enforce(_tri, _opts, _in_bytes):  # type: ignore[no-untyped-def]
@@ -277,7 +277,7 @@ def test_image_export_partial_failure_emits_summary(tmp_path, capsys, monkeypatc
     # Monkeypatch rasterize_page to fail on page index 2 (1-indexed page 3).
     original = ie.rasterize_page
 
-    def flaky(pdf_bytes, *, page_index, dpi):  # type: ignore[no-untyped-def]
+    def flaky(pdf_bytes, *, page_index, dpi, **_kwargs):  # type: ignore[no-untyped-def]
         if page_index == 2:
             msg = "synthetic pdfium failure on page 3"
             raise RuntimeError(msg)

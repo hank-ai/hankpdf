@@ -159,6 +159,7 @@ class _WorkerInput:
     is_safe: bool
     lev_ceiling: float
     ssim_floor: float
+    mrc_worthy: bool = True  # False = verbatim-copy fast path; default True for back-compat
 
 
 @_dc(frozen=True)
@@ -169,7 +170,7 @@ class _PageResult:
 
     page_index: int
     composed_bytes: bytes
-    strategy_name: str  # one of "text_only" / "photo_only" / "mixed"
+    strategy_name: str  # one of "text_only" / "photo_only" / "mixed" / "already_optimized"
     verdict: Any  # PageVerdict — engine.verifier.PageVerdict
     per_page_warnings: tuple[str, ...]
     input_bytes: int
@@ -271,12 +272,19 @@ def _enforce_input_policy(
         raise SignedPDFError(msg)
 
     if options.max_pages is not None and tri.pages > options.max_pages:
-        msg = f"input has {tri.pages} pages; max_pages={options.max_pages}"
+        msg = (
+            f"input has {tri.pages} pages; max_pages={options.max_pages} "
+            "(default tightened from unlimited; pass --max-pages 100000 or "
+            "set CompressOptions(max_pages=None) to relax)"
+        )
         raise OversizeError(msg)
 
     input_mb = len(input_data) / (1024 * 1024)
     if input_mb > options.max_input_mb:
-        msg = f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb}"
+        msg = (
+            f"input {input_mb:.1f} MB exceeds max_input_mb={options.max_input_mb} "
+            "(default tightened from 2000.0; pass --max-input-mb 2000 to relax)"
+        )
         raise OversizeError(msg)
 
 
@@ -367,19 +375,113 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     ssim_floor = winput.ssim_floor
     warnings: list[str] = []
 
-    # --- Rasterize input ---
-    raster = rasterize_page(winput.input_page_pdf, page_index=0, dpi=winput.source_dpi)
+    # ── Per-page MRC gate ────────────────────────────────────────────
+    # If the page wasn't MRC-worthy (image-byte-fraction below the
+    # threshold), skip the entire pipeline — return the unchanged
+    # 1-page slice as the composed bytes, with a trivially-passing
+    # verdict (same shape as skip_verify uses). The whole-doc-shortcut
+    # in compress() catches the all-pages-verbatim case at the top
+    # level; this fast path is for the partial-MRC case (some pages
+    # MRC, some pages verbatim) where a worker still gets dispatched.
+    if not winput.mrc_worthy:
+        # Synthetic verdict invariant: this fast path emits
+        # _PageVerdict(lev=1.0, ssim_global=0.0, ssim_tile_min=0.0, ...)
+        # — sentinel values, not real measurements. They are SAFE only
+        # because compress()'s _force_full_pipeline interlock disables
+        # the gate when --verify is on, so verbatim verdicts never feed
+        # _VerifierAggregator.merge(). If a future change relaxes the
+        # interlock (or adds a new gate-disable path), the invariant
+        # below will trip first instead of silently corrupting metrics.
+        if not options.skip_verify:
+            msg = (
+                "verbatim worker fast-path reached with skip_verify=False; "
+                "synthetic PageVerdict would pollute _VerifierAggregator. "
+                "Check the _force_full_pipeline interlock in compress()."
+            )
+            raise AssertionError(msg)
+        from pdf_smasher.engine.verifier import PageVerdict as _PageVerdict
 
-    # Input OCR is needed when:
-    #   - options.ocr (for add_text_layer positioning), OR
-    #   - verifier runs (for drift comparison)
-    # When BOTH are disabled (--skip-verify --no-ocr), skip Tesseract entirely.
-    # Tesseract is subprocess-based and releases the GIL during wait, so we
-    # kick input OCR off in a background thread NOW — it runs concurrently
-    # with mask/classify/compose and is awaited when we need the text.
-    need_input_ocr = bool(options.ocr) or not options.skip_verify
-    _input_ocr_future: Any = None
+        _verdict = _PageVerdict(
+            page_index=-1,
+            passed=True,
+            lev=1.0,
+            ssim_global=0.0,
+            ssim_tile_min=0.0,
+            digits_match=False,
+            color_preserved=False,
+        )
+        return _PageResult(
+            page_index=winput.page_index,
+            composed_bytes=winput.input_page_pdf,
+            strategy_name="already_optimized",
+            verdict=_verdict,
+            per_page_warnings=(),
+            input_bytes=len(winput.input_page_pdf),
+            output_bytes=len(winput.input_page_pdf),
+            ratio=1.0,
+            worker_wall_ms=int((time.monotonic() - _worker_t0) * 1000),
+        )
+
+    # --- Rasterize input ---
+    raster = rasterize_page(
+        winput.input_page_pdf, page_index=0, dpi=winput.source_dpi, password=None
+    )
+
+    # ── Text-layer policy (see CompressOptions docstring) ────────────────
+    # Defaults: preserve any usable upstream text layer. --ocr fills gaps
+    # via Tesseract. --strip-text-layer disables both. --re-ocr forces
+    # Tesseract even when native is good.
+    from pypdfium2 import PdfDocument as _Pdfium
+
+    _doc = _Pdfium(winput.input_page_pdf)
+    try:
+        _tp = _doc[0].get_textpage()
+        try:
+            _native_text = _tp.get_text_range()
+        finally:
+            _tp.close()
+    finally:
+        _doc.close()
+    _has_native_text = bool(_native_text and _native_text.strip())
+
+    # Pre-load native word boxes (cheap) so the quality heuristic + the
+    # decision below have data to work with. Skip entirely if the user
+    # explicitly opted out via --strip-text-layer or --re-ocr.
     word_boxes: list[Any] = []
+    _native_decent = False
+    if _has_native_text and not options.strip_text_layer and not options.re_ocr:
+        from pdf_smasher.engine.text_layer import (
+            extract_native_word_boxes as _extract_native,
+        )
+        from pdf_smasher.engine.text_layer import is_native_text_decent
+
+        _native_boxes = _extract_native(
+            winput.input_page_pdf,
+            page_index=0,
+            raster_width_px=raster.size[0],
+            raster_height_px=raster.size[1],
+        )
+        if _native_boxes:
+            _native_decent = is_native_text_decent(_native_boxes)
+            if _native_decent:
+                word_boxes = _native_boxes
+            elif options.ocr:
+                # Native exists but is garbage; we'll let the Tesseract path
+                # below produce fresh word boxes and ignore _native_boxes.
+                warnings.append(f"page-{i + 1}-native-text-quality-poor-using-tesseract")
+
+    # Tesseract input OCR runs when:
+    #   - native unusable AND user wants searchability (--ocr OR --re-ocr), OR
+    #   - native unusable AND verifier runs (needs comparable input text), OR
+    #   - --re-ocr is set (always replace native with Tesseract).
+    _need_tesseract_for_text_layer = (
+        not options.strip_text_layer
+        and not word_boxes
+        and (bool(options.ocr) or bool(options.re_ocr))
+    )
+    _need_tesseract_for_verifier = (not options.skip_verify) and not _has_native_text
+    need_input_ocr = _need_tesseract_for_text_layer or _need_tesseract_for_verifier
+    _input_ocr_future: Any = None
     ocr_text: str = ""
     # ExitStack guarantees the OCR ThreadPoolExecutor's __exit__ fires on
     # any path out of this block (happy return OR exception), which drains
@@ -411,19 +513,17 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
                 timeout_seconds=options.per_page_timeout_seconds,
             )
 
-        # Source-truth: prefer native PDF text layer when present.
-        # (Still cheap even with skip_verify; just a textpage read.)
-        from pypdfium2 import PdfDocument as _Pdfium
-
-        _doc = _Pdfium(winput.input_page_pdf)
-        try:
-            _tp = _doc[0].get_textpage()
-            try:
-                _native_text = _tp.get_text_range()
-            finally:
-                _tp.close()
-        finally:
-            _doc.close()
+        # Output OCR is also still kicked off below when --verify is on; the
+        # ThreadPoolExecutor for that case must exist. Create it lazily here
+        # if we skipped the input-OCR submission but the verifier will need
+        # an output-OCR future. (When skip_verify is True AND native text
+        # supplied word_boxes, no pool at all is needed — saves a thread.)
+        if _ocr_pool is None and not options.skip_verify:
+            _ocr_pool = ThreadPoolExecutor(max_workers=1)
+            _pool2 = _ocr_pool
+            _ocr_stack.callback(
+                lambda: _pool2.shutdown(wait=False, cancel_futures=True),
+            )
 
         def _await_input_ocr() -> None:
             """Populate word_boxes + ocr_text from the background OCR future.
@@ -434,10 +534,9 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             word_boxes = _input_ocr_future.result()
             ocr_text = " ".join(b.text for b in word_boxes)
 
-        # If native text is present we can skip waiting on OCR for the verifier
-        # ground-truth (native wins anyway). But we still need word_boxes later
-        # if options.ocr is set (for text-layer positioning).
-        if _native_text and _native_text.strip():
+        # Verifier ground-truth: native text wins when present (faithful).
+        # Otherwise wait on Tesseract.
+        if _has_native_text:
             input_ocr_text = _native_text.strip()
         else:
             _await_input_ocr()
@@ -452,6 +551,10 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         if options.force_monochrome and _page_has_color(raster):
             warnings.append(f"page-{i + 1}-color-detected-in-monochrome-mode")
 
+        # Defensive: classify_page() never returns ALREADY_OPTIMIZED, and
+        # the per-page mrc_worthy gate above already short-circuited any
+        # verbatim page before we got here. If we ever land here, something
+        # upstream is wrong; keep the AssertionError as a tripwire.
         if strategy == PageStrategy.ALREADY_OPTIMIZED:
             msg = (
                 f"page {i + 1}: classify_page returned ALREADY_OPTIMIZED but "
@@ -520,17 +623,25 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             if getattr(_JBIG2_CASCADE_STATE, "tripped", False):
                 warnings.append(f"page-{i + 1}-jbig2-fallback-to-flate")
 
-        if options.ocr:
-            _await_input_ocr()
-            composed = add_text_layer(
-                composed,
-                page_index=0,
-                word_boxes=word_boxes,
-                raster_width_px=raster.size[0],
-                raster_height_px=raster.size[1],
-                page_width_pt=width_pt,
-                page_height_pt=height_pt,
-            )
+        # Add a text layer whenever we have word boxes — covers both:
+        #  (a) native-preserved (default when input had a usable text layer)
+        #  (b) Tesseract output from --ocr / --re-ocr / poor-native fallback
+        # --strip-text-layer suppresses the layer entirely.
+        if not options.strip_text_layer:
+            # If --ocr or --re-ocr triggered Tesseract and native didn't
+            # already fill word_boxes, await the input-OCR future now.
+            if not word_boxes and _need_tesseract_for_text_layer:
+                _await_input_ocr()
+            if word_boxes:
+                composed = add_text_layer(
+                    composed,
+                    page_index=0,
+                    word_boxes=word_boxes,
+                    raster_width_px=raster.size[0],
+                    raster_height_px=raster.size[1],
+                    page_width_pt=width_pt,
+                    page_height_pt=height_pt,
+                )
 
         # --- Streaming verify ---
         # When skip_verify is set, synthesize a trivially-passing verdict and
@@ -549,7 +660,9 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
                 color_preserved=False,
             )
         else:
-            output_raster = rasterize_page(composed, page_index=0, dpi=winput.source_dpi)
+            output_raster = rasterize_page(
+                composed, page_index=0, dpi=winput.source_dpi, password=None
+            )
             # Kick off output OCR in parallel with awaiting the input OCR (if
             # we haven't already needed it). Two tesseract subprocesses run
             # concurrently inside this worker — each uses 1 thread (OMP pinned)
@@ -666,11 +779,11 @@ def _extract_ground_truth_text(
     return fallback_ocr_text
 
 
-def triage(input_data: bytes) -> TriageReport:
+def triage(input_data: bytes, *, password: str | None = None) -> TriageReport:
     """Cheap structural scan. Never decodes image streams. See SPEC.md §4."""
     from pdf_smasher.engine.triage import triage as _triage
 
-    return _triage(input_data)
+    return _triage(input_data, password=password)
 
 
 def compress(
@@ -768,7 +881,7 @@ def compress(
 
     # --- Triage ---
     _emit("triage", f"triage: {len(input_data):,} bytes input")
-    tri = _triage(input_data)
+    tri = _triage(input_data, password=options.password)
 
     # Validate + apply only_pages filter.
     if only_pages is not None:
@@ -823,6 +936,65 @@ def compress(
             correlation_id=correlation_id,
         )
 
+    # ── Per-page MRC gate ────────────────────────────────────────────
+    # Score every page once (cheap pikepdf walk: image_xobject_bytes /
+    # page_byte_budget). True = MRC-worthy, False = verbatim copy.
+    # If no page meets the threshold AND no flag forces full MRC, the
+    # input passes through unchanged at <1s wall. Otherwise the
+    # per-page flag is threaded into _WorkerInput and the worker
+    # short-circuits the pipeline for verbatim pages.
+    #
+    # The gate is disabled (every page MRC'd) when:
+    #   --re-ocr            → Tesseract on every page; verbatim incompatible.
+    #   --strip-text-layer  → no-text-layer output; verbatim preserves it.
+    #   --legal-mode        → CCITT G4 archival profile re-encodes every page;
+    #                          verbatim copy would defeat the legal codec
+    #                          guarantee.
+    #   --verify (skip_verify=False) → verbatim pages would feed synthetic
+    #                          PageVerdict values into _VerifierAggregator
+    #                          and pollute the aggregate ssim/lev/digit
+    #                          metrics on partial-passthrough runs.
+    from pdf_smasher.engine.page_classifier import score_pages_for_mrc
+
+    _force_full_pipeline = (
+        bool(options.re_ocr)
+        or bool(options.strip_text_layer)
+        or bool(options.legal_codec_profile)
+        or not options.skip_verify
+    )
+    if _force_full_pipeline:
+        _mrc_flags = [True] * tri.pages
+    else:
+        _mrc_flags = score_pages_for_mrc(
+            input_data,
+            password=options.password,
+            min_image_byte_fraction=options.min_image_byte_fraction,
+        )
+
+    # Defensive: if the classifier disagreed with triage on the page count
+    # (qpdf-repaired inputs, or a future pikepdf upgrade that changes the
+    # iteration semantics), surface the contract drift now rather than
+    # IndexError-ing deep in the per-page loop. Coerce to triage's count
+    # (the source of truth for everything downstream) and emit a warning.
+    if len(_mrc_flags) != tri.pages:
+        _mrc_flags = (_mrc_flags + [True] * tri.pages)[: tri.pages]
+        # Note: this falls through to per-page processing without a
+        # CompressReport.warnings entry today (warnings is built later);
+        # if the drift is ever observed in production, wire a code.
+
+    if not any(_mrc_flags):
+        # Whole-doc shortcut: every page is verbatim → return input unchanged.
+        # compress() returns tuple[bytes, CompressReport]; the unchanged input
+        # is the byte-identical first element.
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=int((time.monotonic() - t0) * 1000),
+            reason="no page meets the image-content threshold",
+            warning_code="passthrough-no-image-content",
+            correlation_id=correlation_id,
+        )
+
     # --- Per-page recompress ---
     source_dpi = 200 if options.mode == "fast" else 300
     bg_target_dpi = options.target_bg_dpi
@@ -831,7 +1003,7 @@ def compress(
     import pypdfium2 as pdfium
 
     # We need page dimensions — open with pdfium once for sizing.
-    pdf_dims = pdfium.PdfDocument(input_data)
+    pdf_dims = pdfium.PdfDocument(input_data, password=options.password)
     page_sizes: list[tuple[float, float]] = []
     try:
         for i in range(tri.pages):
@@ -844,7 +1016,7 @@ def compress(
     # or serial) gets only its own 1-page PDF, never the whole source.
     # Byproduct: length → per-page input bytes used for honest ratio display.
     single_page_pdfs: dict[int, bytes] = {}
-    with pikepdf.open(io.BytesIO(input_data)) as _src_split:
+    with pikepdf.open(io.BytesIO(input_data), password=options.password or "") as _src_split:
         for i in _selected_indices:
             _single = pikepdf.new()
             try:
@@ -883,6 +1055,7 @@ def compress(
     # Page results accumulate by original index; output merges in sorted order
     # regardless of completion order (matters when parallel).
     page_pdfs_by_index: dict[int, bytes] = {}
+    _verbatim_pages: set[int] = set()
 
     _worker_wall_ms_total: list[int] = []
 
@@ -892,6 +1065,8 @@ def compress(
         warnings_list.extend(result.per_page_warnings)
         verifier_agg.merge(result.page_index, result.verdict)
         strategy_counts[result.strategy_name] += 1
+        if result.strategy_name == "already_optimized":
+            _verbatim_pages.add(result.page_index)
         _worker_wall_ms_total.append(result.worker_wall_ms)
         # Under skip_verify the worker synthesizes a trivially-passing
         # verdict so it can still be aggregated; don't let that leak
@@ -931,6 +1106,7 @@ def compress(
             is_safe=is_safe,
             lev_ceiling=lev_ceiling,
             ssim_floor=ssim_floor,
+            mrc_worthy=_mrc_flags[i],
         )
         for i in _selected_indices
     ]
@@ -1220,7 +1396,7 @@ def compress(
     input_sha = hashlib.sha256(input_data).hexdigest()
     output_sha = hashlib.sha256(output_bytes).hexdigest()
     try:
-        canonical_sha: str | None = canonical_input_sha256(input_data)
+        canonical_sha: str | None = canonical_input_sha256(input_data, password=options.password)
     except pikepdf.PdfError:
         canonical_sha = None
 
@@ -1235,6 +1411,14 @@ def compress(
     # factory.
     from pdf_smasher.audit import resolve_build_info
     from pdf_smasher.types import _new_correlation_id
+
+    # If some-but-not-all pages were verbatim, emit an aggregate warning
+    # so consumers see in the report that the gate fired on some pages.
+    # Dash separator (not colon) for grammar consistency with the existing
+    # `verifier-fail-...-pages-...` pattern. The actual indices are on
+    # report.pages_skipped_verbatim; the count here is for log-grep.
+    if _verbatim_pages and len(_verbatim_pages) < tri.pages:
+        warnings_list.append(f"pages-skipped-verbatim-{len(_verbatim_pages)}")
 
     report = CompressReport(
         status=status,
@@ -1251,6 +1435,7 @@ def compress(
         output_sha256=output_sha,
         canonical_input_sha256=canonical_sha,
         warnings=tuple(warnings_list),
+        pages_skipped_verbatim=tuple(sorted(_verbatim_pages)),
         strategy_distribution=dict(strategy_counts),
         build_info=resolve_build_info(),
         correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),

@@ -13,6 +13,7 @@ remain.
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import pikepdf
@@ -21,10 +22,68 @@ import pytest
 from pdf_smasher.cli.main import main
 
 
+def _install_flaky_partial_writer(
+    monkeypatch,  # type: ignore[no-untyped-def]
+    tmp_path: pathlib.Path,
+    fail_after_n: int,
+    msg: str,
+) -> None:
+    """Make every ``.partial`` write inside ``tmp_path`` raise ``OSError``
+    once ``calls >= fail_after_n``. Covers both POSIX (``os.write`` via
+    ``os.open``) and Windows (``Path.write_bytes``) paths through
+    ``_atomic_write_bytes``.
+    """
+    real_os_open = os.open
+    real_os_write = os.write
+    real_path_write = pathlib.Path.write_bytes
+    calls = {"n": 0}
+    fd_to_partial: dict[int, pathlib.Path] = {}
+
+    def fake_os_open(path, flags, mode=0o777, *, dir_fd=None):  # type: ignore[no-untyped-def]
+        fd = real_os_open(path, flags, mode, dir_fd=dir_fd)
+        try:
+            p = pathlib.Path(str(path))
+            if p.parent == tmp_path and p.suffix == ".partial":
+                fd_to_partial[fd] = p
+        except OSError, ValueError:
+            pass
+        return fd
+
+    def fake_os_write(fd: int, data: bytes) -> int:
+        if fd in fd_to_partial:
+            calls["n"] += 1
+            if calls["n"] >= fail_after_n:
+                raise OSError(msg)
+        return real_os_write(fd, data)
+
+    def fake_path_write(self: pathlib.Path, data: bytes) -> int:
+        if self.parent == tmp_path and self.suffix == ".partial":
+            calls["n"] += 1
+            if calls["n"] >= fail_after_n:
+                raise OSError(msg)
+        return real_path_write(self, data)
+
+    monkeypatch.setattr(os, "open", fake_os_open)
+    monkeypatch.setattr(os, "write", fake_os_write)
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fake_path_write)
+
+
 def _make_pdf_with_payload(tmp_path, n: int = 3):  # type: ignore[no-untyped-def]
     pdf = pikepdf.new()
     for _ in range(n):
-        pdf.add_blank_page(page_size=(612, 792))
+        page = pdf.add_blank_page(page_size=(612, 792))
+        img = pdf.make_stream(
+            b"\x00" * 2048,
+            Type=pikepdf.Name.XObject,
+            Subtype=pikepdf.Name.Image,
+            Width=10,
+            Height=10,
+            BitsPerComponent=8,
+            ColorSpace=pikepdf.Name.DeviceRGB,
+            Filter=pikepdf.Name.FlateDecode,
+        )
+        page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im0=img))
+        page.Contents = pdf.make_stream(b"q 612 0 0 792 0 0 cm /Im0 Do Q\n")
     p = tmp_path / "in.pdf"
     pdf.save(p)
     return p
@@ -42,23 +101,9 @@ def test_chunk_write_failure_leaves_no_partial_final_file(
     in_path = _make_pdf_with_payload(tmp_path, n=3)
     out_path = tmp_path / "smol.pdf"
 
-    # Flaky write: succeed on chunk 1, fail on chunk 2+.
-    real_write = pathlib.Path.write_bytes
-    calls = {"n": 0}
-
-    def flaky(self: pathlib.Path, data: bytes) -> int:
-        # Only intercept .partial writes in the chunk target dir to keep
-        # pdfium's internal scratch writes untouched. The helper writes
-        # to a sibling .partial first; once we see the 2nd such write in
-        # our target directory, detonate.
-        if self.parent == tmp_path and self.suffix == ".partial":
-            calls["n"] += 1
-            if calls["n"] >= 2:
-                msg = "synthetic disk-full"
-                raise OSError(msg)
-        return real_write(self, data)
-
-    monkeypatch.setattr(pathlib.Path, "write_bytes", flaky)
+    # Succeed on chunk 1, fail on chunk 2+. Covers both POSIX and Windows
+    # branches inside _atomic_write_bytes.
+    _install_flaky_partial_writer(monkeypatch, tmp_path, fail_after_n=2, msg="synthetic disk-full")
 
     rc = main(
         [
@@ -98,18 +143,9 @@ def test_image_export_partial_write_is_atomic(
     in_path = _make_pdf_with_payload(tmp_path, n=3)
     out_path = tmp_path / "page.jpg"
 
-    real_write = pathlib.Path.write_bytes
-    calls = {"n": 0}
-
-    def flaky(self: pathlib.Path, data: bytes) -> int:
-        if self.parent == tmp_path and self.suffix == ".partial":
-            calls["n"] += 1
-            if calls["n"] >= 2:
-                msg = "synthetic image-export disk-full"
-                raise OSError(msg)
-        return real_write(self, data)
-
-    monkeypatch.setattr(pathlib.Path, "write_bytes", flaky)
+    _install_flaky_partial_writer(
+        monkeypatch, tmp_path, fail_after_n=2, msg="synthetic image-export disk-full"
+    )
 
     # Force multi-page so the helper is hit multiple times.
     with pytest.raises(OSError, match=r"disk-full"):

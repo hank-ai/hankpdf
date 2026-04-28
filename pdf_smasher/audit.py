@@ -31,11 +31,12 @@ def _probe_tool_version(binary: str) -> str:
     constructable even on a machine where qpdf has been uninstalled
     between CLI startup and report emission.
     """
-    if shutil.which(binary) is None:
+    resolved = shutil.which(binary)
+    if resolved is None:
         return "?"
     try:
         out = subprocess.run(  # noqa: S603 — fixed arg0, no shell
-            [binary, "--version"],
+            [resolved, "--version"],
             capture_output=True,
             check=False,
             timeout=_PROBE_TIMEOUT_SEC,

@@ -1,4 +1,5 @@
 .firecrawl/
+.claude/
 
 # Python
 __pycache__/

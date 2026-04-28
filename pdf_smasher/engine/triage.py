@@ -13,7 +13,7 @@ from typing import Literal
 
 import pikepdf
 
-from pdf_smasher.exceptions import CorruptPDFError
+from pdf_smasher.exceptions import CorruptPDFError, MaliciousPDFError
 from pdf_smasher.types import TriageReport
 
 TriageClassification = Literal["proceed", "refuse", "pass-through", "require-password"]
@@ -28,27 +28,80 @@ def _detect_linearized(pdf_bytes: bytes) -> bool:
     return bool(_LINEARIZED_MARKER.search(prefix))
 
 
+def _canonical_oid(obj: object) -> int | None:
+    """Canonical identity for pikepdf objects, or ``None`` for direct objects.
+
+    pikepdf returns a fresh Python wrapper each time you traverse the
+    same indirect reference, so plain ``id(obj)`` does not dedupe and
+    the cycle-detection set grows unboundedly. ``objgen`` (a tuple of
+    object number + generation) is the PDF-spec canonical identity for
+    indirect refs; we hash it.
+
+    **Direct (inline) objects return ``None``** — pikepdf reports
+    ``objgen=(0, 0)`` for every direct Dictionary or Array regardless of
+    position in the tree, so objgen cannot disambiguate them. ``id()``
+    on the Python wrapper is also unsafe: pikepdf creates a fresh
+    wrapper per access and Python's allocator can recycle the address of
+    a recently-GC'd wrapper, making two distinct direct siblings collide
+    intermittently (verified by macOS/Windows CI flakes on the
+    JS-detection regression test). Returning ``None`` tells the walker
+    "don't dedup this object" — which is correct because a well-formed
+    PDF cannot form cycles through direct objects (cycles require
+    indirect references). The walker still bounds recursion via
+    ``max_depth``.
+
+    ``getattr`` defends against future pikepdf versions whose ``objgen``
+    raises on access for direct objects; we treat any failure as direct.
+    """
+    try:
+        objgen = getattr(obj, "objgen", None)
+    except Exception:  # noqa: BLE001 — defensive; any pikepdf error → treat as direct
+        return None
+    if objgen is not None and objgen != (0, 0):
+        return hash(objgen)
+    return None
+
+
+def _mark_visited_indirect(obj: object, visited: set[int]) -> bool:
+    """Add ``obj``'s canonical id to ``visited`` if it's an indirect ref.
+
+    Returns ``True`` if the caller should skip recursing (already visited).
+    Direct objects always return ``False`` (no dedup; they can't form
+    cycles in a well-formed PDF).
+    """
+    oid = _canonical_oid(obj)
+    if oid is None:
+        return False
+    if oid in visited:
+        return True
+    visited.add(oid)
+    return False
+
+
 def _walk_dict_for_names(
     obj: object,
     target_names: frozenset[str],
     visited: set[int],
     depth: int = 0,
-    max_depth: int = 12,
+    max_depth: int = 64,
 ) -> set[str]:
     """Walk a pikepdf Object tree; return the subset of ``target_names`` found as keys.
 
     ``target_names`` is compared against dict keys as plain strings (leading
-    slash stripped). Visited object IDs are tracked to avoid recursion on
-    circular references.
+    slash stripped). Visited indirect object identities are tracked via
+    :func:`_canonical_oid` (which returns ``None`` for direct objects). The
+    cycle-detection set therefore only contains indirect refs, where pikepdf
+    wraps the same underlying object in fresh Python wrappers per access;
+    direct objects can't form cycles in a well-formed PDF and are never
+    deduplicated, so the depth cap is what bounds adversarial input.
     """
     hits: set[str] = set()
     if depth > max_depth:
-        return hits
+        msg = f"nested resource tree exceeds inspection depth ({max_depth}); refusing"
+        raise MaliciousPDFError(msg)
     if isinstance(obj, pikepdf.Dictionary):
-        oid = id(obj)
-        if oid in visited:
+        if _mark_visited_indirect(obj, visited):
             return hits
-        visited.add(oid)
         for key in obj.keys():  # pikepdf Dictionary iteration works at runtime
             bare = str(key).lstrip("/")
             if bare in target_names:
@@ -56,10 +109,8 @@ def _walk_dict_for_names(
         for val in obj.values():  # type: ignore[operator]
             hits |= _walk_dict_for_names(val, target_names, visited, depth + 1, max_depth)
     elif isinstance(obj, pikepdf.Array):
-        oid = id(obj)
-        if oid in visited:
+        if _mark_visited_indirect(obj, visited):
             return hits
-        visited.add(oid)
         for item in obj:  # type: ignore[attr-defined]
             hits |= _walk_dict_for_names(item, target_names, visited, depth + 1, max_depth)
     return hits
@@ -161,14 +212,14 @@ def _classify(
     return "proceed"
 
 
-def triage(pdf_bytes: bytes) -> TriageReport:
+def triage(pdf_bytes: bytes, *, password: str | None = None) -> TriageReport:
     """Classify a PDF input. See SPEC.md §4 for the full handling taxonomy."""
     is_linearized = _detect_linearized(pdf_bytes)
 
     # Probe encryption separately — pikepdf.open raises on missing password.
     is_encrypted = False
     try:
-        pdf = pikepdf.open(io.BytesIO(pdf_bytes))
+        pdf = pikepdf.open(io.BytesIO(pdf_bytes), password=password or "")
     except pikepdf.PasswordError:
         is_encrypted = True
         # We can still count pages but not inspect objects — return minimal
@@ -193,6 +244,7 @@ def triage(pdf_bytes: bytes) -> TriageReport:
         raise CorruptPDFError(msg) from e
 
     try:
+        report_is_encrypted = bool(pdf.is_encrypted)
         pages = len(pdf.pages)
         is_signed, is_certified = _detect_signature(pdf)
         is_tagged = _detect_tagged(pdf)
@@ -212,7 +264,7 @@ def triage(pdf_bytes: bytes) -> TriageReport:
     return TriageReport(
         pages=pages,
         input_bytes=len(pdf_bytes),
-        is_encrypted=is_encrypted,
+        is_encrypted=report_is_encrypted,
         is_signed=is_signed,
         is_certified_signature=is_certified,
         is_linearized=is_linearized,

@@ -30,8 +30,9 @@ def sha256_of(path: Path) -> str:
 def fetch_one(fixture: dict, *, force: bool = False) -> bool:
     filename = fixture["filename"]
     expected_sha = fixture["sha256"]
-    # Prefer our S3 mirror when present; fall back to upstream URL.
-    source = fixture.get("s3_mirror") or fixture["url"]
+    # Prefer the mirror_url when present (anything urllib can fetch — S3,
+    # HTTPS, file:// — your choice); fall back to upstream URL.
+    source = fixture.get("mirror_url") or fixture["url"]
 
     target = CACHE_DIR / filename
     CACHE_DIR.mkdir(parents=True, exist_ok=True)

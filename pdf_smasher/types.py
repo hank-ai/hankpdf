@@ -41,12 +41,22 @@ class CompressOptions:
     legal_codec_profile: str | None = None
     target_pdf_a: bool = False
 
-    # OCR behavior. Off by default — OCR roughly doubles wall time (verifier
-    # runs Tesseract on input + output rasters regardless, but writing an
-    # embedded text layer to the output is opt-in). Pass --ocr / ocr=True to
-    # produce a searchable output.
+    # OCR behavior:
+    # - The output ALWAYS preserves an upstream text layer when one exists
+    #   (and it passes a quality heuristic) — searchability is not opt-in
+    #   for inputs that arrived searchable.
+    # - ``ocr=True`` means "ensure searchable": if no upstream text layer is
+    #   present, or the existing one looks like garbage, run Tesseract.
+    # - ``strip_text_layer=True`` opts out: the output gets no text layer
+    #   even when the input had one. Use for size-only workflows where
+    #   searchability is unwanted.
+    # - ``re_ocr=True`` opts out the other way: ignore the upstream text
+    #   layer (even if good) and re-run Tesseract. Use when the upstream
+    #   OCR is known to be wrong and you want a fresh Tesseract pass.
     ocr: bool = False
     ocr_language: str = "eng"
+    strip_text_layer: bool = False
+    re_ocr: bool = False
 
     # Safety / behavior gates
     allow_signed_invalidation: bool = False
@@ -66,8 +76,19 @@ class CompressOptions:
     min_ratio: float = 1.5
 
     # Limits
-    max_pages: int | None = None
-    max_input_mb: float = 2000.0
+    max_pages: int | None = 10000  # None disables the gate (programmatic-only escape hatch)
+    max_input_mb: float = 250.0
+    # Per-page MRC gate: pages whose image_xobject_bytes / page_byte_budget
+    # is below this threshold are copied verbatim from the input — no
+    # rasterize, no MRC pipeline, no Tesseract. Default 0.30 catches
+    # native-export PDFs (PowerPoint/Word output) where the MRC pipeline
+    # can't beat already-efficient encoding. Set to 0.0 to disable the
+    # gate (force every page through MRC). The flags strip_text_layer,
+    # re_ocr, AND skip_verify=False (--verify) all also disable the gate
+    # — --verify is included so verbatim pages don't feed synthetic
+    # verdicts into _VerifierAggregator and pollute the aggregate
+    # ssim/lev/digit metrics on partial-passthrough runs.
+    min_image_byte_fraction: float = 0.30
     per_page_timeout_seconds: int = 120
     total_timeout_seconds: int = 1200
     photo_target_dpi: int = 200  # DPI for PHOTO_ONLY pages
@@ -202,19 +223,31 @@ class CompressReport:
     input_sha256: str
     output_sha256: str
     canonical_input_sha256: str | None
+    # 0-indexed page numbers that the per-page gate copied verbatim
+    # from the input rather than running through the MRC pipeline.
+    # Empty tuple = every page was MRC'd OR a whole-doc passthrough
+    # fired (in which case status="passed_through").
+    pages_skipped_verbatim: tuple[int, ...] = ()
     warnings: tuple[str, ...] = ()
     strips: tuple[str, ...] = ()
     reason: str | None = None
-    # Schema v3 since Wave 5 (2026-04-23). v3 adds:
-    #   - CompressReport.build_info (BuildInfo | None) — identity of the
-    #     binary (git sha, build date, dep versions). None only on dev
-    #     checkouts that can't resolve importlib.metadata.version().
-    #   - CompressReport.correlation_id — a UUID4 hex string that also
-    #     appears in every stderr line emitted during this run, letting
-    #     on-call grep a batch log and tie each line back to its report.
-    # v2 (Wave 3) added the "skipped" verifier status, kebab-case warning
-    # codes, and populated strategy_distribution.
-    schema_version: int = field(default=3)
+    # Schema version history (additive only; readers must not assert
+    # equality on the version number — see SPEC.md §11.1).
+    #   v4 (2026-04-27, per-page MRC):
+    #     - CompressReport.pages_skipped_verbatim: tuple[int, ...]
+    #     - CompressOptions.min_image_byte_fraction: float = 0.30
+    #     - new warning codes: passthrough-no-image-content,
+    #       pages-skipped-verbatim-N
+    #   v3 (Wave 5, 2026-04-23):
+    #     - CompressReport.build_info (BuildInfo | None) — identity of the
+    #       binary (git sha, build date, dep versions). None only on dev
+    #       checkouts that can't resolve importlib.metadata.version().
+    #     - CompressReport.correlation_id — a UUID4 hex string that also
+    #       appears in every stderr line emitted during this run, letting
+    #       on-call grep a batch log and tie each line back to its report.
+    #   v2 (Wave 3): "skipped" verifier status, kebab-case warning codes,
+    #     populated strategy_distribution.
+    schema_version: int = field(default=4)
     strategy_distribution: Mapping[str, int] = field(default_factory=dict)
     build_info: BuildInfo | None = None
     correlation_id: str = field(default_factory=_new_correlation_id)

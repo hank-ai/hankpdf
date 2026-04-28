@@ -29,7 +29,10 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from pdf_smasher._pillow_hardening import ensure_capped
 from pdf_smasher.engine.ocr import WordBox
+
+ensure_capped()
 
 _ADAPTIVE_BLOCK_SIZE = 25  # must be odd; OpenCV requirement
 _ADAPTIVE_C = 15  # constant subtracted from the weighted mean

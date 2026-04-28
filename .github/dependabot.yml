@@ -29,3 +29,14 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+
+  # Keeps .pre-commit-config.yaml rev: pins fresh in line with the rest of
+  # the supply-chain hardening (ruff and pre-commit-hooks).
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "pre-commit"
