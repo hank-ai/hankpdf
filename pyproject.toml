@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pdf-smasher"
-version = "0.0.0"
+version = "0.1.0"
 description = "Aggressive, safety-first PDF shrinker for scanned documents. CLI tool: PDF in, shrunk searchable PDF out."
 readme = "README.md"
 requires-python = ">=3.14"

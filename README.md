@@ -4,7 +4,7 @@ Aggressive, safety-first PDF shrinker for scanned documents. Takes a PDF in, pro
 
 _Repo / package name: `pdf-smasher`. Product brand: **HankPDF**._
 
-**Status:** Working CLI + library. 340 tests passing on Linux / macOS / Windows CI. Not yet published to PyPI or GHCR (GHCR pushes are wired up in `docker.yml` and run on the next merge to `main`) — install from the repo (see **Setup** below).
+**Status:** v0.1.0 — first public release. 389 tests passing on Linux / macOS / Windows CI. Available via PyPI (`pip install pdf-smasher`), GHCR (`docker pull ghcr.io/hank-ai/hankpdf:v0.1.0`), or from the repo (see **Setup** below).
 
 ## What it does
 
@@ -260,7 +260,7 @@ hankpdf --version
 ### Running tests
 
 ```bash
-uv run pytest -q                          # all 340 tests (~1 min)
+uv run pytest -q                          # all 389 tests (~1 min)
 uv run pytest tests/unit -v               # unit only (~10 s)
 uv run pytest -m integration -v           # integration only
 uv run pytest --cov=pdf_smasher           # with coverage
