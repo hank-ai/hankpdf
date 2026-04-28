@@ -20,7 +20,7 @@ Takes oversized scanned PDFs (typical input: 200-page, 800 MB image scans) and p
 - **Permissive license throughout** — no AGPL, no commercial SDK dependency. Built entirely on Apache-2.0 / BSD / MPL-2.0 components. We can ship, modify, and redistribute freely.
 - **Content-preservation invariant** — every output is gated by OCR-text diff, tile-level SSIM, and structural audit. We refuse rather than silently corrupt.
 - **Weird-PDF robust** — encrypted, signed, corrupt-xref, JBIG2-in, form XObjects, color profiles, linearized, tagged, PDF/A-3-embedded: each class has an explicit detect-and-handle policy. None crash the pipeline.
-- **Honest compression targets** — for **scanned-document inputs**, we deliver ≥3× guaranteed, 8–15× typical, 50–200× best-case on text-only scans. **For PDFs that are already efficiently encoded** (vector slide decks, presentations, native exports from Word/Powerpoint), the MRC re-rasterize-and-recompress pipeline can produce *larger* output — so the default `--min-ratio 1.5` short-circuits to passthrough rather than churning. See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for measured ratios across input types and settings.
+- **Honest compression targets** — for **scanned-document inputs**, we deliver ≥3× guaranteed, 8–15× typical, 50–200× best-case on text-only scans. **For PDFs that are already efficiently encoded** (vector slide decks, presentations, native exports from Word/Powerpoint), the MRC re-rasterize-and-recompress pipeline can produce *larger* output — so the default `--min-ratio 1.5` short-circuits to passthrough rather than churning, and text-only inputs now passthrough even faster via the per-page MRC gate (see below). See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for measured ratios across input types and settings.
 
 > **Defaults preserve any existing text layer** (byte-faithful to the source, no flag required). `--ocr` means *ensure* searchable — it runs Tesseract only on pages where the input has no text or the existing text fails a quality heuristic. `--strip-text-layer` opts out (text-free output); `--re-ocr` forces Tesseract everywhere even when the input has good native text. See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for measured behavior across the four scenarios.
 
@@ -76,6 +76,19 @@ hankpdf in.pdf -o out.pdf --min-input-mb 5  # also passthrough if input < 5 MB
 `--min-input-mb` is a sibling gate for inputs so small that the MRC
 per-page overhead (~2-3 s/page) isn't worth the ratio gain; it emits
 warning code `passthrough-min-input-mb`.
+
+A third gate runs **before** both of those: a per-page MRC-worthiness
+classifier that skips the pipeline entirely on pages with no meaningful
+image content. For each page, `image_xobject_bytes / page_byte_budget`
+is compared against `--per-page-min-image-fraction` (default `0.30`);
+pages below the threshold are emitted verbatim (no rasterize, no
+compose, no verify). When no page meets the threshold the whole-doc
+shortcut returns the input bytes unchanged with warning code
+`passthrough-no-image-content`; partial runs emit
+`pages-skipped-verbatim-N`. The gate is bypassed by `--re-ocr`,
+`--strip-text-layer`, `--legal-mode`, `--verify`, or
+`--per-page-min-image-fraction 0`. See [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
+"Per-page MRC gate" for measurements.
 
 ## Setup
 
