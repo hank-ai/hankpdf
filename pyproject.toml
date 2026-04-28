@@ -47,10 +47,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hank-ai/hankpdf"
-Documentation = "https://github.com/hank-ai/hankpdf/tree/main/docs"
-Repository = "https://github.com/hank-ai/hankpdf"
-Issues = "https://github.com/hank-ai/hankpdf/issues"
+Homepage = "https://github.com/hank-ai/pdf-smasher"
+Documentation = "https://github.com/hank-ai/pdf-smasher/tree/main/docs"
+Repository = "https://github.com/hank-ai/pdf-smasher"
+Issues = "https://github.com/hank-ai/pdf-smasher/issues"
 
 [project.scripts]
 hankpdf = "pdf_smasher.cli.main:main"

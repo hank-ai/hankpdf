@@ -46,7 +46,7 @@ First public release. Pre-1.0 SemVer applies — anything may break between mino
 - Decompression-bomb pre-allocation cap now applied on the compress path (previously only the image-export path).
 
 ### Repository
-- Replaced placeholder `ourorg/pdf-smasher` URLs with the real `hank-ai/hankpdf` URLs across `pyproject.toml`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`.
+- Replaced placeholder `ourorg/pdf-smasher` URLs with the real `hank-ai/pdf-smasher` URLs across `pyproject.toml`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`.
 - Removed placeholder `security@TBD.example` from `SECURITY.md`. GitHub Security Advisories is now the sole reporting channel.
 - Storage-agnostic corpus mirror story (`s3_mirror` field renamed to `mirror_url`; docs no longer assume S3).
 - README test count and Docker-image tag examples updated to reflect reality.

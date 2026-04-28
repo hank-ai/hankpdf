@@ -73,7 +73,7 @@ in production:
 ```bash
 # Requires cosign >= 2.0 (https://docs.sigstore.dev/cosign/installation/).
 cosign verify ghcr.io/hank-ai/hankpdf:latest \
-    --certificate-identity-regexp 'https://github\.com/hank-ai/hankpdf/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
+    --certificate-identity-regexp 'https://github\.com/hank-ai/pdf-smasher/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 

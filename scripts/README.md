@@ -13,7 +13,7 @@ Invoke directly from a tagged release (recommended — `main` is mutable):
 
 ```powershell
 $tag = "jbig2-windows-v0.1.0"
-irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
+irm "https://github.com/hank-ai/pdf-smasher/releases/download/$tag/install_jbig2_windows.ps1" | iex
 ```
 
 Every release also ships an `install_jbig2_windows.ps1.sha256` sidecar
@@ -21,8 +21,8 @@ alongside the script itself, so you can verify the script locally
 before running `iex` if you want maximum paranoia:
 
 ```powershell
-Invoke-WebRequest "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" -OutFile installer.ps1
-Invoke-WebRequest "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1.sha256" -OutFile installer.ps1.sha256
+Invoke-WebRequest "https://github.com/hank-ai/pdf-smasher/releases/download/$tag/install_jbig2_windows.ps1" -OutFile installer.ps1
+Invoke-WebRequest "https://github.com/hank-ai/pdf-smasher/releases/download/$tag/install_jbig2_windows.ps1.sha256" -OutFile installer.ps1.sha256
 $expected = (Get-Content installer.ps1.sha256) -split '\s+' | Select-Object -First 1
 $actual = (Get-FileHash installer.ps1 -Algorithm SHA256).Hash.ToLower()
 if ($actual -ne $expected) { throw "installer sha mismatch" }

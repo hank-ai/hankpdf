@@ -65,16 +65,16 @@ Expect 245 passed. This is the green baseline.
 - Modify: `docs/TROUBLESHOOTING.md:25`
 - Modify: `.gitignore` (add `.claude/`)
 
-- [ ] **Step 1.1: Replace `ourorg/pdf-smasher` with `hank-ai/hankpdf` in `pyproject.toml`**
+- [ ] **Step 1.1: Replace `ourorg/pdf-smasher` with `hank-ai/pdf-smasher` in `pyproject.toml`**
 
 In `pyproject.toml`, change the `[project.urls]` block:
 
 ```toml
 [project.urls]
-Homepage = "https://github.com/hank-ai/hankpdf"
-Documentation = "https://github.com/hank-ai/hankpdf/tree/main/docs"
-Repository = "https://github.com/hank-ai/hankpdf"
-Issues = "https://github.com/hank-ai/hankpdf/issues"
+Homepage = "https://github.com/hank-ai/pdf-smasher"
+Documentation = "https://github.com/hank-ai/pdf-smasher/tree/main/docs"
+Repository = "https://github.com/hank-ai/pdf-smasher"
+Issues = "https://github.com/hank-ai/pdf-smasher/issues"
 ```
 
 - [ ] **Step 1.2: Same replacement in `docs/ARCHITECTURE.md:287`**
@@ -1415,7 +1415,7 @@ curl -fsSL https://www.contributor-covenant.org/version/2/1/code_of_conduct/code
 
 After fetch, open `CODE_OF_CONDUCT.md` and find the line in the **Enforcement** section that reads (verbatim): `Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at [INSERT CONTACT METHOD].`
 
-Replace `[INSERT CONTACT METHOD]` with: `https://github.com/hank-ai/hankpdf/security/advisories/new`.
+Replace `[INSERT CONTACT METHOD]` with: `https://github.com/hank-ai/pdf-smasher/security/advisories/new`.
 
 If `curl` is unavailable, copy the canonical text manually from the URL above. The file's exact content is permissive (CC BY 4.0).
 
@@ -1520,7 +1520,7 @@ Create `.github/ISSUE_TEMPLATE/config.yml`:
 blank_issues_enabled: false
 contact_links:
   - name: Security report
-    url: https://github.com/hank-ai/hankpdf/security/advisories/new
+    url: https://github.com/hank-ai/pdf-smasher/security/advisories/new
     about: Please report security issues privately via GitHub Security Advisories.
 ```
 
@@ -1662,7 +1662,7 @@ All notable changes to `pdf-smasher` (HankPDF) are documented here. The format i
 - Decompression-bomb pre-allocation cap now applied on the compress path (previously only the image-export path).
 
 ### Repository
-- Replaced placeholder `ourorg/pdf-smasher` URLs with the real `hank-ai/hankpdf` URLs across `pyproject.toml`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`.
+- Replaced placeholder `ourorg/pdf-smasher` URLs with the real `hank-ai/pdf-smasher` URLs across `pyproject.toml`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`.
 - Removed placeholder `security@TBD.example` from `SECURITY.md`. GitHub Security Advisories is now the sole reporting channel.
 - Storage-agnostic corpus mirror story (`s3_mirror` field renamed to `mirror_url`; docs no longer assume S3).
 - README test count and Docker-image tag examples updated to reflect reality.

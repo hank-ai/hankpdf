@@ -24,7 +24,7 @@
 .EXAMPLE
     # One-liner install from a TAGGED release (recommended):
     # main is a mutable branch — pin to a specific release tag.
-    irm https://github.com/hank-ai/hankpdf/releases/download/jbig2-windows-v0.1.0/install_jbig2_windows.ps1 | iex
+    irm https://github.com/hank-ai/pdf-smasher/releases/download/jbig2-windows-v0.1.0/install_jbig2_windows.ps1 | iex
 
 .EXAMPLE
     # Offline / manual install:
@@ -67,10 +67,10 @@ if ([Net.SecurityProtocolType]::Tls13 -as [Net.SecurityProtocolType]) {
 
 # --- constants --------------------------------------------------------
 
-$Repo      = 'hank-ai/hankpdf'
+$Repo      = 'hank-ai/pdf-smasher'
 $AssetName = 'jbig2-windows-x64.zip'
 $ApiBase   = 'https://api.github.com'
-$UserAgent = 'hankpdf-install-jbig2/1.0 (+https://github.com/hank-ai/hankpdf)'
+$UserAgent = 'hankpdf-install-jbig2/1.0 (+https://github.com/hank-ai/pdf-smasher)'
 $HttpTimeoutSec = 120
 $HttpMaxRetries = 3
 
