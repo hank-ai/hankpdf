@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import io
+import shutil
 
 import pikepdf
 import pytest
 
 from pdf_smasher import compress
 from pdf_smasher.types import CompressOptions
+
+_requires_tesseract = pytest.mark.skipif(
+    shutil.which("tesseract") is None,
+    reason="tesseract binary not on PATH (install per docs/INSTALL.md)",
+)
 
 
 def _make_text_only_pdf() -> bytes:
@@ -76,6 +82,7 @@ def test_native_pdf_hits_whole_doc_passthrough() -> None:
     assert any("passthrough-no-image-content" in w for w in report.warnings)
 
 
+@_requires_tesseract
 def test_re_ocr_disables_the_gate() -> None:
     """--re-ocr forces every page through MRC even on a native PDF."""
     pdf_bytes = _make_text_only_pdf()
@@ -118,6 +125,7 @@ def test_threshold_zero_forces_full_pipeline() -> None:
 
 
 @pytest.mark.slow
+@_requires_tesseract
 def test_verify_disables_the_gate() -> None:
     """--verify forces every page through MRC + verifier so the
     aggregator's metrics aren't polluted by synthetic verdicts."""
