@@ -153,7 +153,7 @@ running in production:
 
 ```bash
 cosign verify ghcr.io/hank-ai/hankpdf:<version-tag> \
-    --certificate-identity-regexp 'https://github\.com/hank-ai/hankpdf/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
+    --certificate-identity-regexp 'https://github\.com/hank-ai/pdf-smasher/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -173,7 +173,7 @@ git clone --depth=1 https://github.com/agl/jbig2enc.git /tmp/jbig2enc
 cd /tmp/jbig2enc && ./autogen.sh && ./configure && make && sudo make install
 
 # 3. HankPDF
-git clone git@github.com:hank-ai/hankpdf.git
+git clone git@github.com:hank-ai/pdf-smasher.git
 cd hankpdf
 uv sync --all-extras
 uv run hankpdf --version       # smoke test
@@ -196,7 +196,7 @@ source "$HOME/.local/bin/env"
 sudo apt install -y tesseract-ocr libtesseract-dev qpdf jbig2enc-tools
 
 # 4. HankPDF
-git clone git@github.com:hank-ai/hankpdf.git
+git clone git@github.com:hank-ai/pdf-smasher.git
 cd hankpdf
 uv sync --all-extras
 uv run hankpdf --version
@@ -243,9 +243,9 @@ irm https://astral.sh/uv/install.ps1 | iex
 # Tagged URL — main is a mutable branch, so we pin to a specific release.
 # Replace the tag with whatever "jbig2-windows-v*" tag you want to install.
 $tag = "jbig2-windows-v0.1.0"
-irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
+irm "https://github.com/hank-ai/pdf-smasher/releases/download/$tag/install_jbig2_windows.ps1" | iex
 
-git clone git@github.com:hank-ai/hankpdf.git
+git clone git@github.com:hank-ai/pdf-smasher.git
 cd hankpdf
 uv sync --all-extras
 uv run hankpdf --version

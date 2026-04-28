@@ -57,7 +57,7 @@ choco install tesseract qpdf -y
 # you `iex` it. The installer auto-verifies SHA-256 sidecars on every
 # asset, but the installer itself must come from an immutable URL.
 $tag = "jbig2-windows-v0.1.0"
-irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
+irm "https://github.com/hank-ai/pdf-smasher/releases/download/$tag/install_jbig2_windows.ps1" | iex
 
 pip install pdf-smasher
 hankpdf --doctor
@@ -70,7 +70,7 @@ typically 10-20% larger than with jbig2enc, but every other feature
 works identically and all tests pass. You can re-run the installer
 later, or install `jbig2.exe` manually by downloading
 `jbig2-windows-x64.zip` from the
-[hankpdf Releases](https://github.com/hank-ai/hankpdf/releases) page
+[hankpdf Releases](https://github.com/hank-ai/pdf-smasher/releases) page
 and placing the extracted directory on your PATH.
 
 Option B — **use Docker Desktop instead**. Simpler on Windows.

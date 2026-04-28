@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Author:** Jack Neil (with audit assistance from parallel review agents)
-**Goal:** Make `pdf-smasher` safe to flip from private to public on `github.com/hank-ai/hankpdf`, with no embarrassments, no placeholder URLs, no internal-handle leaks, and the highest-impact security gaps closed.
+**Goal:** Make `pdf-smasher` safe to flip from private to public on `github.com/hank-ai/pdf-smasher`, with no embarrassments, no placeholder URLs, no internal-handle leaks, and the highest-impact security gaps closed.
 
 ## 1. Context
 
@@ -46,7 +46,7 @@ The PR is large but the workstreams are independent and review cleanly when grou
 
 | Change | Files |
 |---|---|
-| `ourorg/pdf-smasher` → `hank-ai/hankpdf` | `pyproject.toml:50-53`, `docs/ARCHITECTURE.md:287`, `docs/ROADMAP.md:441` |
+| `ourorg/pdf-smasher` → `hank-ai/pdf-smasher` | `pyproject.toml:50-53`, `docs/ARCHITECTURE.md:287`, `docs/ROADMAP.md:441` |
 | Drop `Email: security@TBD.example` line entirely; rely on GitHub Security Advisories (already listed as preferred) | `SECURITY.md:8` |
 | Drop `(shartzog P0)` from heading; rename to `## 2. The correlation-ID recovery workflow` | `docs/TROUBLESHOOTING.md:25` |
 | Add `.claude/` to gitignore (mirroring `.firecrawl/` rule) | `.gitignore` line 1 |
@@ -169,7 +169,7 @@ All tests live in `tests/unit/` matching existing naming. Run via existing CI ma
 - `SECURITY.md` — drop fake email; document W4b output-dir assumption.
 - `CONTRIBUTING.md` — corpus-mirror wording (W2).
 - `tests/STRATEGY.md` — corpus-mirror wording + manifest field rename (W2).
-- `docs/ARCHITECTURE.md`, `docs/ROADMAP.md` — `ourorg` → `hank-ai/hankpdf` (W1).
+- `docs/ARCHITECTURE.md`, `docs/ROADMAP.md` — `ourorg` → `hank-ai/pdf-smasher` (W1).
 - `docs/TROUBLESHOOTING.md` — drop teammate handle (W1).
 - New: `CODE_OF_CONDUCT.md` (W5a).
 
