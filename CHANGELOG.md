@@ -4,6 +4,22 @@ All notable changes to `hankpdf` (formerly `pdf-smasher` on PyPI) are documented
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-29
+
+**No code changes** — terminology refresh requested by the CTO. The PyPI project description, GHCR image label, `hankpdf --help` output, module docstring, and all docs now describe HankPDF as a **PDF compressor** rather than a "PDF shrinker." Reasoning: "shrinking" implies pixel resize / dimensional reduction, which is one operation in the pipeline (background-layer DPI downsampling) but not the product. The product is byte-level compression via codec changes (JBIG2 / JPEG / JPEG2000), MRC layering, and foreground/background segmentation.
+
+### Changed
+
+- README tagline, `pyproject.toml [project].description`, `docker/Dockerfile org.opencontainers.image.description`, `hankpdf/__init__.py` module docstring, `hankpdf/cli/main.py` argparse description, and the lead lines / section headers in `docs/ARCHITECTURE.md`, `docs/SPEC.md`, `docs/PERFORMANCE.md`, `docs/THREAT_MODEL.md` all use "compress" / "compressor" terminology consistently. `tests/integration/test_ratio_gate.py:311` switched "shrink" → "reduce" (that comment was about page count, not bytes).
+- README status line + GHCR tag references bumped to `0.2.2`.
+
+### Preserved (deliberate)
+
+- CHANGELOG historical entries — frozen text describing what each version actually shipped with.
+- `docs/superpowers/{plans,specs}/*` — write-time snapshots; rewriting history misrepresents what was reviewed.
+
+After this release: `grep -rn "shrink\\|shrunk\\|shrinking\\|shrinker"` outside CHANGELOG / superpowers returns no hits.
+
 ## [0.2.1] - 2026-04-28
 
 **No code changes** — doc-only patch release to refresh the PyPI project page with content that landed after `0.2.0` was published. PyPI distribution metadata (project description, README) is immutable per-version, so the install prompt and the corrected GHCR tag references on the PyPI page require a version bump.
