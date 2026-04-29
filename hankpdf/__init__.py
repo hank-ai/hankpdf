@@ -1,4 +1,4 @@
-"""HankPDF — aggressive, safety-first PDF shrinker for scanned documents.
+"""HankPDF — aggressive, safety-first PDF compressor for scanned documents.
 
 Public API surface:
 
