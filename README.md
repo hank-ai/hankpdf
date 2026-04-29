@@ -108,13 +108,105 @@ shortcut returns the input bytes unchanged with warning code
 
 ## Setup
 
-### Hand this repo to Claude Code / Codex / any coding agent
+### Install via Claude Code / Codex / any coding agent (easiest, no clone needed)
 
-If you're not a developer, the fastest path is to clone the repo, open it in an agent-capable editor (Claude Code, Cursor, Copilot, etc.), and paste this prompt:
+The fastest path on a fresh machine — Windows, macOS, or Linux. **You don't need to clone the repo.** Open Claude Code (or Cursor, Codex, Copilot, Aider, any agent that can run shell commands) in any directory and paste the entire prompt below as your first message. The agent will detect your OS, install Python 3.14 and the three native binaries HankPDF needs, set up an isolated environment, install `hankpdf` from PyPI, and verify the install — stopping to ask you for input only when it genuinely needs to (sudo password, GitHub auth, WSL activation).
+
+````
+You are installing the `hankpdf` PDF compression CLI on this machine. End state: I can open a terminal and run `hankpdf in.pdf -o out.pdf` against any PDF on disk and get a smaller, searchable PDF out. Detect my OS first, then install everything `hankpdf` needs from scratch. Read https://github.com/hank-ai/hankpdf/blob/main/docs/INSTALL.md and https://github.com/hank-ai/hankpdf/blob/main/README.md for the canonical per-OS instructions; the steps below are the high-level plan.
+
+## Steps
+
+1. **Detect my OS and Python version.** Note whether I'm on macOS (Intel vs Apple Silicon), Linux (which distro), or Windows (native vs WSL2). Print a one-line summary so I know what you saw.
+
+2. **Install Python 3.14.** `hankpdf` requires Python 3.14+ exactly — it uses PEP 758 syntax that does not parse on 3.13 or earlier. Use the OS package manager:
+   - macOS: `brew install python@3.14`
+   - Debian/Ubuntu 24.04+: `sudo apt install -y python3.14 python3.14-venv python3.14-dev`. On Ubuntu 22.04, use the deadsnakes PPA. Ask before adding a third-party PPA.
+   - Fedora/RHEL: `sudo dnf install -y python3.14 python3.14-devel`
+   - Arch: `sudo pacman -S python` (Arch ships current Python; verify it's 3.14)
+   - Windows: `winget install Python.Python.3.14`
+
+   If 3.14 is unavailable on the package manager (some older LTS distros), fall back to uv's managed Python: `uv python install 3.14`. Don't compile from source unless I explicitly ask.
+
+3. **Install uv** (the Python package manager that owns the venv): https://docs.astral.sh/uv/getting-started/installation/. One-liner per OS:
+   - POSIX: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+   - Windows PowerShell: `irm https://astral.sh/uv/install.ps1 | iex`
+
+4. **Install the native binaries** `hankpdf` shells out to. Without these, `pip install hankpdf` succeeds but `hankpdf` fails at runtime:
+   - **tesseract** — OCR text-layer extraction + verifier. Without it, `hankpdf` errors with `tesseract is not installed or it's not in your PATH` on any input that needs OCR.
+   - **qpdf** — PDF repair + linearization. Without it, the engine refuses to run.
+   - **jbig2enc** — text-region encoder. Without it, text-only compression drops from ~50× to ~6× (flate fallback). Searchable PDFs still produced; not a hard dependency, but worth installing.
+
+   Per-OS:
+   - **macOS**: `brew install tesseract qpdf`. jbig2enc isn't in brew — clone, autogen, configure, make, sudo make install per `docs/INSTALL.md`. Ask me before `sudo make install` if you'd rather install to a user-prefix.
+   - **Debian/Ubuntu**: `sudo apt install -y tesseract-ocr libtesseract-dev qpdf jbig2enc-tools`.
+   - **Fedora/RHEL**: `sudo dnf install -y tesseract qpdf leptonica-devel`. jbig2enc still needs source build.
+   - **Arch**: `sudo pacman -S tesseract qpdf jbig2enc`.
+   - **Windows native**: `choco install tesseract qpdf -y` (Chocolatey). jbig2.exe is a separate prebuilt installer:
+     ```powershell
+     $tag = "jbig2-windows-v0.1.0"
+     irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
+     ```
+   - **Windows WSL2**: treat as Debian/Ubuntu inside the WSL distro.
+
+5. **Create an isolated environment for hankpdf** so it doesn't tangle with the system Python:
+   ```bash
+   uv venv ~/.hankpdf-env --python 3.14    # POSIX
+   # Windows PowerShell: uv venv $HOME\.hankpdf-env --python 3.14
+   ```
+
+   Activate it:
+   ```bash
+   source ~/.hankpdf-env/bin/activate         # POSIX
+   . $HOME\.hankpdf-env\Scripts\Activate.ps1  # Windows PowerShell
+   ```
+
+6. **Install `hankpdf` from PyPI**:
+   ```bash
+   uv pip install hankpdf
+   ```
+
+7. **Verify the install end-to-end** — this is the success criterion:
+   ```bash
+   hankpdf --version
+   # must print "hankpdf 0.2.0 ..." or higher
+
+   hankpdf --doctor
+   # must NOT print "NOT FOUND" for tesseract or qpdf.
+   # "jbig2enc NOT FOUND" is acceptable but degrades text-only compression.
+   ```
+
+   If `--doctor` shows any required binary as `NOT FOUND`, that's a failure — go back to step 4 and fix.
+
+## Rules of engagement
+
+- If a step needs my **sudo password**, **GitHub auth**, or **WSL activation**, STOP and ask me before continuing.
+- Don't compile Python from source unless I explicitly ask.
+- Don't `sudo` outside the documented `apt`/`dnf`/`pacman`/`make install` cases above.
+- Don't skip the `--doctor` verification. The console output is the success criterion; if it shows NOT FOUND for any required binary, fix that before declaring done.
+- After success, print a one-screen summary: which Python version (`python --version`), which native deps with their version numbers (the output of `hankpdf --doctor`), the activated venv path (`echo $VIRTUAL_ENV`), and how to reactivate it next time (`source ~/.hankpdf-env/bin/activate` or the Windows equivalent).
+- If anything fails that you can't fix without my input, tell me what went wrong and what I need to do — don't silently continue.
+
+## Optional smoke test
+
+If I have any PDF on disk, run a smoke compression to confirm the whole pipeline works:
+```bash
+hankpdf <my-pdf> -o /tmp/hankpdf-smoke.pdf
+```
+Expected: exits 0, prints a `ratio Nx` line on stderr, writes a valid PDF to `/tmp/hankpdf-smoke.pdf`. If `--min-ratio 1.5` (the default) refuses because my PDF was already efficient, that's also a successful run — the engine correctly chose passthrough. Just confirm `hankpdf --doctor` is green.
+
+When done, tell me the activated venv path and the reactivation command so I can come back to it tomorrow.
+````
+
+Time: ~5–15 minutes depending on network and whether jbig2enc needs building from source.
+
+### Hand this repo to Claude Code / Codex / any coding agent (for development)
+
+If you've already cloned the repo and want to **develop on it** (run the test suite, contribute), open the cloned directory in an agent and paste this prompt instead:
 
 > Read `README.md` and `docs/INSTALL.md`. Detect my operating system. Install every native dependency HankPDF needs (Python 3.14, uv, Tesseract, qpdf, jbig2enc), clone any missing binaries, run `uv sync --all-extras`, then run `uv run pytest -q` and report the result. If any step needs my input (sudo password, GitHub auth, WSL activation), stop and tell me.
 
-The agent reads the OS-specific blocks below, runs the commands, reports test output. You'll be up in ~5-15 minutes depending on network and whether jbig2enc needs building from source.
+The agent reads the OS-specific blocks below, runs the commands, reports test output.
 
 ### Docker (any OS)
 
