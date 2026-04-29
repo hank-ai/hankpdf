@@ -195,6 +195,13 @@ RUN groupadd --gid 1000 hankpdf \
 # is a single reproducibility surface (bumped by Dependabot pip ecosystem).
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE NOTICE /app/
+# Copy both packages: `hankpdf` is the canonical post-rename package;
+# `pdf_smasher` is the deprecation shim for one cycle (re-exports the
+# public API from `hankpdf` so legacy `from pdf_smasher import compress`
+# keeps working through v0.2.x). hatchling needs both directories
+# present in the build context because pyproject.toml's wheel target
+# lists them both. Removal of the shim is scheduled for v0.3.0.
+COPY hankpdf /app/hankpdf
 COPY pdf_smasher /app/pdf_smasher
 RUN pip install --no-cache-dir "uv==0.9.9" \
     && uv sync --frozen --no-dev --no-editable \
