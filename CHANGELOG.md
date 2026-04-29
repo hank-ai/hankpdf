@@ -4,6 +4,19 @@ All notable changes to `hankpdf` (formerly `pdf-smasher` on PyPI) are documented
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-28
+
+**No code changes** — doc-only patch release to refresh the PyPI project page with content that landed after `0.2.0` was published. PyPI distribution metadata (project description, README) is immutable per-version, so the install prompt and the corrected GHCR tag references on the PyPI page require a version bump.
+
+### Changed
+
+- **PyPI project README** now includes the **"Install via Claude Code / Codex / any coding agent (easiest, no clone needed)"** section — a paste-into-agent prompt that walks a fresh-machine bootstrap on Windows / macOS / Linux from zero (no Python, no native deps) to `hankpdf in.pdf -o out.pdf` working in a terminal. Detects OS, installs Python 3.14 + uv + Tesseract + qpdf + jbig2enc, creates an isolated venv at `~/.hankpdf-env`, `pip install hankpdf`, verifies via `hankpdf --doctor`. Stops to ask for sudo / GitHub auth / WSL activation. The clone-based dev-flow prompt is preserved below the new section.
+- **GHCR tag references** in the README now use `:0.2.1` (no `v` prefix) instead of `:v0.2.1`. The metadata-action in `docker.yml` strips the `v` prefix from semver patterns; published image tags are `0.2.1`, `0.2`, `latest`, `sha-…`. The `:v…` references in 0.1.0/0.2.0 release notes were always inaccurate copy.
+
+### Fixed (in v0.2.0 docker image, by retag)
+
+The v0.2.0 GHCR image originally pushed missed the canonical `hankpdf/` package because `docker/Dockerfile:198` only copied the legacy `pdf_smasher/` shim into the build context. This was fixed in PR #21 and the v0.2.0 git tag was force-updated to point at the corrected source. The retagged v0.2.0 image (digest `sha256:2144c8c…`) is signed and SLSA-attested under the new commit. PyPI `hankpdf 0.2.0` was unaffected — the wheel is built directly from `pyproject.toml` with the full source tree.
+
 ## [0.2.0] - 2026-04-28
 
 **Distribution rename: `pdf-smasher` → `hankpdf`.** The CLI command, GHCR image, product brand, and now the PyPI distribution + Python import package are all `hankpdf`. The previous split (`pip install pdf-smasher` / `hankpdf in.pdf`) was confusing for new users; consolidating to a single name end-to-end. `pdf-smasher 0.1.0` on PyPI is yanked (existing pins still install with a warning per PEP 592; bare `pip install pdf-smasher` no longer resolves).
