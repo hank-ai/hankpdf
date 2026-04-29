@@ -1,6 +1,6 @@
 # HankPDF
 
-Aggressive, safety-first PDF shrinker for scanned documents. Takes a PDF in, produces a shrunk/resized searchable PDF out. **Local tool. No network, no telemetry, no data leaves your machine.** Targets 8–15× typical compression (up to 200× on text-dominant scans) while preserving OCR searchability and guaranteeing no silent content loss.
+Aggressive, safety-first PDF compressor for scanned documents. Takes a PDF in, produces a compressed searchable PDF out. **Local tool. No network, no telemetry, no data leaves your machine.** Targets 8–15× typical compression (up to 200× on text-dominant scans) while preserving OCR searchability and guaranteeing no silent content loss.
 
 **Status:** v0.2.1 — 393 tests passing on Linux / macOS / Windows CI. Available via PyPI (`pip install hankpdf`), GHCR (`docker pull ghcr.io/hank-ai/hankpdf:0.2.1`), or from the repo (see **Setup** below).
 

@@ -269,7 +269,7 @@ To validate the per-setting takeaways above against a wider input set, the full 
 
 A **median ratio < 1.0× means the setting INFLATES the typical input**. PNG @ 150 DPI inflates output to 11× the input size on the median; JPEG @ 300 DPI inflates to 20×. These settings are correct for "I want one image per page for a viewer or thumbnail pipeline" workflows, never for "I want a smaller PDF."
 
-### How often does each setting actually shrink the file?
+### How often does each setting actually compress the file?
 
 | Setting | <1× (inflated) | 1.0× exactly | 1.0–1.5× | 1.5–3× | >3× |
 |---|---:|---:|---:|---:|---:|

@@ -594,7 +594,7 @@ Displayed via CLI default report mode. Never includes PHI or filenames verbatim 
 | `CertifiedSignatureError` | "This PDF carries a certifying signature (author-certified, DocMDP). Invalidating it carries stronger legal risk than an ordinary signature. Contact support before proceeding." |
 | `MaliciousPDFError` | "This PDF could not be processed safely. Please contact support with this reference code." |
 | `DecompressionBombError` | "This PDF's images are unusually large and could exhaust memory. Refusing to process for safety. Contact support with this reference code." |
-| `ContentDriftError` | "We couldn't shrink this PDF without losing detail. Please keep the original." |
+| `ContentDriftError` | "We couldn't compress this PDF without losing detail. Please keep the original." |
 | `OversizeError` | "This PDF is larger than we can process ({size} MB). Please split it first or contact support." |
 | `CorruptPDFError` | "This PDF appears damaged. Please re-scan or re-export it." |
 | `EnvironmentError` | "HankPDF environment check failed. Run `hankpdf --doctor` to see what's missing or out of date (e.g. qpdf must be ≥11.6.3 to avoid a known data-loss bug)." |

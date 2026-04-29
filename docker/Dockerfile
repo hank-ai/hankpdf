@@ -94,7 +94,7 @@ LABEL org.opencontainers.image.version="${HANKPDF_VERSION}"
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.title="HankPDF"
-LABEL org.opencontainers.image.description="Aggressive, safety-first PDF shrinker for scanned documents"
+LABEL org.opencontainers.image.description="Aggressive, safety-first PDF compressor for scanned documents"
 
 # Surface the metadata at runtime too — `hankpdf --version` and
 # `--doctor` read /etc/hankpdf/build-info.json (Group C). ENV vars

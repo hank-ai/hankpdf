@@ -6,7 +6,7 @@ This document captures the design decisions and their rationale. For precise beh
 
 Scanned PDFs are massively oversized. Scanners default to 300 DPI color and embed JPEG pages at quality 90+, producing 200-page, 500 MB – 2 GB image-only PDFs where a 10 MB output would have been fine. These inputs inflate every downstream cost — upload bandwidth, storage, OCR, extraction — and often contain content (small print, handwriting, photos) where aggressive recompression risks silent content loss.
 
-HankPDF ships as a **local command-line tool**: PDF in, shrunk/resized searchable PDF out. Runs on the user's machine. No network calls, no telemetry, no persistent storage beyond the output and an optional sidecar report. Distributed as:
+HankPDF ships as a **local command-line tool**: PDF in, compressed searchable PDF out. Runs on the user's machine. No network calls, no telemetry, no persistent storage beyond the output and an optional sidecar report. Distributed as:
 
 1. **Python package** — `pip install hankpdf`. Brings `from hankpdf import compress` and the `hankpdf` CLI. User installs Tesseract + jbig2enc via their OS package manager (documented).
 2. **Docker image** — sealed runtime with all native deps baked in. For CI/CD, SFTP wrappers, batch jobs, and any host where you'd rather not install Tesseract.

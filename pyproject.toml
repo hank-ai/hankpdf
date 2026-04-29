@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hankpdf"
 version = "0.2.1"
-description = "Aggressive, safety-first PDF shrinker for scanned documents. CLI tool: PDF in, shrunk searchable PDF out."
+description = "Aggressive, safety-first PDF compressor for scanned documents. CLI tool: PDF in, compressed searchable PDF out."
 readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "Apache-2.0" }

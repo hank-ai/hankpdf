@@ -308,7 +308,7 @@ def test_multi_page_mixed_strategies_merges_correctly() -> None:
     assert report.strategy_distribution["photo_only"] == 1
     assert report.strategy_distribution["mixed"] == 1
 
-    # only_pages=[1] must shrink the output to a single page (the TEXT_ONLY one).
+    # only_pages=[1] must reduce the output to a single page (the TEXT_ONLY one).
     _, subset_report = compress(
         pdf_in,
         options=CompressOptions(mode="fast"),

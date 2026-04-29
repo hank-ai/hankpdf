@@ -201,7 +201,7 @@ EXIT_USAGE = 40
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hankpdf",
-        description="HankPDF — shrink scanned PDFs locally. No network, no telemetry.",
+        description="HankPDF — compress scanned PDFs locally. No network, no telemetry.",
     )
     p.add_argument("input", nargs="?", type=Path, help='Input PDF path; "-" for stdin')
     p.add_argument(

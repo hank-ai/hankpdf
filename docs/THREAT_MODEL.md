@@ -1,6 +1,6 @@
 # Threat Model
 
-HankPDF is a local command-line tool: PDF in, shrunk PDF out. It runs on the user's machine, makes no outbound network calls during compression, and stores no persistent state beyond what the user asks for.
+HankPDF is a local command-line tool: PDF in, compressed PDF out. It runs on the user's machine, makes no outbound network calls during compression, and stores no persistent state beyond what the user asks for.
 
 The threat model below inventories attack surfaces and mitigations. High level: the only real attack surface is a **hostile input PDF tripping a third-party parser**, and the mitigation is process-level sandboxing plus careful dep hygiene.
 
