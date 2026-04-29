@@ -2,7 +2,7 @@
 
 Aggressive, safety-first PDF shrinker for scanned documents. Takes a PDF in, produces a shrunk/resized searchable PDF out. **Local tool. No network, no telemetry, no data leaves your machine.** Targets 8–15× typical compression (up to 200× on text-dominant scans) while preserving OCR searchability and guaranteeing no silent content loss.
 
-**Status:** v0.2.0 — 393 tests passing on Linux / macOS / Windows CI. Available via PyPI (`pip install hankpdf`), GHCR (`docker pull ghcr.io/hank-ai/hankpdf:v0.2.0`), or from the repo (see **Setup** below).
+**Status:** v0.2.1 — 393 tests passing on Linux / macOS / Windows CI. Available via PyPI (`pip install hankpdf`), GHCR (`docker pull ghcr.io/hank-ai/hankpdf:0.2.1`), or from the repo (see **Setup** below).
 
 > **v0.2.0 rename note:** the PyPI distribution and import package were renamed from `pdf-smasher` to `hankpdf` so the install name matches the CLI command, GHCR image, and product brand. The legacy `pdf_smasher` import package still works for one cycle (emits a `DeprecationWarning` pointing at `hankpdf`); removal in v0.3.0. The yanked `pdf-smasher 0.1.0` on PyPI continues to install at the exact pin (PEP 592) but bare `pip install pdf-smasher` no longer resolves.
 
@@ -20,7 +20,7 @@ Aggressive, safety-first PDF shrinker for scanned documents. Takes a PDF in, pro
 >
 > **After install, run `hankpdf --doctor`** — it prints the version of every binary it can find and `NOT FOUND` for any that's missing. Run it before you trust any other output.
 >
-> **Want zero setup?** Use the Docker image (`docker pull ghcr.io/hank-ai/hankpdf:v0.1.0`) — Tesseract, qpdf, and jbig2enc are all baked in. See **Setup → Docker** below.
+> **Want zero setup?** Use the Docker image (`docker pull ghcr.io/hank-ai/hankpdf:0.2.1`) — Tesseract, qpdf, and jbig2enc are all baked in. See **Setup → Docker** below.
 
 ## What it does
 

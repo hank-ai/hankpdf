@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 # Dev fallback. PKG-INFO wins at runtime when the package is installed.
-_DEV_VERSION: str = "0.2.0"
+_DEV_VERSION: str = "0.2.1"
 _BUILD_INFO_PATH = Path("/etc/hankpdf/build-info.json")
 
 
