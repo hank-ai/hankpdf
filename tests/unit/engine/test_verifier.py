@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.verifier — content-preservation gate.
+"""Tests for hankpdf.engine.verifier — content-preservation gate.
 
 Three main checks per SPEC.md §5:
 
@@ -12,13 +12,13 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from pdf_smasher.engine.verifier import (
+from hankpdf.engine.verifier import (
     digit_multiset_match,
     levenshtein_ratio,
     ssim_score,
     verify_pages,
 )
-from pdf_smasher.types import VerifierResult
+from hankpdf.types import VerifierResult
 
 # ---------- Levenshtein ----------
 
@@ -143,7 +143,7 @@ def test_verify_pages_fails_on_digit_drift() -> None:
 
 # ---------- tile_ssim_min ----------
 
-from pdf_smasher.engine.verifier import tile_ssim_min  # noqa: E402
+from hankpdf.engine.verifier import tile_ssim_min  # noqa: E402
 
 
 def test_tile_ssim_identical_images_is_1() -> None:
@@ -181,14 +181,14 @@ def test_tile_ssim_blank_pages_returns_1() -> None:
 
 def test_verifier_default_ssim_floor_matches_arch() -> None:
     """ARCHITECTURE.md §5 (table): global SSIM >=0.92 in BOTH modes."""
-    from pdf_smasher.engine.verifier import _DEFAULT_SSIM_FLOOR
+    from hankpdf.engine.verifier import _DEFAULT_SSIM_FLOOR
 
     assert _DEFAULT_SSIM_FLOOR == 0.92
 
 
 def test_verifier_tile_ssim_floors() -> None:
     """ARCHITECTURE.md §5 (table): tile-min SSIM >=0.85 standard, >=0.88 safe."""
-    from pdf_smasher.engine.verifier import (
+    from hankpdf.engine.verifier import (
         _DEFAULT_TILE_SSIM_FLOOR_SAFE,
         _DEFAULT_TILE_SSIM_FLOOR_STANDARD,
     )
@@ -199,7 +199,7 @@ def test_verifier_tile_ssim_floors() -> None:
 
 def test_verifier_lev_ceilings() -> None:
     """ARCHITECTURE.md §5 (table): raw Levenshtein <=0.05 standard, <=0.02 safe."""
-    from pdf_smasher.engine.verifier import (
+    from hankpdf.engine.verifier import (
         _DEFAULT_LEVENSHTEIN_CEILING_SAFE,
         _DEFAULT_LEVENSHTEIN_CEILING_STANDARD,
     )
@@ -214,7 +214,7 @@ def test_verifier_lev_ceilings() -> None:
 def test_verifier_aggregator_propagates_color_loss() -> None:
     """_VerifierAggregator.result() must propagate color_preserved=False
     from a single failing page even when all other pages pass."""
-    from pdf_smasher.engine.verifier import PageVerdict, _VerifierAggregator
+    from hankpdf.engine.verifier import PageVerdict, _VerifierAggregator
 
     agg = _VerifierAggregator()
     for i in range(2):
@@ -249,7 +249,7 @@ def test_verifier_aggregator_propagates_color_loss() -> None:
 
 
 def test_verifier_aggregator_all_pass_returns_ok() -> None:
-    from pdf_smasher.engine.verifier import PageVerdict, _VerifierAggregator
+    from hankpdf.engine.verifier import PageVerdict, _VerifierAggregator
 
     agg = _VerifierAggregator()
     for i in range(3):
@@ -297,7 +297,7 @@ def test_verifier_fails_when_input_had_color_but_output_is_grayscale() -> None:
 
 # ---------- _page_has_color pinning ----------
 
-from pdf_smasher.engine.verifier import _page_has_color  # noqa: E402
+from hankpdf.engine.verifier import _page_has_color  # noqa: E402
 
 
 def test_page_has_color_fraction_boundary_0_1_pct() -> None:
@@ -339,7 +339,7 @@ def test_anomaly_ratio_gate_triggers_safe_threshold() -> None:
     standard tile floor even with a faint watermark stripped. The anomaly
     gate adds a second pass at safe thresholds for outlier-ratio pages.
     """
-    from pdf_smasher.engine.verifier import (
+    from hankpdf.engine.verifier import (
         _DEFAULT_TILE_SSIM_FLOOR_SAFE,
         _DEFAULT_TILE_SSIM_FLOOR_STANDARD,
     )
@@ -351,7 +351,7 @@ def test_verifier_aggregator_skipped_result() -> None:
     """When skip_verify is set, aggregator.skipped_result() returns a
     VerifierResult with status='skipped' and NaN-ish metrics rather than
     a fake 'pass' with perfect metrics."""
-    from pdf_smasher.engine.verifier import _VerifierAggregator
+    from hankpdf.engine.verifier import _VerifierAggregator
 
     agg = _VerifierAggregator()
     result = agg.skipped_result()

@@ -25,8 +25,8 @@ from PIL import Image
 from skimage.measure import block_reduce
 from skimage.metrics import structural_similarity
 
-from pdf_smasher._pillow_hardening import ensure_capped
-from pdf_smasher.types import VerifierResult
+from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.types import VerifierResult
 
 ensure_capped()
 

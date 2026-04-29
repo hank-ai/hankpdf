@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from pdf_smasher import DecompressionBombError
-from pdf_smasher.engine._render_safety import check_render_size
+from hankpdf import DecompressionBombError
+from hankpdf.engine._render_safety import check_render_size
 
 
 def test_normal_letter_size_at_300_dpi_passes() -> None:

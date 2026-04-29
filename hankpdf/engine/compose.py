@@ -1,6 +1,6 @@
 """Compose PDF pages from MRC components.
 
-Three composition modes matching :class:`pdf_smasher.engine.strategy.PageStrategy`:
+Three composition modes matching :class:`hankpdf.engine.strategy.PageStrategy`:
 
 - :func:`compose_mrc_page` — **mixed** pages. Background JPEG + 1-bit mask
   drawn as ``/ImageMask`` in the ink color. The mask uses JBIG2 compression
@@ -26,8 +26,8 @@ from typing import Any, Literal
 import pikepdf
 from PIL import Image
 
-from pdf_smasher._pillow_hardening import ensure_capped
-from pdf_smasher.engine.codecs.jbig2 import encode_1bit_jbig2
+from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.engine.codecs.jbig2 import encode_1bit_jbig2
 
 ensure_capped()
 

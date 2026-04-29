@@ -2,13 +2,13 @@
 
 Aggressive, safety-first PDF shrinker for scanned documents. Takes a PDF in, produces a shrunk/resized searchable PDF out. **Local tool. No network, no telemetry, no data leaves your machine.** Targets 8–15× typical compression (up to 200× on text-dominant scans) while preserving OCR searchability and guaranteeing no silent content loss.
 
-_Repo / package name: `pdf-smasher`. Product brand: **HankPDF**._
+**Status:** v0.2.0 — 393 tests passing on Linux / macOS / Windows CI. Available via PyPI (`pip install hankpdf`), GHCR (`docker pull ghcr.io/hank-ai/hankpdf:v0.2.0`), or from the repo (see **Setup** below).
 
-**Status:** v0.1.0 — first public release. 389 tests passing on Linux / macOS / Windows CI. Available via PyPI (`pip install pdf-smasher`), GHCR (`docker pull ghcr.io/hank-ai/hankpdf:v0.1.0`), or from the repo (see **Setup** below).
+> **v0.2.0 rename note:** the PyPI distribution and import package were renamed from `pdf-smasher` to `hankpdf` so the install name matches the CLI command, GHCR image, and product brand. The legacy `pdf_smasher` import package still works for one cycle (emits a `DeprecationWarning` pointing at `hankpdf`); removal in v0.3.0. The yanked `pdf-smasher 0.1.0` on PyPI continues to install at the exact pin (PEP 592) but bare `pip install pdf-smasher` no longer resolves.
 
 > ## ⚠️ Required: native binaries (`pip install` is NOT enough)
 >
-> HankPDF is a Python wrapper around three native CLI tools. **`pip install pdf-smasher` does NOT install them — you have to do it via your system package manager BEFORE the wrapper works**, or use the Docker image which has them baked in.
+> HankPDF is a Python wrapper around three native CLI tools. **`pip install hankpdf` does NOT install them — you have to do it via your system package manager BEFORE the wrapper works**, or use the Docker image which has them baked in.
 >
 > | Binary | Why | Without it |
 > |---|---|---|
@@ -26,7 +26,7 @@ _Repo / package name: `pdf-smasher`. Product brand: **HankPDF**._
 
 Takes oversized scanned PDFs (typical input: 200-page, 800 MB image scans) and produces compact, searchable, verified outputs. **CLI-first. Two install targets, both run the same engine locally**:
 
-1. **Python package** — `pip install pdf-smasher` (gives you the `compress()` API and the `hankpdf` console script) **plus** Tesseract + qpdf + jbig2enc via your system package manager. See the loud callout above and [docs/INSTALL.md](docs/INSTALL.md) for one-line per-OS install instructions.
+1. **Python package** — `pip install hankpdf` (gives you the `compress()` API and the `hankpdf` console script) **plus** Tesseract + qpdf + jbig2enc via your system package manager. See the loud callout above and [docs/INSTALL.md](docs/INSTALL.md) for one-line per-OS install instructions.
 2. **Docker image** — `ghcr.io/hank-ai/hankpdf:latest`. All native deps baked in; zero host setup. Ideal for CI/CD, SFTP upload wrappers, batch jobs, and any environment where installing Tesseract on the host is inconvenient.
 
 **Not a service, not a GUI, not a signed installer.** HankPDF is a command-line tool. It runs entirely on the user's machine, never uploads PDFs anywhere, never phones home, writes no analytics, stores no persistent state beyond what the user asks (output PDF, optional sidecar manifest).
@@ -153,7 +153,7 @@ running in production:
 
 ```bash
 cosign verify ghcr.io/hank-ai/hankpdf:<version-tag> \
-    --certificate-identity-regexp 'https://github\.com/hank-ai/pdf-smasher/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
+    --certificate-identity-regexp 'https://github\.com/hank-ai/(hankpdf|pdf-smasher)/\.github/workflows/docker\.yml@refs/(heads|tags)/.+' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -173,7 +173,7 @@ git clone --depth=1 https://github.com/agl/jbig2enc.git /tmp/jbig2enc
 cd /tmp/jbig2enc && ./autogen.sh && ./configure && make && sudo make install
 
 # 3. HankPDF
-git clone git@github.com:hank-ai/pdf-smasher.git
+git clone git@github.com:hank-ai/hankpdf.git
 cd hankpdf
 uv sync --all-extras
 uv run hankpdf --version       # smoke test
@@ -196,7 +196,7 @@ source "$HOME/.local/bin/env"
 sudo apt install -y tesseract-ocr libtesseract-dev qpdf jbig2enc-tools
 
 # 4. HankPDF
-git clone git@github.com:hank-ai/pdf-smasher.git
+git clone git@github.com:hank-ai/hankpdf.git
 cd hankpdf
 uv sync --all-extras
 uv run hankpdf --version
@@ -243,9 +243,9 @@ irm https://astral.sh/uv/install.ps1 | iex
 # Tagged URL — main is a mutable branch, so we pin to a specific release.
 # Replace the tag with whatever "jbig2-windows-v*" tag you want to install.
 $tag = "jbig2-windows-v0.1.0"
-irm "https://github.com/hank-ai/pdf-smasher/releases/download/$tag/install_jbig2_windows.ps1" | iex
+irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
 
-git clone git@github.com:hank-ai/pdf-smasher.git
+git clone git@github.com:hank-ai/hankpdf.git
 cd hankpdf
 uv sync --all-extras
 uv run hankpdf --version
@@ -269,25 +269,25 @@ jbig2enc, but every other feature works identically and all tests pass.
 After `uv sync` succeeds, you can either keep prefixing with `uv run hankpdf`, or install the console script system-wide:
 
 ```bash
-uv tool install --from . pdf-smasher
+uv tool install --from . hankpdf
 hankpdf --version
 ```
 
 ### Running tests
 
 ```bash
-uv run pytest -q                          # all 389 tests (~1 min)
+uv run pytest -q                          # all 393 tests (~1 min)
 uv run pytest tests/unit -v               # unit only (~10 s)
 uv run pytest -m integration -v           # integration only
-uv run pytest --cov=pdf_smasher           # with coverage
-uv run ruff check pdf_smasher tests       # lint
-uv run mypy pdf_smasher                   # type check
+uv run pytest --cov=hankpdf           # with coverage
+uv run ruff check hankpdf tests       # lint
+uv run mypy hankpdf                   # type check
 ```
 
 ### Troubleshooting
 
 - `hankpdf --version` — prints Python version, hankpdf version, and every native dep's version + path. If one is missing, that's your install problem.
-- `uv run python -c "import pdf_smasher; print('OK')"` — import smoke test.
+- `uv run python -c "import hankpdf; print('OK')"` — import smoke test.
 - OCR unit tests auto-skip when `tesseract` isn't on PATH. The rest of the suite should pass regardless.
 - Still stuck? Open an issue with `hankpdf --version` output attached.
 

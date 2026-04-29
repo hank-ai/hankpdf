@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.chunking.split_pdf_by_size."""
+"""Tests for hankpdf.chunking.split_pdf_by_size."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pikepdf
 import pypdfium2 as pdfium
 import pytest
 
-from pdf_smasher.engine.chunking import split_pdf_by_size
+from hankpdf.engine.chunking import split_pdf_by_size
 
 
 def _make_n_page_pdf(n: int, payload_kb_per_page: int = 0) -> bytes:

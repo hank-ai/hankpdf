@@ -11,7 +11,7 @@ We convert one to the other.
 
 Source of word boxes:
 
-- :func:`pdf_smasher.engine.ocr.tesseract_word_boxes` — re-OCR the raster
+- :func:`hankpdf.engine.ocr.tesseract_word_boxes` — re-OCR the raster
   via Tesseract. Used for true scans (no upstream text layer).
 - :func:`extract_native_word_boxes` (this module) — read text + bboxes
   from the input PDF's existing content stream via pdfium. Faithful and
@@ -26,7 +26,7 @@ from collections.abc import Sequence
 import pikepdf
 import pypdfium2 as pdfium
 
-from pdf_smasher.engine.ocr import WordBox
+from hankpdf.engine.ocr import WordBox
 
 _HELVETICA_FONT_NAME = pikepdf.Name("/F-HankPDF-Invisible")
 

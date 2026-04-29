@@ -34,8 +34,8 @@ def _run_cli(*argv: str, cwd: Path) -> tuple[int, str, str]:
     # Reset the audit singleton between tests so two runs don't share
     # correlation ids (the CLI re-binds on entry, but being explicit
     # makes the test intent clear).
-    from pdf_smasher.audit import clear_correlation_id
-    from pdf_smasher.cli.main import main
+    from hankpdf.audit import clear_correlation_id
+    from hankpdf.cli.main import main
 
     clear_correlation_id()
 
@@ -129,8 +129,8 @@ def test_correlation_sidecar_not_written_on_stdout(tmp_path: Path) -> None:
     import contextlib
     import io
 
-    from pdf_smasher.audit import clear_correlation_id
-    from pdf_smasher.cli.main import main
+    from hankpdf.audit import clear_correlation_id
+    from hankpdf.cli.main import main
 
     clear_correlation_id()
     # main() calls sys.stdout.buffer.write, so redirect the raw byte

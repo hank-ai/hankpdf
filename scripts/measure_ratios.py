@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pikepdf
 
-from pdf_smasher import CompressError, CompressOptions, compress
+from hankpdf import CompressError, CompressOptions, compress
 
 _NAME_TAIL_LEN = 8
 

@@ -9,8 +9,8 @@ from __future__ import annotations
 import pypdfium2 as pdfium
 from PIL import Image
 
-from pdf_smasher._pillow_hardening import ensure_capped
-from pdf_smasher.engine._render_safety import check_render_size
+from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.engine._render_safety import check_render_size
 
 ensure_capped()
 

@@ -22,7 +22,7 @@ A task is done when every checkbox in it is ticked AND the phase's acceptance cr
 
 **T0.1 — Pre-implementation decisions** *(all decided; captured in ARCHITECTURE §13)*
 
-- [x] Product brand = HankPDF; repo name `pdf-smasher`; CLI binary `hankpdf`.
+- [x] Product brand = HankPDF; repo name `hankpdf`; CLI binary `hankpdf`.
 - [x] Safe mode = explicit opt-in via `--mode safe` or API `mode="safe"`. Default = `standard`.
 - [x] Test corpus strategy = URL-referenced (manifest JSON with filename + upstream URL + SHA-256; no Git LFS).
 - [x] **HankPDF is a local tool**, not a service. No server-side pipeline, no tenant system, no BAA — users who embed it in their own pipeline own that pipeline's compliance.
@@ -46,7 +46,7 @@ A task is done when every checkbox in it is ticked AND the phase's acceptance cr
 - [ ] At v1.1: add a `python3.14t` canary job once pypdfium2, pikepdf, opencv, and lxml publish `cp314t` wheels (tracked in a separate follow-up issue, not blocking v1).
 - [ ] Directory layout:
   ```
-  pdf_smasher/
+  hankpdf/
     __init__.py
     engine/         # core compression: rasterize, segment, encode, compose
     cli/            # argparse entrypoint, report formatters
@@ -174,7 +174,7 @@ Replaces the retired free-threaded smoke-test. Every invocation starts with a fl
 
 **Goal**: turn the spike into a production-quality engine module with the full pipeline (Triage → Sanitize → Recompress → Verify) and the weird-PDF handling from SPEC §4.
 
-**Deliverables**: `pdf_smasher.engine` package exposing `compress()` and `triage()` per SPEC §1.
+**Deliverables**: `hankpdf.engine` package exposing `compress()` and `triage()` per SPEC §1.
 
 **Acceptance criteria**:
 - Every weird-PDF taxonomy row in SPEC §4 has a unit test using a dedicated corpus fixture.
@@ -307,7 +307,7 @@ These items were implemented as part of the Phase-2b build-out and the four-wave
 
 **Goal**: ship the engine behind a stable CLI and importable Python package. This is the first "something real to ship" phase.
 
-**Deliverables**: `pip install pdf-smasher` works (package name stays `pdf-smasher`). `hankpdf --help` prints a proper help screen. Exit codes and JSON report schema match SPEC §2.
+**Deliverables**: `pip install hankpdf` works (package name stays `hankpdf`). `hankpdf --help` prints a proper help screen. Exit codes and JSON report schema match SPEC §2.
 
 **Acceptance criteria**:
 - Full SPEC §2 CLI contract implemented.
@@ -318,9 +318,9 @@ These items were implemented as part of the Phase-2b build-out and the four-wave
 
 ### Tasks
 
-**T3.1 — Public Python API (`pdf_smasher/__init__.py`)**
+**T3.1 — Public Python API (`hankpdf/__init__.py`)**
 - [ ] Export `compress`, `compress_stream`, `triage`, `CompressOptions`, `CompressReport`, all exceptions.
-- [ ] API smoke test: `from pdf_smasher import compress; compress(bytes_read)` works.
+- [ ] API smoke test: `from hankpdf import compress; compress(bytes_read)` works.
 
 **T3.2 — CLI entry point**
 - [ ] `hankpdf` console script via entry_points in pyproject.toml.
@@ -437,7 +437,7 @@ HankPDF is CLI-only. There is no desktop GUI phase. Users who want drag-drop beh
 **Deliverables**: CI produces a wheel + sdist + Docker image on every tag.
 
 **Acceptance criteria**:
-- `pip install pdf-smasher` on a clean Python 3.14 env works; `hankpdf --doctor` passes after the user has installed Tesseract + jbig2enc via their package manager.
+- `pip install hankpdf` on a clean Python 3.14 env works; `hankpdf --doctor` passes after the user has installed Tesseract + jbig2enc via their package manager.
 - `docker run ghcr.io/hank-ai/hankpdf:X.Y --doctor` works on a clean host with no extra setup.
 - Release pipeline runs to green in under 15 minutes.
 
@@ -554,7 +554,7 @@ HankPDF is CLI-only. There is no desktop GUI phase. Users who want drag-drop beh
 - Phase 8 dogfood run clean (≥95% successful, rest return structured refusals, zero crashes).
 - All signing pipelines green.
 - No open P0/P1 issues.
-- `pip install pdf-smasher` → `hankpdf --doctor` works on clean macOS / Windows / Linux / Docker.
+- `pip install hankpdf` → `hankpdf --doctor` works on clean macOS / Windows / Linux / Docker.
 
 ### Tasks
 

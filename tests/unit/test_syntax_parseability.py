@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-_PKG_ROOT = Path(__file__).resolve().parents[2] / "pdf_smasher"
+_PKG_ROOT = Path(__file__).resolve().parents[2] / "hankpdf"
 
 
 @pytest.mark.parametrize("path", sorted(_PKG_ROOT.rglob("*.py")))

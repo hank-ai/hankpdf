@@ -13,7 +13,7 @@ brew install autoconf automake libtool leptonica
 git clone --depth=1 https://github.com/agl/jbig2enc.git /tmp/jbig2enc
 cd /tmp/jbig2enc && ./autogen.sh && ./configure && make && sudo make install
 
-pip install pdf-smasher
+pip install hankpdf
 hankpdf --doctor
 ```
 
@@ -23,7 +23,7 @@ hankpdf --doctor
 sudo apt update
 sudo apt install -y tesseract-ocr libtesseract-dev qpdf jbig2enc-tools
 
-pip install pdf-smasher
+pip install hankpdf
 hankpdf --doctor
 ```
 
@@ -36,7 +36,7 @@ sudo dnf install -y autoconf automake libtool gcc-c++ make
 git clone --depth=1 https://github.com/agl/jbig2enc.git /tmp/jbig2enc
 cd /tmp/jbig2enc && ./autogen.sh && ./configure && make && sudo make install
 
-pip install pdf-smasher
+pip install hankpdf
 hankpdf --doctor
 ```
 
@@ -57,9 +57,9 @@ choco install tesseract qpdf -y
 # you `iex` it. The installer auto-verifies SHA-256 sidecars on every
 # asset, but the installer itself must come from an immutable URL.
 $tag = "jbig2-windows-v0.1.0"
-irm "https://github.com/hank-ai/pdf-smasher/releases/download/$tag/install_jbig2_windows.ps1" | iex
+irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
 
-pip install pdf-smasher
+pip install hankpdf
 hankpdf --doctor
 ```
 
@@ -70,7 +70,7 @@ typically 10-20% larger than with jbig2enc, but every other feature
 works identically and all tests pass. You can re-run the installer
 later, or install `jbig2.exe` manually by downloading
 `jbig2-windows-x64.zip` from the
-[hankpdf Releases](https://github.com/hank-ai/pdf-smasher/releases) page
+[hankpdf Releases](https://github.com/hank-ai/hankpdf/releases) page
 and placing the extracted directory on your PATH.
 
 Option B — **use Docker Desktop instead**. Simpler on Windows.
@@ -108,14 +108,14 @@ docker run --rm \
 hankpdf --doctor
 ```
 
-Should print Python version, pdf-smasher version, engine version, and the version + path of every native dep. Exits 0 if the environment passes all floor checks (qpdf ≥ 11.6.3, OpenJPEG ≥ 2.5.4, Pillow `MAX_IMAGE_PIXELS` set, etc. — see `docs/ARCHITECTURE.md` §3 and `docs/ROADMAP.md` T0.9).
+Should print Python version, hankpdf version, engine version, and the version + path of every native dep. Exits 0 if the environment passes all floor checks (qpdf ≥ 11.6.3, OpenJPEG ≥ 2.5.4, Pillow `MAX_IMAGE_PIXELS` set, etc. — see `docs/ARCHITECTURE.md` §3 and `docs/ROADMAP.md` T0.9).
 
 If anything is missing or out of date, `--doctor` exits 41 with a specific remediation message per missing item.
 
 ## Upgrading
 
 ```bash
-pip install -U pdf-smasher
+pip install -U hankpdf
 # or for Docker:
 docker pull ghcr.io/hank-ai/hankpdf:latest
 ```

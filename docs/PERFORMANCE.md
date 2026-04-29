@@ -171,7 +171,7 @@ The default went from 10.1s pre-this-feature to **5.4s** — 47% faster AND sear
 
 ### Quality heuristic (`is_native_text_decent`)
 
-Lives in `pdf_smasher.engine.text_layer`. Inspects the extracted word list and returns `True` if the text looks like real words. Rejects:
+Lives in `hankpdf.engine.text_layer`. Inspects the extracted word list and returns `True` if the text looks like real words. Rejects:
 
 - **Mostly-non-alphabetic content** (`alpha-or-space ratio < 0.5`) — corrupted layers full of `?` / replacement markers.
 - **Average word length outside 2-12 chars** — gibberish OCR often produces single-char tokens or long runs of garbage.

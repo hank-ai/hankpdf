@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pdf_smasher import __version__
-from pdf_smasher.cli.main import main
+from hankpdf import __version__
+from hankpdf.cli.main import main
 
 
 def test_cli_version_flag(capsys) -> None:  # type: ignore[no-untyped-def]

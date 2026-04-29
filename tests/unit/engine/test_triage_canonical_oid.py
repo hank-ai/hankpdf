@@ -2,7 +2,7 @@
 
 pikepdf reports ``objgen=(0, 0)`` for every direct (inline) Dictionary
 or Array, regardless of position in the tree. Two earlier versions of
-:func:`pdf_smasher.engine.triage._canonical_oid` had distinct bugs that
+:func:`hankpdf.engine.triage._canonical_oid` had distinct bugs that
 both let a malicious PDF hide a JS or EmbeddedFiles entry behind a
 benign sibling:
 
@@ -27,7 +27,7 @@ import io
 
 import pikepdf
 
-from pdf_smasher.engine.triage import _canonical_oid, _detect_javascript
+from hankpdf.engine.triage import _canonical_oid, _detect_javascript
 
 
 def test_canonical_oid_returns_none_for_direct_objects() -> None:

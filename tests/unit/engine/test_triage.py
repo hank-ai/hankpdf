@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.triage — the structural scan phase.
+"""Tests for hankpdf.engine.triage — the structural scan phase.
 
 Triage never decodes image streams. It answers: "what is this PDF, and
 what's the handling policy?" (SPEC.md §4 weird-PDF taxonomy).
@@ -11,7 +11,7 @@ import io
 import pikepdf
 import pytest
 
-from pdf_smasher.engine.triage import triage
+from hankpdf.engine.triage import triage
 
 
 def _minimal_pdf() -> bytes:
@@ -213,7 +213,7 @@ def test_detects_tagged_pdf() -> None:
 
 
 def test_malformed_input_raises_corrupt_error() -> None:
-    from pdf_smasher import CorruptPDFError
+    from hankpdf import CorruptPDFError
 
     with pytest.raises(CorruptPDFError):
         triage(b"not a pdf")

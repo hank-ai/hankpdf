@@ -7,7 +7,7 @@ User-facing install instructions live in `INSTALL.md`. This doc is for contribut
 ## Runtime deps by category
 
 ### Bundled via Python wheel (no user action)
-These arrive automatically with `pip install pdf-smasher`:
+These arrive automatically with `pip install hankpdf`:
 
 | Dep | Provider wheel | Notes |
 |---|---|---|

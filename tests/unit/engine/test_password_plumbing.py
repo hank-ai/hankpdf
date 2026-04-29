@@ -6,7 +6,7 @@ import io
 
 import pikepdf
 
-from pdf_smasher import triage
+from hankpdf import triage
 
 
 def _make_encrypted_pdf(password: str, *, pages: int = 1) -> bytes:
@@ -47,7 +47,7 @@ def test_triage_multipage_with_correct_password_returns_correct_page_count() -> 
 
 def test_canonical_hash_with_correct_password_succeeds() -> None:
     """Forwarder: canonical_input_sha256 uses the password to open."""
-    from pdf_smasher.engine.canonical import canonical_input_sha256
+    from hankpdf.engine.canonical import canonical_input_sha256
 
     pdf_bytes = _make_encrypted_pdf("hunter2")
     digest = canonical_input_sha256(pdf_bytes, password="hunter2")
@@ -63,7 +63,7 @@ def test_image_export_with_correct_password_succeeds() -> None:
     this fails inside _page_size_points or rasterize_page on the
     encrypted PDF.
     """
-    from pdf_smasher.engine.image_export import iter_pages_as_images
+    from hankpdf.engine.image_export import iter_pages_as_images
 
     pdf_bytes = _make_encrypted_pdf("hunter2", pages=2)
     blobs = list(
@@ -82,8 +82,8 @@ def test_image_export_with_correct_password_succeeds() -> None:
 
 def test_compress_with_correct_password_succeeds() -> None:
     """End-to-end: encrypted input + correct password through compress()."""
-    from pdf_smasher import compress
-    from pdf_smasher.types import CompressOptions
+    from hankpdf import compress
+    from hankpdf.types import CompressOptions
 
     pdf_bytes = _make_encrypted_pdf("hunter2", pages=2)
     options = CompressOptions(password="hunter2", skip_verify=True)

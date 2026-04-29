@@ -1,7 +1,7 @@
 """Tests for the full ``compress()`` public API.
 
 This is the end-to-end integration: triage → sanitize → recompress →
-verify → report. Proves that ``from pdf_smasher import compress`` works
+verify → report. Proves that ``from hankpdf import compress`` works
 as the SPEC.md §1 contract promises.
 """
 
@@ -14,7 +14,7 @@ import pypdfium2 as pdfium
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from pdf_smasher import (
+from hankpdf import (
     CompressOptions,
     CompressReport,
     EncryptedPDFError,
@@ -261,7 +261,7 @@ def test_verifier_fail_warning_code_is_normalized() -> None:
 
     # We exercise the warning-formatting helper directly (keeps the test
     # fast and deterministic vs running full compress twice).
-    from pdf_smasher import _format_verifier_failing_pages
+    from hankpdf import _format_verifier_failing_pages
 
     failing = tuple(range(1, 21))  # 20 failing pages
     fragment = _format_verifier_failing_pages(failing)

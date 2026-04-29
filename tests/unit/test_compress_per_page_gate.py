@@ -8,8 +8,8 @@ import shutil
 import pikepdf
 import pytest
 
-from pdf_smasher import compress
-from pdf_smasher.types import CompressOptions
+from hankpdf import compress
+from hankpdf.types import CompressOptions
 
 _requires_tesseract = pytest.mark.skipif(
     shutil.which("tesseract") is None,
@@ -188,10 +188,10 @@ def test_compress_stream_routes_through_the_gate() -> None:
     fires through the streaming entry point too.
 
     compress_stream signature is `(input_stream, output_stream, options=None) -> CompressReport`
-    (per pdf_smasher/__init__.py:1322-1331) — note: TWO positional streams
+    (per hankpdf/__init__.py:1322-1331) — note: TWO positional streams
     and a single CompressReport return.
     """
-    from pdf_smasher import compress_stream
+    from hankpdf import compress_stream
 
     pdf_bytes = _make_text_only_pdf()
     out_buf = io.BytesIO()

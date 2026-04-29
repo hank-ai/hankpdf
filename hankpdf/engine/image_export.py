@@ -23,13 +23,13 @@ from typing import Literal
 import PIL.Image
 import pypdfium2 as pdfium
 
-from pdf_smasher._limits import (
+from hankpdf._limits import (
     MAX_BOMB_PIXELS as _MAX_BOMB_PIXELS,  # noqa: F401  — re-exported for tests/unit/test_pillow_hardening.py
 )
-from pdf_smasher._pillow_hardening import ensure_capped
-from pdf_smasher.engine._render_safety import check_render_size
-from pdf_smasher.engine.rasterize import rasterize_page
-from pdf_smasher.exceptions import DecompressionBombError
+from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.engine._render_safety import check_render_size
+from hankpdf.engine.rasterize import rasterize_page
+from hankpdf.exceptions import DecompressionBombError
 
 ensure_capped()
 
@@ -49,7 +49,7 @@ _WEBP_METHOD_DEFAULT = 4
 
 # Decompression-bomb cap: refuse rasters larger than ~2 GB RGB. At 3 bytes
 # per pixel this is the maximum unsigned 32-bit allocation we allow.
-# SINGLE source of truth is pdf_smasher._limits.MAX_BOMB_PIXELS, shared
+# SINGLE source of truth is hankpdf._limits.MAX_BOMB_PIXELS, shared
 # with PIL.Image.MAX_IMAGE_PIXELS (installed by _pillow_hardening).
 # _MAX_BOMB_PIXELS is a local alias for backward-compat with existing
 # call sites inside this module.

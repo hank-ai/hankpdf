@@ -17,9 +17,9 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
-from pdf_smasher._pillow_hardening import ensure_capped
-from pdf_smasher.engine.strategy import LIGHT_PIXEL_VALUE
-from pdf_smasher.engine.verifier import CHANNEL_SPREAD_COLOR_TOLERANCE
+from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.engine.strategy import LIGHT_PIXEL_VALUE
+from hankpdf.engine.verifier import CHANNEL_SPREAD_COLOR_TOLERANCE
 
 ensure_capped()
 

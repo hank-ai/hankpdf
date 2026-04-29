@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.image_export.render_pages_as_images."""
+"""Tests for hankpdf.image_export.render_pages_as_images."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pikepdf
 import pytest
 from PIL import Image
 
-from pdf_smasher.engine.image_export import iter_pages_as_images, render_pages_as_images
+from hankpdf.engine.image_export import iter_pages_as_images, render_pages_as_images
 
 
 def _make_pdf(n_pages: int) -> bytes:
@@ -236,7 +236,7 @@ def test_webp_lossless_preserves_pixels() -> None:
         webp_lossless=True,
     )[0]
     # Source: render directly at same DPI.
-    from pdf_smasher.engine.rasterize import rasterize_page
+    from hankpdf.engine.rasterize import rasterize_page
 
     src = rasterize_page(pdf_bytes, page_index=0, dpi=100).convert("RGB")
     decoded = Image.open(io.BytesIO(blob)).convert("RGB")
@@ -342,7 +342,7 @@ def test_pre_allocation_pixel_budget_check() -> None:
 
 def test_pillow_decompression_bomb_translated_to_our_class() -> None:
     """Pillow raises PIL.Image.DecompressionBombError; our code must catch
-    it and re-raise as pdf_smasher.DecompressionBombError so the CLI can
+    it and re-raise as hankpdf.DecompressionBombError so the CLI can
     route it to EXIT_DECOMPRESSION_BOMB=16.
 
     Regression: Pillow's DecompressionBombError is NOT a subclass of ours,
@@ -353,8 +353,8 @@ def test_pillow_decompression_bomb_translated_to_our_class() -> None:
 
     import PIL.Image
 
-    from pdf_smasher import DecompressionBombError as HankBomb
-    from pdf_smasher.engine import image_export as ie
+    from hankpdf import DecompressionBombError as HankBomb
+    from hankpdf.engine import image_export as ie
 
     pdf_bytes = _make_pdf(1)
 

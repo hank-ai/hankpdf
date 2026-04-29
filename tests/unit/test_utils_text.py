@@ -1,10 +1,10 @@
-"""Unit tests for pdf_smasher.utils.text."""
+"""Unit tests for hankpdf.utils.text."""
 
 from __future__ import annotations
 
 import pytest
 
-from pdf_smasher.utils.text import format_page_list_short
+from hankpdf.utils.text import format_page_list_short
 
 
 def test_short_list_unchanged() -> None:

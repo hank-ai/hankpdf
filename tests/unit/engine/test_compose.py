@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.compose — build a MRC PDF page.
+"""Tests for hankpdf.engine.compose — build a MRC PDF page.
 
 Assembles (mask, foreground, background, page_size) into a single-page PDF.
 Uses pikepdf. Output is raw PDF bytes.
@@ -14,7 +14,7 @@ import numpy as np
 import pypdfium2 as pdfium
 from PIL import Image
 
-from pdf_smasher.engine.compose import compose_mrc_page
+from hankpdf.engine.compose import compose_mrc_page
 
 
 def _black_blob_foreground(width: int = 600, height: int = 600) -> Image.Image:

@@ -7,7 +7,7 @@ import io
 import pikepdf
 import pytest
 
-from pdf_smasher.engine.page_classifier import score_pages_for_mrc
+from hankpdf.engine.page_classifier import score_pages_for_mrc
 
 
 def _make_text_only_pdf() -> bytes:

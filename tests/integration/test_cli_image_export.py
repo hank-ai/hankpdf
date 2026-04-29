@@ -8,7 +8,7 @@ import pikepdf
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from pdf_smasher.cli.main import main
+from hankpdf.cli.main import main
 
 
 def _make_pdf(tmp_path, n_pages: int = 2):  # type: ignore[no-untyped-def]
@@ -183,8 +183,8 @@ def test_output_format_override_corrects_extension(tmp_path) -> None:  # type: i
 def test_image_export_routes_malicious_to_specific_exit(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """If triage raises MaliciousPDFError, image-export must return
     EXIT_MALICIOUS=14, not the generic EXIT_CORRUPT=13."""
-    import pdf_smasher.cli.main as cli_main
-    from pdf_smasher.exceptions import MaliciousPDFError
+    import hankpdf.cli.main as cli_main
+    from hankpdf.exceptions import MaliciousPDFError
 
     def fake_triage(_b, **_kwargs):  # type: ignore[no-untyped-def]
         msg = "synthetic malicious content"
@@ -202,8 +202,8 @@ def test_image_export_routes_malicious_to_specific_exit(tmp_path, monkeypatch) -
 def test_image_export_routes_bomb_to_specific_exit(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """If triage raises DecompressionBombError, image-export must
     return EXIT_DECOMPRESSION_BOMB=16, not EXIT_CORRUPT=13."""
-    import pdf_smasher.cli.main as cli_main
-    from pdf_smasher.exceptions import DecompressionBombError
+    import hankpdf.cli.main as cli_main
+    from hankpdf.exceptions import DecompressionBombError
 
     def fake_triage(_b, **_kwargs):  # type: ignore[no-untyped-def]
         msg = "synthetic bomb"
@@ -223,7 +223,7 @@ def test_image_export_pad_width_scales_past_999(tmp_path, monkeypatch) -> None: 
     multi-page image-export branch. 1200-page jobs must produce
     out_0001.jpg ... out_1200.jpg (4-digit pad), not a mix of 3- and
     4-digit names that sort-lex wrong."""
-    import pdf_smasher.cli.main as cli_main
+    import hankpdf.cli.main as cli_main
 
     in_path = _make_pdf(tmp_path, n_pages=2)
     out_path = tmp_path / "out.jpg"
@@ -269,7 +269,7 @@ def test_image_export_partial_failure_emits_summary(tmp_path, capsys, monkeypatc
     """When page N fails mid-stream, CLI must: exit a specific code
     (not 1, not raw traceback), emit a 'wrote K of N' stderr summary,
     and list orphaned files so the operator can clean them up."""
-    from pdf_smasher.engine import image_export as ie
+    from hankpdf.engine import image_export as ie
 
     in_path = _make_pdf(tmp_path, n_pages=5)
     out_path = tmp_path / "out.jpg"

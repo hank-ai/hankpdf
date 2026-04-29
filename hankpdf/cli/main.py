@@ -14,7 +14,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from pdf_smasher import (
+from hankpdf import (
     CertifiedSignatureError,
     CompressError,
     CompressOptions,
@@ -33,14 +33,14 @@ from pdf_smasher import (
     compress,
     triage,
 )
-from pdf_smasher.cli.warning_codes import emit as _warn
-from pdf_smasher.cli.warning_codes import emit_error as _warn_error
-from pdf_smasher.cli.warning_codes import emit_refusal as _refuse
-from pdf_smasher.cli.warning_codes import line_prefix as _line_prefix
-from pdf_smasher.engine.chunking import split_pdf_by_size
-from pdf_smasher.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
-from pdf_smasher.utils.atomic import _atomic_write_bytes
-from pdf_smasher.utils.text import format_page_list_short
+from hankpdf.cli.warning_codes import emit as _warn
+from hankpdf.cli.warning_codes import emit_error as _warn_error
+from hankpdf.cli.warning_codes import emit_refusal as _refuse
+from hankpdf.cli.warning_codes import line_prefix as _line_prefix
+from hankpdf.engine.chunking import split_pdf_by_size
+from hankpdf.engine.image_export import _MAX_IMAGE_DPI_LIB, iter_pages_as_images
+from hankpdf.utils.atomic import _atomic_write_bytes
+from hankpdf.utils.text import format_page_list_short
 
 
 def _input_label(input_path: Path | None) -> str | Path | None:
@@ -566,7 +566,7 @@ def _doctor_report() -> str:
     import shutil
     import subprocess
 
-    from pdf_smasher._version import build_info, version_line
+    from hankpdf._version import build_info, version_line
 
     lines = [
         version_line(),
@@ -987,7 +987,7 @@ def main(argv: list[str] | None = None) -> int:
     # `correlation_id` matches.
     import uuid as _uuid
 
-    from pdf_smasher.audit import set_correlation_id
+    from hankpdf.audit import set_correlation_id
 
     _run_correlation_id = _uuid.uuid4().hex
     set_correlation_id(_run_correlation_id)
@@ -996,7 +996,7 @@ def main(argv: list[str] | None = None) -> int:
         # version_line() embeds git_sha + build_date + image digest when
         # running from a Docker image that wrote /etc/hankpdf/build-info.json
         # at build time (B3). Dev installs just print version + python.
-        from pdf_smasher._version import version_line
+        from hankpdf._version import version_line
 
         print(version_line())
         return EXIT_OK
@@ -1103,7 +1103,7 @@ def main(argv: list[str] | None = None) -> int:
     # --report json on stdout stays clean for piping. --quiet suppresses both.
     from tqdm import tqdm
 
-    from pdf_smasher import ProgressEvent
+    from hankpdf import ProgressEvent
 
     _bar: tqdm | None = None
 

@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.foreground — extract the foreground layer.
+"""Tests for hankpdf.engine.foreground — extract the foreground layer.
 
 The foreground layer in our MRC output is a 1-bit image. Where the mask is
 True, we preserve ink; where the mask is False, the background layer shows
@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from pdf_smasher.engine.foreground import ForegroundLayer, extract_foreground
+from hankpdf.engine.foreground import ForegroundLayer, extract_foreground
 
 
 def _page_with_black_text_on_white(width: int = 400, height: int = 200) -> Image.Image:

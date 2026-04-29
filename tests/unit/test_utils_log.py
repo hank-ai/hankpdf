@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pdf_smasher.utils.log import redact_filename, redact_text
+from hankpdf.utils.log import redact_filename, redact_text
 
 HASH_PREFIX_LEN = 8  # per docs/SPEC.md §9.2 — sha1(basename)[:8]
 

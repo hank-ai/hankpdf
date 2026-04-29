@@ -5,7 +5,7 @@ from __future__ import annotations
 import pikepdf
 import pytest
 
-from pdf_smasher.cli.main import main
+from hankpdf.cli.main import main
 
 
 def _make_big_pdf(tmp_path, n_pages: int = 4, payload_kb_per_page: int = 250):  # type: ignore[no-untyped-def]
@@ -151,7 +151,7 @@ def test_chunk_pad_width_scales_beyond_999(tmp_path, monkeypatch) -> None:  # ty
     We monkeypatch split_pdf_by_size to return 1200 tiny chunks so we
     don't have to actually build a 1200-page PDF.
     """
-    import pdf_smasher.cli.main as cli_main
+    import hankpdf.cli.main as cli_main
 
     in_path = _make_big_pdf(tmp_path, n_pages=2)
     out_path = tmp_path / "smol.pdf"

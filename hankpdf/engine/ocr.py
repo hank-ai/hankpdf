@@ -16,8 +16,8 @@ from dataclasses import dataclass
 import pytesseract
 from PIL import Image
 
-from pdf_smasher._pillow_hardening import ensure_capped
-from pdf_smasher.exceptions import OcrTimeoutError
+from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.exceptions import OcrTimeoutError
 
 ensure_capped()
 

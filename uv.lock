@@ -94,6 +94,51 @@ wheels = [
 ]
 
 [[package]]
+name = "hankpdf"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy" },
+    { name = "opencv-python-headless" },
+    { name = "pikepdf" },
+    { name = "pillow" },
+    { name = "pypdfium2" },
+    { name = "pytesseract" },
+    { name = "scikit-image" },
+    { name = "tqdm" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=2.4.0" },
+    { name = "opencv-python-headless", specifier = ">=4.13.0" },
+    { name = "pikepdf", specifier = ">=10.5.1" },
+    { name = "pillow", specifier = ">=12.2.0" },
+    { name = "pypdfium2", specifier = ">=5.7.1" },
+    { name = "pytesseract", specifier = ">=0.3.13" },
+    { name = "scikit-image", specifier = ">=0.26.0" },
+    { name = "tqdm", specifier = ">=4.67" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pre-commit", specifier = ">=4.0" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
 name = "identify"
 version = "2.6.19"
 source = { registry = "https://pypi.org/simple" }
@@ -333,51 +378,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/fa/36/e27608899f9b8d4dff0617b2d9ab17ca5608956ca44461ac14ac48b44015/pathspec-1.0.4.tar.gz", hash = "sha256:0210e2ae8a21a9137c0d470578cb0e595af87edaa6ebf12ff176f14a02e0e645", size = 131200, upload-time = "2026-01-27T03:59:46.938Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ef/3c/2c197d226f9ea224a9ab8d197933f9da0ae0aac5b6e0f884e2b8d9c8e9f7/pathspec-1.0.4-py3-none-any.whl", hash = "sha256:fb6ae2fd4e7c921a165808a552060e722767cfa526f99ca5156ed2ce45a5c723", size = 55206, upload-time = "2026-01-27T03:59:45.137Z" },
-]
-
-[[package]]
-name = "pdf-smasher"
-version = "0.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "numpy" },
-    { name = "opencv-python-headless" },
-    { name = "pikepdf" },
-    { name = "pillow" },
-    { name = "pypdfium2" },
-    { name = "pytesseract" },
-    { name = "scikit-image" },
-    { name = "tqdm" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = ">=2.4.0" },
-    { name = "opencv-python-headless", specifier = ">=4.13.0" },
-    { name = "pikepdf", specifier = ">=10.5.1" },
-    { name = "pillow", specifier = ">=12.2.0" },
-    { name = "pypdfium2", specifier = ">=5.7.1" },
-    { name = "pytesseract", specifier = ">=0.3.13" },
-    { name = "scikit-image", specifier = ">=0.26.0" },
-    { name = "tqdm", specifier = ">=4.67" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=1.13" },
-    { name = "pre-commit", specifier = ">=4.0" },
-    { name = "pytest", specifier = ">=8.3" },
-    { name = "pytest-cov", specifier = ">=6.0" },
-    { name = "ruff", specifier = ">=0.8" },
 ]
 
 [[package]]

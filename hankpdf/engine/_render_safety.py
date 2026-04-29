@@ -6,7 +6,7 @@ allocate the bitmap. Without this check on the compress path, a PDF
 with an oversized MediaBox triggers a multi-GB allocation inside
 pdfium before any of our own guards fire.
 
-Canonical home of the cap is :data:`pdf_smasher._limits.MAX_BOMB_PIXELS` —
+Canonical home of the cap is :data:`hankpdf._limits.MAX_BOMB_PIXELS` —
 this module imports it and exposes :func:`check_render_size` plus an opt-in
 ``max_pixels`` override for callers that knowingly want a higher ceiling
 (e.g., a future ``render-page`` CLI dealing with engineering drawings).
@@ -14,8 +14,8 @@ this module imports it and exposes :func:`check_render_size` plus an opt-in
 
 from __future__ import annotations
 
-from pdf_smasher._limits import MAX_BOMB_PIXELS
-from pdf_smasher.exceptions import DecompressionBombError
+from hankpdf._limits import MAX_BOMB_PIXELS
+from hankpdf.exceptions import DecompressionBombError
 
 _POINTS_PER_INCH: float = 72.0
 
@@ -29,7 +29,7 @@ def check_render_size(
 ) -> None:
     """Refuse if rasterizing the page at ``dpi`` would exceed ``max_pixels``.
 
-    :class:`pdf_smasher.exceptions.DecompressionBombError` is raised before
+    :class:`hankpdf.exceptions.DecompressionBombError` is raised before
     any allocation happens. The CLI maps the exception to
     ``EXIT_DECOMPRESSION_BOMB=16``.
 

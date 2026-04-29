@@ -116,7 +116,7 @@ via the release-pinned PowerShell script:
 
 ```powershell
 $tag = "jbig2-windows-v0.1.0"
-irm "https://github.com/hank-ai/pdf-smasher/releases/download/$tag/install_jbig2_windows.ps1" | iex
+irm "https://github.com/hank-ai/hankpdf/releases/download/$tag/install_jbig2_windows.ps1" | iex
 ```
 
 …or HankPDF will fall back to CCITT G4 for the text layer (outputs

@@ -10,7 +10,7 @@ import pypdfium2 as pdfium
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from pdf_smasher.cli.main import main
+from hankpdf.cli.main import main
 
 
 def _make_pdf(tmp_path, text: str = "HELLO WORLD") -> object:  # type: ignore[no-untyped-def]

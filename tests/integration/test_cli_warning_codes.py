@@ -1,7 +1,7 @@
 """CLI-layer regression: every stderr warning/error line uses a stable code.
 
 Reviewer C flagged stderr warnings as free prose (hard to grep in batch logs).
-The :mod:`pdf_smasher.cli.warning_codes` module defines stable codes like
+The :mod:`hankpdf.cli.warning_codes` module defines stable codes like
 ``W-CHUNKS-EXCEED-CAP`` and :func:`emit` wraps every ``[hankpdf] warning``
 line. These tests drive each emission path and assert the code appears.
 """
@@ -13,8 +13,8 @@ import io
 import pikepdf
 import pytest
 
-from pdf_smasher.cli.main import main
-from pdf_smasher.cli.warning_codes import CliErrorCode, CliWarningCode
+from hankpdf.cli.main import main
+from hankpdf.cli.warning_codes import CliErrorCode, CliWarningCode
 
 
 def _make_pdf(tmp_path, n_pages: int = 2):  # type: ignore[no-untyped-def]

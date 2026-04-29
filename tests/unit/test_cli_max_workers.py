@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from pdf_smasher.cli.main import main
+from hankpdf.cli.main import main
 
 
 @pytest.mark.parametrize("bad", ["-1", "-100", "257", "99999"])

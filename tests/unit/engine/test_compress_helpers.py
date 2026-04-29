@@ -6,7 +6,7 @@ import io
 
 import pikepdf
 
-from pdf_smasher import _extract_ground_truth_text
+from hankpdf import _extract_ground_truth_text
 
 
 def _pdf_with_text_layer(text: str) -> bytes:

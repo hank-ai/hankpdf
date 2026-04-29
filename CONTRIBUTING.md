@@ -1,6 +1,6 @@
 # Contributing to HankPDF
 
-HankPDF (package name `pdf-smasher`) is Apache-2.0 licensed. Contributions are welcome once the repository is public — this file is kept current so it's ready on day one.
+HankPDF (package name `hankpdf`) is Apache-2.0 licensed. Contributions are welcome once the repository is public — this file is kept current so it's ready on day one.
 
 ## Dev setup
 
@@ -22,15 +22,15 @@ uv sync --all-extras --dev
 uv run pytest                          # unit + integration (fast)
 uv run pytest -m slow                  # slow / corpus-backed tests
 uv run pytest -m 'integration'         # integration only
-uv run pytest --cov=pdf_smasher        # with coverage
+uv run pytest --cov=hankpdf        # with coverage
 ```
 
 ## Linting and type checks
 
 ```bash
-uv run ruff check pdf_smasher tests    # lint
-uv run ruff format pdf_smasher tests   # format
-uv run mypy pdf_smasher                # strict type check
+uv run ruff check hankpdf tests    # lint
+uv run ruff format hankpdf tests   # format
+uv run mypy hankpdf                # strict type check
 ```
 
 Pre-commit hooks run a subset of the above on every commit:

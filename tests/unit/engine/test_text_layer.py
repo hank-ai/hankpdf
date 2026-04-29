@@ -1,4 +1,4 @@
-"""Tests for pdf_smasher.engine.text_layer — invisible OCR text.
+"""Tests for hankpdf.engine.text_layer — invisible OCR text.
 
 We add a text layer to the composed PDF so users can select + search text
 that was recognized by OCR. Rendering mode 3 (invisible) means the text is
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pypdfium2 as pdfium
 
-from pdf_smasher.engine.ocr import WordBox
-from pdf_smasher.engine.text_layer import add_text_layer
+from hankpdf.engine.ocr import WordBox
+from hankpdf.engine.text_layer import add_text_layer
 
 
 def _single_page_pdf() -> bytes:

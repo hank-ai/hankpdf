@@ -1,8 +1,62 @@
 # Changelog
 
-All notable changes to `pdf-smasher` (HankPDF) are documented here. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows pre-1.0 SemVer (anything may break between minor versions until 1.0).
+All notable changes to `hankpdf` (formerly `pdf-smasher` on PyPI) are documented here. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows pre-1.0 SemVer (anything may break between minor versions until 1.0).
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-04-28
+
+**Distribution rename: `pdf-smasher` → `hankpdf`.** The CLI command, GHCR image, product brand, and now the PyPI distribution + Python import package are all `hankpdf`. The previous split (`pip install pdf-smasher` / `hankpdf in.pdf`) was confusing for new users; consolidating to a single name end-to-end. `pdf-smasher 0.1.0` on PyPI is yanked (existing pins still install with a warning per PEP 592; bare `pip install pdf-smasher` no longer resolves).
+
+### Migration
+
+```bash
+# was
+pip install pdf-smasher
+# now
+pip install hankpdf
+```
+
+```python
+# was
+from pdf_smasher import compress, CompressOptions
+from pdf_smasher.types import CompressReport
+
+# now
+from hankpdf import compress, CompressOptions
+from hankpdf.types import CompressReport
+```
+
+The `pdf_smasher` import package is preserved as a **deprecation shim** for one cycle — every import re-exports the public API from `hankpdf` and emits a `DeprecationWarning` pointing at the new name. Scheduled for removal in **0.3.0**.
+
+After pulling: `rm -rf .venv .mypy_cache .pytest_cache && uv sync` to clear cached PKG-INFO from the old dist name.
+
+### Wheel filename change (BREAKING for CI scripts that pin filenames)
+
+- Old: `pdf_smasher-0.1.0-py3-none-any.whl`
+- New: `hankpdf-0.2.0-py3-none-any.whl`
+
+Anyone pinning the wheel filename in CI or air-gapped install scripts must update.
+
+### Cosign verify recipe
+
+The `--certificate-identity-regexp` for verifying signed Docker images now must allow either repo path during the transition (the GHCR image name `ghcr.io/hank-ai/hankpdf` is unchanged and was always branded that way). See updated examples in `README.md` and `docker/README.md`.
+
+### Repo also renamed
+
+`hank-ai/pdf-smasher` → `hank-ai/hankpdf` (round-trip from a brief detour earlier in the day). GitHub redirects keep old URLs working; new clones / GitHub UI links use the canonical name.
+
+### Added
+- New canonical Python package `hankpdf/`. All API entries (`compress`, `compress_stream`, `triage`, `CompressOptions`, `CompressReport`, `BuildInfo`, `VerifierResult`, `TriageReport`, `__version__`, `__engine_version__`) re-exported from package root.
+- Deprecation shim package `pdf_smasher/` — `from pdf_smasher import *` still works for one release cycle; emits `DeprecationWarning` with migration text.
+- `tests/integration/test_install_smoke.py` — 4 tests guarding the rename: canonical import works without warning, legacy shim emits the right warning, `importlib.metadata.version("hankpdf")` matches `hankpdf.__version__`, and a clean-venv wheel install end-to-end smoke (`hankpdf --version` resolves correctly, both import paths work in a freshly-installed Python).
+
+### Changed
+- `pyproject.toml`: `name = "pdf-smasher"` → `name = "hankpdf"`. `[project.scripts] hankpdf = "pdf_smasher.cli.main:main"` → `"hankpdf.cli.main:main"`. `[tool.hatch.build.targets.wheel] packages` ships **both** `hankpdf` and `pdf_smasher` (the shim) for one cycle. Project URLs flipped back to `github.com/hank-ai/hankpdf` (post-repo-rename).
+- `hankpdf/_version.py`: `_dist_version("pdf-smasher")` → `_dist_version("hankpdf")`. `_DEV_VERSION` `"0.1.0"` → `"0.2.0"`. The previous string would have caused `hankpdf --version` to silently report the dev fallback (`0.1.0`) on every installed wheel — a stealth failure caught by the new install-smoke test.
+- `uv.lock` regenerated under the new dist name.
+- `.github/workflows/docker.yml` path filter `pdf_smasher/**` → `hankpdf/**` so changes to the renamed package keep triggering image rebuilds.
+- All ruff per-file overrides in `pyproject.toml` and all docs/tests/scripts paths updated from `pdf_smasher/...` to `hankpdf/...`.
 
 ## [0.1.0] - 2026-04-28
 

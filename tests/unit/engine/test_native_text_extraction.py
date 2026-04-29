@@ -11,8 +11,8 @@ import io
 
 import pikepdf
 
-from pdf_smasher.engine.ocr import WordBox
-from pdf_smasher.engine.text_layer import (
+from hankpdf.engine.ocr import WordBox
+from hankpdf.engine.text_layer import (
     extract_native_word_boxes,
     is_native_text_decent,
 )

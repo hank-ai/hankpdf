@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pdf_smasher.exceptions import (
+from hankpdf.exceptions import (
     CertifiedSignatureError,
     CompressError,
     ContentDriftError,

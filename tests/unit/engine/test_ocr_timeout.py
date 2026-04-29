@@ -20,8 +20,8 @@ from unittest.mock import patch
 import pytest
 from PIL import Image
 
-from pdf_smasher.engine.ocr import tesseract_word_boxes
-from pdf_smasher.exceptions import OcrTimeoutError
+from hankpdf.engine.ocr import tesseract_word_boxes
+from hankpdf.exceptions import OcrTimeoutError
 
 
 def test_ocr_timeout_raises_typed_error() -> None:

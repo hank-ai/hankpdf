@@ -21,7 +21,7 @@ on:
     paths:
       - "docker/**"
       - ".github/workflows/docker.yml"
-      - "pdf_smasher/**"
+      - "hankpdf/**"
       - "pyproject.toml"
   workflow_dispatch:
 

@@ -1,11 +1,11 @@
-"""Tests for pdf_smasher.engine.background — background layer extraction."""
+"""Tests for hankpdf.engine.background — background layer extraction."""
 
 from __future__ import annotations
 
 import numpy as np
 from PIL import Image
 
-from pdf_smasher.engine.background import extract_background
+from hankpdf.engine.background import extract_background
 
 
 def _raster_with_dark_blob(width: int = 600, height: int = 600) -> Image.Image:

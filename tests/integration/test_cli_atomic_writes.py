@@ -19,7 +19,7 @@ import pathlib
 import pikepdf
 import pytest
 
-from pdf_smasher.cli.main import main
+from hankpdf.cli.main import main
 
 
 def _install_flaky_partial_writer(

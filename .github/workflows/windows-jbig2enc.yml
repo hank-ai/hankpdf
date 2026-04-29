@@ -466,7 +466,7 @@ jobs:
             **Install (tagged, auditable URL):**
 
             ```powershell
-            irm https://github.com/hank-ai/pdf-smasher/releases/download/${{ github.ref_name }}/install_jbig2_windows.ps1 | iex
+            irm https://github.com/hank-ai/hankpdf/releases/download/${{ github.ref_name }}/install_jbig2_windows.ps1 | iex
             ```
 
             Extract `jbig2-windows-x64.zip` and place the directory on
