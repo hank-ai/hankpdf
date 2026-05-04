@@ -23,7 +23,9 @@ from hankpdf import (
     CorruptPDFError,
     DecompressionBombError,
     EncryptedPDFError,
+    HostResourceError,
     MaliciousPDFError,
+    MemoryCapExceededError,
     OcrTimeoutError,
     OversizeError,
     PerPageTimeoutError,
@@ -195,6 +197,7 @@ EXIT_CERTIFIED_SIG = 15
 EXIT_DECOMPRESSION_BOMB = 16
 EXIT_ENV_MISSING = 17
 EXIT_MEM_CAP = 18
+EXIT_HOST_RESOURCE = 19
 EXIT_VERIFIER_FAIL = 20
 EXIT_ENGINE_ERROR = 30
 EXIT_USAGE = 40
@@ -366,6 +369,16 @@ def _parser() -> argparse.ArgumentParser:
             f"Per-page parallelism. 0 (default) = auto (cpu_count-1, min 1). "
             f"1 = serial. 2..{_MAX_WORKER_COUNT} = exactly N workers. Each "
             "worker gets its own single-page PDF slice, never the whole source."
+        ),
+    )
+    p.add_argument(
+        "--max-worker-memory-mb",
+        type=int,
+        default=None,
+        help=(
+            "Per-page worker memory cap in MB. Default: max(8 GB, 16 × input_size) "
+            "clamped to 16 GB and an aggregate-envelope check against host RAM. "
+            "Set explicitly to override; pass 0 to disable (test escape hatch)."
         ),
     )
     p.add_argument(
@@ -553,6 +566,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         # --skip-verify still accepted as a no-op alias for the default.
         skip_verify=not args.verify,
         max_workers=args.max_workers,
+        max_worker_memory_mb=args.max_worker_memory_mb,
         legal_codec_profile="ccitt-g4" if args.legal_mode else None,
         target_pdf_a=args.target_pdfa,
         ocr=args.ocr,
@@ -1251,6 +1265,26 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return EXIT_VERIFIER_FAIL
+        except HostResourceError as e:
+            print(
+                _refuse(
+                    "E-HOST-RESOURCE",
+                    f"insufficient host memory for the requested workers ({e})",
+                    input_name=_label,
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_HOST_RESOURCE
+        except MemoryCapExceededError as e:
+            print(
+                _refuse(
+                    "E-INPUT-OVERSIZE",
+                    f"worker memory cap exceeded ({e})",
+                    input_name=_label,
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_MEM_CAP
         # Timeouts — subclasses of CompressError; catch BEFORE the generic
         # handler so they carry stable codes (exit code is EXIT_ENGINE_ERROR
         # since timeouts aren't a separate code in the SPEC §2.2 table).

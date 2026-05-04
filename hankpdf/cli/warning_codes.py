@@ -55,6 +55,7 @@ CliErrorCode = Literal[
     "E-TIMEOUT-PER-PAGE",
     "E-TIMEOUT-TOTAL",
     "E-OCR-TIMEOUT",
+    "E-HOST-RESOURCE",
 ]
 
 WARN_PREFIX: Final = "[hankpdf] warning"

@@ -100,6 +100,10 @@ class CompressOptions:
     #   N > 1 = exactly N workers
     max_workers: int = 0
 
+    # Per-page worker memory cap. None = compute as max(8 GB, 16 * input_bytes).
+    # Set explicitly to override; pass 0 to disable (test escape hatch).
+    max_worker_memory_mb: int | None = None
+
     # Output
     emit_sidecar_manifest: bool = True
     output_pdf_version: str = "1.7"

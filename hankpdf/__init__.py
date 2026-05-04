@@ -14,6 +14,7 @@ import hashlib
 import io
 import os
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -23,9 +24,11 @@ from concurrent.futures import (
     as_completed,
 )
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from concurrent.futures.process import BrokenProcessPool
 from typing import IO, Any, Literal
 
 import pikepdf
+import psutil
 
 # Import for side effect: installs PIL.Image.MAX_IMAGE_PIXELS per SECURITY.md
 # and docs/THREAT_MODEL.md. Must run before any other module that opens images
@@ -40,7 +43,9 @@ from hankpdf.exceptions import (
     DecompressionBombError,
     EncryptedPDFError,
     EnvironmentError,  # noqa: A004 — part of our public error hierarchy
+    HostResourceError,
     MaliciousPDFError,
+    MemoryCapExceededError,
     OcrTimeoutError,
     OversizeError,
     PerPageTimeoutError,
@@ -68,7 +73,9 @@ __all__ = [
     "DecompressionBombError",
     "EncryptedPDFError",
     "EnvironmentError",
+    "HostResourceError",
     "MaliciousPDFError",
+    "MemoryCapExceededError",
     "OcrTimeoutError",
     "OversizeError",
     "PerPageTimeoutError",
@@ -79,6 +86,8 @@ __all__ = [
     "VerifierResult",
     "__version__",
     "_enforce_input_policy",
+    "_init_worker",
+    "check_abort",
     "compress",
     "compress_stream",
     "triage",
@@ -112,6 +121,27 @@ _AUTO_WORKER_RESERVE = 1
 # options.max_workers values: 0 = auto, 1 = serial, N >= this = N workers.
 _MIN_EXPLICIT_WORKER_COUNT = 2
 
+# Per-page worker memory cap constants (Task 8).
+# Hard ceiling — even legit huge scans don't justify >16 GB per worker
+# (rasterized bombs are already bounded by Pillow MAX_IMAGE_PIXELS).
+_HARD_CEILING_BYTES = 16 * 1024**3
+# Floor — small inputs still get a generous cap for legitimate raster work.
+_FLOOR_BYTES = 8 * 1024**3
+# Per-page raster inflation factor over input bytes (300 DPI rasterization).
+_INFLATION_FACTOR = 16
+# Worker death exit codes that signal kernel-level memory-cap kill.
+_KERNEL_CAP_KILL_EXITCODES_UNIX = {-9, 137}  # SIGKILL or 128+9
+_STATUS_QUOTA_EXCEEDED = 0xC0000044  # Windows: Job Object kill exit code
+
+# Module-global so worker code can reach it without threading through
+# every dataclass. Set ONCE per worker via _init_worker.
+_WORKER_ABORT_EVENT: Any = None
+# Worker-local boot warnings (e.g., W-CAPS-UNAVAILABLE, W-CAPS-FAILED).
+# Drained into the first _PageResult.per_page_warnings tuple emitted by
+# this worker so the parent's CompressReport.warnings surfaces them.
+_WORKER_BOOT_WARNINGS: list[str] = []
+_WORKER_BOOT_WARNINGS_DRAINED: bool = False
+
 
 import re as _re
 
@@ -139,8 +169,10 @@ def _resolve_worker_count(options: CompressOptions, n_pages: int) -> int:
     return min(auto, n_pages)
 
 
-def _init_worker() -> None:
-    """ProcessPoolExecutor initializer. Pins each worker to single-threaded
+def _pin_blas_threads() -> None:
+    """Pin OMP/BLAS to single-thread per process.
+
+    Pins each worker (and the parent, for consistency) to single-threaded
     native libraries so N workers use exactly N cores, not N * cpu_count cores.
 
     Without this, Tesseract's OpenMP (and numpy BLAS + OpenCV) each try to
@@ -148,12 +180,248 @@ def _init_worker() -> None:
     in parallel workers then creates N*cpu_count threads competing for
     cpu_count cores — context-switch thrash can fully eat the parallel
     speedup (sometimes making parallel slower than serial on the same box).
+
+    Safe to call from both parent and worker — env-vars only, no caps.
+    Idempotent.
     """
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+
+def _init_worker(mem_cap: int, abort_event: Any) -> None:
+    """ProcessPoolExecutor initializer (worker-only).
+
+    Pins OMP/BLAS threads, applies per-worker memory cap, and stashes
+    the shared cooperative-abort event on a module-global the worker
+    code path checks at safe-write boundaries.
+
+    ``mem_cap`` is bytes; ``0`` disables the cap (test escape hatch).
+    ``abort_event`` is the shared mp.Event — created from the same
+    mp_context as the executor by the parent — that all workers see;
+    when the parent's RSS watchdog fires, it sets this event and ALL
+    in-flight workers cooperatively drain and exit.
+    """
+    global _WORKER_ABORT_EVENT
+    _WORKER_ABORT_EVENT = abort_event
+    _pin_blas_threads()
+
+    if mem_cap > 0:
+        # Local import keeps the parent process from paying the
+        # platform_caps import cost when no cap is requested.
+        from hankpdf.sandbox import (
+            CapsUnavailableError,
+            apply_self_memory_cap,
+        )
+
+        try:
+            apply_self_memory_cap(mem_cap)
+        except CapsUnavailableError as e:
+            sys.stderr.write(f"[W-CAPS-UNAVAILABLE] {e}\n")
+            _WORKER_BOOT_WARNINGS.append("W-CAPS-UNAVAILABLE")
+        except (OSError, ValueError) as e:
+            # macOS rejects setrlimit(RLIMIT_AS, ...) with ValueError
+            # ("current limit exceeds maximum limit") — the kernel
+            # facility is unsupported, not a Python-level argument bug.
+            # Treat the same as a kernel rejection so the worker still
+            # boots and the parent's RSS watchdog backstops.
+            sys.stderr.write(f"[W-CAPS-FAILED] {e}\n")
+            _WORKER_BOOT_WARNINGS.append("W-CAPS-FAILED")
+
+
+def check_abort() -> None:
+    """Worker-side cooperative-abort check.
+
+    Call this at safe-write boundaries inside _process_single_page
+    (before each pikepdf.save() chunk emission, before heavy raster
+    allocations, before strategy compose calls). Raises
+    MemoryCapExceededError if the parent's watchdog has signaled abort.
+    """
+    if _WORKER_ABORT_EVENT is not None and _WORKER_ABORT_EVENT.is_set():
+        msg = "aborted by parent watchdog (host memory pressure)"
+        raise MemoryCapExceededError(msg)
+
+
+def _compute_worker_mem_cap(
+    input_size_bytes: int,
+    n_workers: int,
+    options: CompressOptions,
+) -> int:
+    """Compute the per-worker memory cap with hard ceiling + aggregate envelope.
+
+    Three constraints, in order of precedence:
+
+    1. Aggregate envelope: cap × n_workers must not exceed 70% of host
+       available RAM. We pick the smaller of (per-worker computed cap)
+       and (host-available × 0.7 / n_workers). Avoids the 7 × 8 GB =
+       56 GB scenario on a 32 GB host.
+    2. Hard ceiling: never more than 16 GB per worker, regardless of
+       input size. A library caller passing 4 GB of bytes would
+       otherwise lift the cap to 64 GB (16 × 4 GB) — defeats the bomb
+       defense for that input. The CLI clamps via --max-input-mb=250
+       but the library API has no such clamp, hence this absolute cap.
+    3. Per-input scaling: max(floor, inflation × input_size). Floor is
+       8 GB so trivial inputs still get headroom for legitimate
+       rasterization.
+
+    options.max_worker_memory_mb overrides constraints 2 and 3 (caller
+    knows their workload); constraint 1 (aggregate envelope) still
+    applies as a host-protection floor.
+    """
+    if options.max_worker_memory_mb is not None:
+        # 0 is the documented test escape hatch; bypass all clamps.
+        if options.max_worker_memory_mb == 0:
+            return 0
+        per_worker = int(options.max_worker_memory_mb) * 1024 * 1024
+    else:
+        per_worker = max(_FLOOR_BYTES, _INFLATION_FACTOR * input_size_bytes)
+        per_worker = min(per_worker, _HARD_CEILING_BYTES)
+
+    # Aggregate envelope — protect the host.
+    try:
+        available = psutil.virtual_memory().available
+    except Exception:
+        # If psutil can't read /proc on a sealed container, skip the
+        # envelope check. The hard ceiling above still applies.
+        return per_worker
+    aggregate_budget = int(available * 0.7)
+    envelope_per_worker = aggregate_budget // max(1, n_workers)
+    return min(per_worker, envelope_per_worker)
+
+
+def _requested_worker_count(options: CompressOptions) -> int:
+    """Return the user's requested worker count, *not* clamped by n_pages.
+
+    Used for the host-resource envelope check, which must fire on the
+    user's intent (max_workers=8) regardless of how many pages the input
+    actually has. ``_resolve_worker_count`` clamps to ``min(N, n_pages)``
+    which would mask the host-pressure issue on degenerate inputs.
+    """
+    if options.max_workers >= _MIN_EXPLICIT_WORKER_COUNT:
+        return options.max_workers
+    if options.max_workers == 1:
+        return 1
+    return max(1, (os.cpu_count() or 4) - _AUTO_WORKER_RESERVE)
+
+
+class _WatchdogState:
+    """Watchdog state object — readable by the result-collection loop
+    after the watchdog has exited. ``exitcodes`` is populated as workers
+    disappear from the executor's process table; this avoids the race
+    where ``BrokenProcessPool`` clears ``_processes`` before
+    ``_classify_worker_death`` reads it.
+    """
+
+    __slots__ = (
+        "any_cap_exceeded",
+        "exitcodes",
+        "stop_event",
+        "thread_died",
+    )
+
+    def __init__(self) -> None:
+        self.any_cap_exceeded: bool = False
+        self.thread_died: bool = False
+        self.stop_event: threading.Event = threading.Event()
+        self.exitcodes: dict[int, int] = {}
+
+
+def _start_rss_watchdog(
+    ex: Any,  # ProcessPoolExecutor — kept Any for the thread-pool escape hatch
+    mem_cap: int,
+    abort_event: Any,  # mp.Event, shared with all workers
+    state: _WatchdogState,
+) -> threading.Thread:
+    """Poll each worker's RSS; if any exceeds the cap, set the shared
+    abort_event so ALL workers cooperatively exit at the next
+    safe-write boundary.
+
+    The kernel-level cap (RLIMIT_AS on Unix, Job Object on Windows) is
+    the authoritative SIGKILL. This watchdog catches malloc-by-mmap
+    escapes from RLIMIT_AS on Linux and provides observability for all
+    platforms. It does NOT call psutil.Process.terminate() — that path
+    corrupts partial output streams.
+
+    Cost: one psutil call per worker per 500ms. Negligible on idle
+    hosts; under heavy load /proc reads can take >10ms each.
+
+    Also proactively snapshots worker exitcodes as workers exit, so the
+    result-collection loop can classify deaths even after
+    BrokenProcessPool clears the executor's _processes table.
+    """
+    if mem_cap <= 0:
+        # No cap: return a stub thread so the finally-block join is safe.
+        t = threading.Thread(target=lambda: None, daemon=True)
+        t.start()
+        return t
+
+    def _loop() -> None:
+        try:
+            seen_pids: set[int] = set()
+            while not state.stop_event.wait(0.5):
+                processes = dict(getattr(ex, "_processes", {}))
+                for pid, proc in processes.items():
+                    seen_pids.add(pid)
+                    # Snapshot exitcode if the worker has died; do this
+                    # before the RSS poll so we capture deaths the poll
+                    # missed. OVERWRITE only when we have a real exit
+                    # code to replace a placeholder.
+                    ec = getattr(proc, "exitcode", None)
+                    if ec is not None:
+                        existing = state.exitcodes.get(pid)
+                        if existing is None or existing == -1:
+                            state.exitcodes[pid] = ec
+                    try:
+                        rss = psutil.Process(pid).memory_info().rss
+                    except (
+                        psutil.NoSuchProcess,
+                        psutil.AccessDenied,
+                        psutil.ZombieProcess,
+                    ):
+                        continue
+                    if rss > mem_cap:
+                        sys.stderr.write(
+                            f"[W-MEM-RSS-WATCHDOG] worker pid={pid} "
+                            f"RSS={rss} exceeded cap={mem_cap}; "
+                            f"requesting cooperative shutdown\n"
+                        )
+                        # Set the shared event — ALL workers see it and
+                        # cooperatively drain at next safe-write boundary.
+                        abort_event.set()
+                        state.any_cap_exceeded = True
+                # Capture exitcodes for workers that left the table.
+                for pid in list(seen_pids - set(processes.keys())):
+                    if pid not in state.exitcodes:
+                        # Best-effort placeholder — table may not have
+                        # entries for workers that already cleaned up.
+                        state.exitcodes.setdefault(pid, -1)
+        except Exception as e:  # never let the watchdog die silently
+            state.thread_died = True
+            sys.stderr.write(f"[W-WATCHDOG-DIED] {type(e).__name__}: {e}\n")
+            raise
+
+    t = threading.Thread(target=_loop, daemon=True, name="hankpdf-rss-watchdog")
+    t.start()
+    return t
+
+
+def _classify_worker_death(state: _WatchdogState) -> bool:
+    """Return True iff at least one worker died from a memory cap.
+
+    Reads ONLY from the watchdog's snapshot state (state.exitcodes,
+    state.any_cap_exceeded) — never from executor._processes, which
+    may be cleared by BrokenProcessPool before this is called.
+    """
+    if state.any_cap_exceeded:
+        return True
+    for ec in state.exitcodes.values():
+        if ec in _KERNEL_CAP_KILL_EXITCODES_UNIX:
+            return True
+        if sys.platform == "win32" and ec == _STATUS_QUOTA_EXCEEDED:
+            return True
+    return False
 
 
 from dataclasses import dataclass as _dc  # noqa: E402 — adjacent to other module-level aliases
@@ -383,6 +651,18 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     )
 
     _worker_t0 = time.monotonic()
+    # Cooperative-abort check (Task 8): bail before any work begins.
+    check_abort()
+    # Drain boot warnings (e.g., W-CAPS-UNAVAILABLE, W-CAPS-FAILED) that
+    # the worker accumulated in _init_worker. One worker may process
+    # many pages; only include boot warnings on the FIRST page result
+    # to avoid duplication. We track this with a worker-local "drained"
+    # flag.
+    _boot_warnings: tuple[str, ...] = ()
+    global _WORKER_BOOT_WARNINGS_DRAINED
+    if not _WORKER_BOOT_WARNINGS_DRAINED:
+        _boot_warnings = tuple(_WORKER_BOOT_WARNINGS)
+        _WORKER_BOOT_WARNINGS_DRAINED = True
     i = winput.page_index
     width_pt, height_pt = winput.page_size
     options = winput.options
@@ -433,7 +713,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             composed_bytes=winput.input_page_pdf,
             strategy_name="already_optimized",
             verdict=_verdict,
-            per_page_warnings=(),
+            per_page_warnings=_boot_warnings,
             input_bytes=len(winput.input_page_pdf),
             output_bytes=len(winput.input_page_pdf),
             ratio=1.0,
@@ -441,6 +721,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         )
 
     # --- Rasterize input ---
+    check_abort()  # heavy raster allocation — bail if parent watchdog signaled
     raster = rasterize_page(
         winput.input_page_pdf, page_index=0, dpi=winput.source_dpi, password=None
     )
@@ -581,6 +862,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             raise AssertionError(msg)
 
         # --- Strategy dispatch ---
+        check_abort()  # bail before strategy compose (allocation-heavy)
         if strategy == PageStrategy.TEXT_ONLY:
             if not options.force_monochrome and not is_effectively_monochrome(raster):
                 warnings.append(f"page-{i + 1}-text-only-demoted-to-mixed-color-detected")
@@ -651,6 +933,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             if not word_boxes and _need_tesseract_for_text_layer:
                 _await_input_ocr()
             if word_boxes:
+                check_abort()  # bail before text-layer pikepdf.save() boundary
                 composed = add_text_layer(
                     composed,
                     page_index=0,
@@ -752,12 +1035,13 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     out_bytes = len(composed)
     true_ratio = in_bytes / max(1, out_bytes)
 
+    check_abort()  # last chance to bail before parent merges this result
     return _PageResult(
         page_index=i,
         composed_bytes=composed,
         strategy_name=strategy.name.lower(),
         verdict=verdict,
-        per_page_warnings=tuple(warnings),
+        per_page_warnings=tuple(warnings) + _boot_warnings,
         input_bytes=in_bytes,
         output_bytes=out_bytes,
         ratio=true_ratio,
@@ -902,6 +1186,32 @@ def compress(
             "outputs; tracked for a later phase."
         )
         raise NotImplementedError(msg)
+
+    # ── Host-resource envelope check (Task 8) ──────────────────────────
+    # Fires BEFORE triage / per-page gate / passthrough / executor setup
+    # so a host with insufficient available RAM gets a clean refusal
+    # regardless of whether the input would otherwise short-circuit
+    # (0-page input, whole-doc passthrough, corrupt-PDF refusal, etc.).
+    # Uses the user's *requested* worker count (not clamped to n_pages)
+    # so the error reflects user intent.
+    #
+    # The thread-pool escape hatch (HANKPDF_POOL=thread) deliberately
+    # bypasses this check — applying RLIMIT_AS to threads would cap the
+    # parent. Tests and library callers that want to disable the check
+    # also use ``CompressOptions(max_worker_memory_mb=0)``.
+    _pool_kind_for_check = os.environ.get("HANKPDF_POOL", "process").lower()
+    if _pool_kind_for_check != "thread":
+        _check_n_workers = _requested_worker_count(options)
+        _check_mem_cap = _compute_worker_mem_cap(
+            len(input_data), _check_n_workers, options
+        )
+        if _check_mem_cap > 0 and _check_mem_cap < (256 * 1024 * 1024):
+            _msg = (
+                f"computed worker memory cap {_check_mem_cap / 1024**2:.0f} MB is below "
+                "the 256 MB minimum (host RAM pressure). Reduce --max-workers or "
+                "free memory before retrying."
+            )
+            raise HostResourceError(_msg)
 
     # Lazy imports of engine modules so ``from hankpdf import CompressOptions``
     # doesn't pay the startup cost of loading pdfium / OpenCV / Tesseract.
@@ -1145,17 +1455,42 @@ def compress(
         import multiprocessing as _mp
 
         _pool_kind = os.environ.get("HANKPDF_POOL", "process").lower()
-        _init_worker()  # also pin parent's OMP/BLAS for consistency
+        _pin_blas_threads()  # parent: env-vars only; never apply RLIMIT to ourselves
         _ex_kwargs: dict[str, Any] = {"max_workers": n_workers}
+        # mem_cap and shared_abort_event are set in the process-pool branch
+        # below; the thread-pool escape hatch (HANKPDF_POOL=thread) skips
+        # them. Applying RLIMIT_AS from a thread initializer would cap the
+        # parent process itself (workers are threads in the same address
+        # space) — incorrect. Tests under HANKPDF_POOL=thread run uncapped.
+        mem_cap = 0
+        shared_abort_event: Any = None
         if _pool_kind == "thread":
             executor_cls: type = ThreadPoolExecutor
             label = "thread (UNSAFE: pdfium not thread-safe, may crash)"
         else:
             executor_cls = ProcessPoolExecutor
-            _ex_kwargs["initializer"] = _init_worker
             available = _mp.get_all_start_methods()
             chosen_method = "forkserver" if "forkserver" in available else "spawn"
+            mem_cap = _compute_worker_mem_cap(len(input_data), n_workers, options)
+            # 0 is the documented test escape hatch — skip the floor check.
+            if mem_cap > 0 and mem_cap < (256 * 1024 * 1024):
+                # Less than 256 MB per worker is below the floor for legitimate
+                # 300-DPI rasterization. Fail loud rather than crash mid-job.
+                # Use HostResourceError (NOT MemoryCapExceededError, which means
+                # "a worker died from cap" — no worker has been created yet).
+                _msg = (
+                    f"computed worker memory cap {mem_cap / 1024**2:.0f} MB is below "
+                    "the 256 MB minimum (host RAM pressure). Reduce --max-workers or "
+                    "free memory before retrying."
+                )
+                raise HostResourceError(_msg)
             ctx = _mp.get_context(chosen_method)
+            # Single shared abort event — created from the executor's
+            # mp_context so the underlying semaphore handle is
+            # forkserver/spawn-compatible.
+            shared_abort_event = ctx.Event()
+            _ex_kwargs["initializer"] = _init_worker
+            _ex_kwargs["initargs"] = (mem_cap, shared_abort_event)
             if chosen_method == "forkserver":
                 try:
                     ctx.set_forkserver_preload(
@@ -1201,56 +1536,89 @@ def compress(
         # workers all start simultaneously so the "rasterizing pN" label
         # doesn't mean anything. Only page_done fires (from completion order).
         with executor_cls(**_ex_kwargs) as ex:
-            future_to_winput: dict[Any, _WorkerInput] = {
-                ex.submit(_process_single_page, w): w for w in winputs
-            }
-            # `as_completed` iterates in completion order. `_pos` is 1-indexed
-            # completion position, which is what tqdm wants for the progress bar.
-            # Per-page timeout: we wait at most per_page_timeout_seconds * n_pages
-            # for ALL futures to complete (a proxy for strict per-page — true
-            # per-page is impossible with as_completed since workers start
-            # together). If the total budget expires, we cancel and raise
-            # PerPageTimeoutError naming the laggards.
-            _per_page_budget = options.per_page_timeout_seconds
-            _parallel_total_budget = _per_page_budget * max(1, len(winputs))
+            # Spawn the parent-side RSS watchdog. mem_cap=0 (test escape
+            # hatch or thread pool) returns a stub thread so the join is
+            # safe regardless. The watchdog observes worker RSS and sets
+            # the shared abort_event on cap-overrun; workers cooperatively
+            # exit at the next check_abort() boundary.
+            _wd_state = _WatchdogState()
+            _watchdog = _start_rss_watchdog(ex, mem_cap, shared_abort_event, _wd_state)
             try:
-                _completed_iter = as_completed(
-                    future_to_winput,
-                    timeout=_parallel_total_budget,
-                )
-                for _pos, fut in enumerate(_completed_iter, start=1):
-                    w = future_to_winput[fut]
-                    try:
-                        result = fut.result()
-                    except KeyboardInterrupt:
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except AssertionError, CompressError:
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except Exception as e:
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        msg = _page_error_context(w.page_index, e)
-                        raise CompressError(msg) from e
-                    _merge_result(_pos, result)
-            except FuturesTimeoutError as e:
-                ex.shutdown(wait=False, cancel_futures=True)
-                _pending = [
-                    fw.page_index + 1 for fut, fw in future_to_winput.items() if not fut.done()
-                ]
-                _pending_display = _format_verifier_failing_pages(
-                    tuple(_pending),
-                    limit=10,
-                )
-                msg = (
-                    f"per-page timeout ({_per_page_budget}s x {len(winputs)} pages) "
-                    f"exceeded; {len(_pending)} page(s) still pending: "
-                    f"{_pending_display}"
-                )
-                raise PerPageTimeoutError(msg) from e
-            except BaseException:  # pragma: no cover — cancellation path
-                ex.shutdown(wait=False, cancel_futures=True)
-                raise
+                future_to_winput: dict[Any, _WorkerInput] = {
+                    ex.submit(_process_single_page, w): w for w in winputs
+                }
+                # `as_completed` iterates in completion order. `_pos` is 1-indexed
+                # completion position, which is what tqdm wants for the progress bar.
+                # Per-page timeout: we wait at most per_page_timeout_seconds * n_pages
+                # for ALL futures to complete (a proxy for strict per-page — true
+                # per-page is impossible with as_completed since workers start
+                # together). If the total budget expires, we cancel and raise
+                # PerPageTimeoutError naming the laggards.
+                _per_page_budget = options.per_page_timeout_seconds
+                _parallel_total_budget = _per_page_budget * max(1, len(winputs))
+                try:
+                    _completed_iter = as_completed(
+                        future_to_winput,
+                        timeout=_parallel_total_budget,
+                    )
+                    for _pos, fut in enumerate(_completed_iter, start=1):
+                        w = future_to_winput[fut]
+                        try:
+                            result = fut.result()
+                        except KeyboardInterrupt:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            raise
+                        except AssertionError, CompressError:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            raise
+                        except (BrokenProcessPool, MemoryCapExceededError):
+                            # Race-fix: workers killed faster than the watchdog
+                            # poll cadence (500 ms) won't have their exit code
+                            # in state.exitcodes yet. Drain whatever's in the
+                            # (about-to-clear) process table now so the
+                            # classifier has fresh data. OVERWRITE: don't let
+                            # setdefault mask a real exitcode behind a placeholder.
+                            for _pid, _proc in dict(getattr(ex, "_processes", {})).items():
+                                _ec = getattr(_proc, "exitcode", None)
+                                if _ec is not None:
+                                    _wd_state.exitcodes[_pid] = _ec
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            if _classify_worker_death(_wd_state):
+                                _msg = "per-page worker exceeded memory cap"
+                                raise MemoryCapExceededError(_msg) from None
+                            raise
+                        except Exception as e:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            msg = _page_error_context(w.page_index, e)
+                            raise CompressError(msg) from e
+                        _merge_result(_pos, result)
+                except FuturesTimeoutError as e:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    _pending = [
+                        fw.page_index + 1 for fut, fw in future_to_winput.items() if not fut.done()
+                    ]
+                    _pending_display = _format_verifier_failing_pages(
+                        tuple(_pending),
+                        limit=10,
+                    )
+                    msg = (
+                        f"per-page timeout ({_per_page_budget}s x {len(winputs)} pages) "
+                        f"exceeded; {len(_pending)} page(s) still pending: "
+                        f"{_pending_display}"
+                    )
+                    raise PerPageTimeoutError(msg) from e
+                except BaseException:  # pragma: no cover — cancellation path
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    raise
+            finally:
+                _wd_state.stop_event.set()
+                _watchdog.join(timeout=2)
+                # Liveness check: if the watchdog died, the cap was
+                # effectively unenforced for at least part of the run.
+                # Surface this so users can re-run with --max-workers
+                # reduced.
+                if _wd_state.thread_died:
+                    warnings_list.append("W-WATCHDOG-DIED")
     else:
         # Serial path: dispatch each page through a 1-worker ThreadPoolExecutor
         # so we can enforce per_page_timeout_seconds via future.result(timeout=).
