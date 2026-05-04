@@ -54,6 +54,12 @@ class EnvironmentError(CompressError):  # noqa: A001 — this is our own subclas
     The ``--doctor`` subcommand provides a full diagnostic report.
     """
 
+    # Populated by ``hankpdf._environment.assert_environment_ready`` with a
+    # tuple of :class:`hankpdf._environment.EnvFailure` records describing
+    # the floor violations. Typed as ``tuple[object, ...]`` to keep
+    # ``exceptions.py`` import-free of the probe module.
+    failures: tuple[object, ...] = ()
+
 
 class OcrTimeoutError(CompressError):
     """Tesseract subprocess exceeded the configured per-page timeout.
