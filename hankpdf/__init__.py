@@ -403,8 +403,9 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         # Synthetic verdict invariant: this fast path emits
         # _PageVerdict(lev=1.0, ssim_global=0.0, ssim_tile_min=0.0, ...)
         # — sentinel values, not real measurements. They are SAFE only
-        # because compress()'s _force_full_pipeline interlock disables
-        # the gate when --verify is on, so verbatim verdicts never feed
+        # because the _force_full_pipeline interlock (now in
+        # hankpdf.engine.per_page_gate) disables the gate when --verify
+        # is on, so verbatim verdicts never feed
         # _VerifierAggregator.merge(). If a future change relaxes the
         # interlock (or adds a new gate-disable path), the invariant
         # below will trip first instead of silently corrupting metrics.
@@ -412,7 +413,8 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             msg = (
                 "verbatim worker fast-path reached with skip_verify=False; "
                 "synthetic PageVerdict would pollute _VerifierAggregator. "
-                "Check the _force_full_pipeline interlock in compress()."
+                "Check the _force_full_pipeline interlock in "
+                "hankpdf.engine.per_page_gate."
             )
             raise AssertionError(msg)
         from hankpdf.engine.verifier import PageVerdict as _PageVerdict
@@ -982,35 +984,12 @@ def compress(
     #                          PageVerdict values into _VerifierAggregator
     #                          and pollute the aggregate ssim/lev/digit
     #                          metrics on partial-passthrough runs.
-    from hankpdf.engine.page_classifier import score_pages_for_mrc
+    from hankpdf.engine.per_page_gate import run_per_page_gate
 
-    _force_full_pipeline = (
-        bool(options.re_ocr)
-        or bool(options.strip_text_layer)
-        or bool(options.legal_codec_profile)
-        or not options.skip_verify
-    )
-    if _force_full_pipeline:
-        _mrc_flags = [True] * tri.pages
-    else:
-        _mrc_flags = score_pages_for_mrc(
-            input_data,
-            password=options.password,
-            min_image_byte_fraction=options.min_image_byte_fraction,
-        )
+    _gate = run_per_page_gate(input_data, tri, options)
+    _mrc_flags = list(_gate.mrc_worthy)
 
-    # Defensive: if the classifier disagreed with triage on the page count
-    # (qpdf-repaired inputs, or a future pikepdf upgrade that changes the
-    # iteration semantics), surface the contract drift now rather than
-    # IndexError-ing deep in the per-page loop. Coerce to triage's count
-    # (the source of truth for everything downstream) and emit a warning.
-    if len(_mrc_flags) != tri.pages:
-        _mrc_flags = (_mrc_flags + [True] * tri.pages)[: tri.pages]
-        # Note: this falls through to per-page processing without a
-        # CompressReport.warnings entry today (warnings is built later);
-        # if the drift is ever observed in production, wire a code.
-
-    if not any(_mrc_flags):
+    if _gate.whole_doc_passthrough:
         # Whole-doc shortcut: every page is verbatim → return input unchanged.
         # compress() returns tuple[bytes, CompressReport]; the unchanged input
         # is the byte-identical first element.
