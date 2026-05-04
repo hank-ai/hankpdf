@@ -71,15 +71,11 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-# Ship both the canonical `hankpdf` package and the legacy `pdf_smasher`
-# deprecation shim. Shim re-exports public API and emits DeprecationWarning;
-# scheduled for removal in v0.3.0.
-packages = ["hankpdf", "pdf_smasher"]
+packages = ["hankpdf"]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "hankpdf/**",
-    "pdf_smasher/**",
     "README.md",
     "LICENSE",
     "NOTICE",

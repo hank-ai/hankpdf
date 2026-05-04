@@ -4,6 +4,20 @@ All notable changes to `hankpdf` (formerly `pdf-smasher` on PyPI) are documented
 
 ## [Unreleased]
 
+### Removed (BREAKING)
+
+- `pdf_smasher/` deprecation shim. The shim was a one-cycle soft landing
+  for the v0.2.0 distribution rename. Migrate now:
+  - Was: `from pdf_smasher import compress`
+  - Now: `from hankpdf import compress`
+  - Was: `pdf_smasher.__version__`
+  - Now: `hankpdf.__version__`
+  - Was: `importlib.metadata.version("pdf-smasher")`
+  - Now: `importlib.metadata.version("hankpdf")`
+  Run your test suite under
+  `PYTHONWARNINGS=error::DeprecationWarning` to catch any remaining
+  shim usage before upgrading.
+
 ## [0.2.2] - 2026-04-29
 
 **No code changes** — terminology refresh requested by the CTO. The PyPI project description, GHCR image label, `hankpdf --help` output, module docstring, and all docs now describe HankPDF as a **PDF compressor** rather than a "PDF shrinker." Reasoning: "shrinking" implies pixel resize / dimensional reduction, which is one operation in the pipeline (background-layer DPI downsampling) but not the product. The product is byte-level compression via codec changes (JBIG2 / JPEG / JPEG2000), MRC layering, and foreground/background segmentation.
