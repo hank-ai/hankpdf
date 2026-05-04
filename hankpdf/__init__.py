@@ -113,6 +113,22 @@ _AUTO_WORKER_RESERVE = 1
 _MIN_EXPLICIT_WORKER_COUNT = 2
 
 
+import re as _re
+
+_CORRELATION_ID_RE = _re.compile(r"\A[A-Za-z0-9._:-]{1,64}\Z")
+
+
+def _validate_correlation_id(cid: str | None) -> None:
+    if cid is None:
+        return
+    if not _CORRELATION_ID_RE.match(cid):
+        msg = (
+            "correlation_id must match [A-Za-z0-9._:-]{1,64} "
+            f"(got {cid!r})"
+        )
+        raise ValueError(msg)
+
+
 def _resolve_worker_count(options: CompressOptions, n_pages: int) -> int:
     """Return the actual number of workers for this run. 1 == serial path."""
     if options.max_workers == 1:
@@ -817,6 +833,9 @@ def compress(
     fresh UUID4 is generated. Library callers who drive multiple pages
     through one logger should pass the same id they prefix stderr with.
     """
+    # NEW (Task 3): validate args before env precondition
+    _validate_correlation_id(correlation_id)
+
     # Lazy native-dep boot check (cached for the process lifetime via
     # functools.cache on get_environment_report). Raises EnvironmentError
     # with a friendly install hint if tesseract/qpdf/openjpeg are missing
@@ -1456,9 +1475,18 @@ def compress_stream(
     input_stream: IO[bytes],
     output_stream: IO[bytes],
     options: CompressOptions | None = None,
+    *,
+    correlation_id: str | None = None,
 ) -> CompressReport:
-    """Streaming compression variant. See ``docs/SPEC.md`` §1.2."""
+    """Streaming compression variant. See ``docs/SPEC.md`` §1.2.
+
+    ``correlation_id`` (optional, ``[A-Za-z0-9._:-]{1,64}``) is stamped
+    onto the returned :class:`CompressReport`. Pass the same id your
+    upstream logger prefixes its lines with so the report can be
+    joined back to the calling system's log slice. If omitted, a fresh
+    UUID4 hex is generated.
+    """
     data = input_stream.read()
-    out, report = compress(data, options=options)
+    out, report = compress(data, options=options, correlation_id=correlation_id)
     output_stream.write(out)
     return report

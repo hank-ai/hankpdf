@@ -392,6 +392,16 @@ def _parser() -> argparse.ArgumentParser:
     # Reporting
     p.add_argument("--report", choices=["text", "json", "jsonl", "none"], default="text")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument(
+        "--correlation-id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help=(
+            "Stamp this correlation ID onto the CompressReport and stderr "
+            "lines. Format: [A-Za-z0-9._:-]{1,64}. Default: fresh UUID4 hex."
+        ),
+    )
 
     # Image export mode (JPEG / PNG per page — skips the MRC pipeline).
     p.add_argument(
@@ -981,6 +991,18 @@ def _run_image_export(
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
 
+    # Validate user-supplied --correlation-id at the CLI boundary BEFORE
+    # the env-check below, so a bad format short-circuits to EXIT_USAGE
+    # (40) instead of being masked by an exit-17 env failure.
+    if args.correlation_id is not None:
+        from hankpdf import _validate_correlation_id
+
+        try:
+            _validate_correlation_id(args.correlation_id)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return EXIT_USAGE
+
     # Generate a correlation id for this invocation and register it with
     # the audit module so every warning_codes stderr line gets stamped.
     # Wave 5 / C2: on-call can grep a batch log for `corr=<id>` and tie
@@ -990,7 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from hankpdf.audit import set_correlation_id
 
-    _run_correlation_id = _uuid.uuid4().hex
+    _run_correlation_id = args.correlation_id if args.correlation_id is not None else _uuid.uuid4().hex
     set_correlation_id(_run_correlation_id)
 
     if args.version:
