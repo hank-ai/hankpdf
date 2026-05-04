@@ -35,6 +35,7 @@ import psutil
 # and docs/THREAT_MODEL.md. Must run before any other module that opens images
 # via Pillow, so keep this import early in __init__.
 from hankpdf import _pillow_hardening as _pillow_hardening
+from hankpdf._limits import MAX_PAGE_AXIS_PT
 from hankpdf._version import __engine_version__, __version__
 from hankpdf.exceptions import (
     CertifiedSignatureError,
@@ -611,7 +612,51 @@ def _enforce_input_policy(
         )
         raise OversizeError(msg)
 
+    # Page-dimension bomb guard. Rasterize-time check_render_size catches
+    # over-pixel allocations inside the worker, but a 60000x20000 pt page
+    # that is empty of image content gets routed to the verbatim/passthrough
+    # fast path *before* any worker is dispatched — so the rasterize guard
+    # never fires. Refuse at triage time regardless of page content density.
+    _enforce_page_axis_cap(input_data, options)
+
     return PolicyDecision.PROCEED
+
+
+def _enforce_page_axis_cap(input_data: bytes, options: CompressOptions) -> None:
+    """Refuse if any page's MediaBox/CropBox axis exceeds MAX_PAGE_AXIS_PT.
+
+    Walks pikepdf-parsed pages once; the open is cheap because triage has
+    already validated the document. Uses CropBox when present (visible
+    region) and falls back to MediaBox; either axis exceeding the cap
+    triggers a :class:`DecompressionBombError`.
+    """
+    try:
+        with pikepdf.open(io.BytesIO(input_data), password=options.password or "") as pdf:
+            for idx, page in enumerate(pdf.pages):
+                box = page.obj.get("/CropBox") or page.obj.get("/MediaBox")
+                if box is None:
+                    continue
+                try:
+                    coords = [float(v) for v in box]  # type: ignore[union-attr]
+                except (TypeError, ValueError):
+                    continue
+                if len(coords) < 4:
+                    continue
+                width = abs(coords[2] - coords[0])
+                height = abs(coords[3] - coords[1])
+                if width > MAX_PAGE_AXIS_PT or height > MAX_PAGE_AXIS_PT:
+                    msg = (
+                        f"page {idx + 1} declares {width:.0f}x{height:.0f} pt "
+                        f"(MediaBox/CropBox); axis cap is {MAX_PAGE_AXIS_PT:.0f} pt "
+                        f"(200 in). Refusing as a decompression-bomb candidate."
+                    )
+                    raise DecompressionBombError(msg)
+    except pikepdf.PdfError as e:
+        # Triage already accepted the document; if pikepdf can't reopen
+        # it here, surface as CorruptPDFError so callers see a structured
+        # exit code (13) rather than EXIT_ENGINE_ERROR=30.
+        msg = f"unable to inspect page dimensions: {e}"
+        raise CorruptPDFError(msg) from e
 
 
 def _mrc_compose(
