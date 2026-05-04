@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re as _re
 import shutil
 import sys
 import threading
@@ -164,8 +165,6 @@ _WORKER_BOOT_WARNINGS: list[str] = []
 _WORKER_BOOT_WARNINGS_DRAINED: bool = False
 
 
-import re as _re
-
 _CORRELATION_ID_RE = _re.compile(r"\A[A-Za-z0-9._:-]{1,64}\Z")
 
 
@@ -173,10 +172,7 @@ def _validate_correlation_id(cid: str | None) -> None:
     if cid is None:
         return
     if not _CORRELATION_ID_RE.match(cid):
-        msg = (
-            "correlation_id must match [A-Za-z0-9._:-]{1,64} "
-            f"(got {cid!r})"
-        )
+        msg = f"correlation_id must match [A-Za-z0-9._:-]{{1,64}} (got {cid!r})"
         raise ValueError(msg)
 
 
@@ -411,8 +407,7 @@ def _start_rss_watchdog(
                     # (worker_peak_rss_max_bytes). Done BEFORE the cap
                     # comparison so even pre-overrun samples land in the
                     # high-water mark.
-                    if rss > state.peak_rss:
-                        state.peak_rss = rss
+                    state.peak_rss = max(state.peak_rss, rss)
                     if rss > mem_cap:
                         sys.stderr.write(
                             f"[W-MEM-RSS-WATCHDOG] worker pid={pid} "
@@ -648,8 +643,8 @@ def _enforce_page_axis_cap(input_data: bytes, options: CompressOptions) -> None:
                 if box is None:
                     continue
                 try:
-                    coords = [float(v) for v in box]  # type: ignore[union-attr]
-                except (TypeError, ValueError):
+                    coords = [float(v) for v in box]  # type: ignore[attr-defined]
+                except TypeError, ValueError:
                     continue
                 if len(coords) < 4:
                     continue
@@ -1174,7 +1169,7 @@ def _extract_ground_truth_text(
                 _tp.close()
         finally:
             _doc.close()
-    except Exception:  # noqa: BLE001, S110 — best-effort native-text probe; any error → fall back to OCR.
+    except Exception:  # noqa: S110 — best-effort native-text probe; any error → fall back to OCR.
         pass
     return fallback_ocr_text
 
@@ -1300,9 +1295,7 @@ def compress(
     _pool_kind_for_check = os.environ.get("HANKPDF_POOL", "process").lower()
     if _pool_kind_for_check != "thread":
         _check_n_workers = _requested_worker_count(options)
-        _check_mem_cap = _compute_worker_mem_cap(
-            len(input_data), _check_n_workers, options
-        )
+        _check_mem_cap = _compute_worker_mem_cap(len(input_data), _check_n_workers, options)
         if _check_mem_cap > 0 and _check_mem_cap < (256 * 1024 * 1024):
             _msg = (
                 f"computed worker memory cap {_check_mem_cap / 1024**2:.0f} MB is below "
@@ -1691,7 +1684,7 @@ def compress(
                         except AssertionError, CompressError:
                             ex.shutdown(wait=False, cancel_futures=True)
                             raise
-                        except (BrokenProcessPool, MemoryCapExceededError):
+                        except BrokenProcessPool, MemoryCapExceededError:
                             # Race-fix: workers killed faster than the watchdog
                             # poll cadence (500 ms) won't have their exit code
                             # in state.exitcodes yet. Drain whatever's in the

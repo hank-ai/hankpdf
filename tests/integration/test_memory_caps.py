@@ -210,7 +210,9 @@ def test_watchdog_aborts_running_workers_via_shared_event(monkeypatch):
     _, pool_report = compress(
         pdf_in,
         options=CompressOptions(
-            mode="fast", max_workers=2, max_worker_memory_mb=cap_mb,
+            mode="fast",
+            max_workers=2,
+            max_worker_memory_mb=cap_mb,
         ),
     )
     # Pool path actually ran — _run_mem_cap was assigned via

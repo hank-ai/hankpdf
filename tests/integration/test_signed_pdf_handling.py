@@ -41,12 +41,12 @@ def _ensure_corpus() -> None:
     expected = ["simple_signed.pdf", "certifying_signed.pdf", "multi_signed.pdf"]
     missing = [n for n in expected if not (CORPUS / n).exists()]
     if missing:
-        pytest.skip(
-            f"signed-PDF corpus missing: {missing} — run scripts/generate_signed_corpus.py"
-        )
+        pytest.skip(f"signed-PDF corpus missing: {missing} — run scripts/generate_signed_corpus.py")
 
 
-def _run_cli(args: list[str], env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    args: list[str], env_extra: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["HANKPDF_SKIP_ENV_CHECK"] = "1"
     if env_extra:
@@ -123,9 +123,7 @@ def test_certifying_signed_with_allow_certified_does_not_refuse(tmp_path: Path) 
     on a near-empty page, ratio floor, etc), but it MUST NOT be exit 15.
     """
     out = tmp_path / "out.pdf"
-    proc = _run_cli(
-        [str(CERTIFYING), "-o", str(out), "--allow-certified-invalidation"]
-    )
+    proc = _run_cli([str(CERTIFYING), "-o", str(out), "--allow-certified-invalidation"])
     assert proc.returncode != 15, proc.stderr
 
 

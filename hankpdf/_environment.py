@@ -225,7 +225,7 @@ def _probe(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-    except (OSError, ValueError):
+    except OSError, ValueError:
         _log.debug("env probe: failed to spawn %s", tool, exc_info=True)
         return (None, "probe-failed")
 

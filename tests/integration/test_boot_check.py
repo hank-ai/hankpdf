@@ -6,8 +6,6 @@ import os
 import subprocess
 import sys
 
-import pytest
-
 
 def test_cli_exits_17_when_tesseract_missing(tmp_path) -> None:
     # Hide tesseract by emptying PATH inside the subprocess invocation.

@@ -659,10 +659,7 @@ def _doctor_report() -> str:
     lines.append(_fmt("jbig2enc", "jbig2", report.jbig2enc))
     lines.append(
         f"  {'JPEG2000':12s} "
-        + (
-            report.openjpeg_via_pillow
-            or "UNAVAILABLE — bg_codec=jpeg2000 will fall back to JPEG"
-        )
+        + (report.openjpeg_via_pillow or "UNAVAILABLE — bg_codec=jpeg2000 will fall back to JPEG")
     )
     if report.pdfium_revision:
         lines.append(f"  {'pdfium':12s} {report.pdfium_revision}")
@@ -671,10 +668,10 @@ def _doctor_report() -> str:
     if report.failures:
         lines.append("")
         lines.append("FAILURES:")
-        for f in report.failures:
-            lines.append(
-                f"  {f.component}: {f.reason} (found={f.found}, required={f.required})"
-            )
+        lines.extend(
+            f"  {f.component}: {f.reason} (found={f.found}, required={f.required})"
+            for f in report.failures
+        )
 
     return "\n".join(lines)
 
@@ -1061,7 +1058,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from hankpdf.audit import set_correlation_id
 
-    _run_correlation_id = args.correlation_id if args.correlation_id is not None else _uuid.uuid4().hex
+    _run_correlation_id = (
+        args.correlation_id if args.correlation_id is not None else _uuid.uuid4().hex
+    )
     set_correlation_id(_run_correlation_id)
 
     if args.version:
@@ -1077,10 +1076,17 @@ def main(argv: list[str] | None = None) -> int:
         print(_doctor_report())
         return EXIT_OK
 
+    if args.input is None or args.output is None:
+        print("error: INPUT and -o/--output are required (or pass --doctor)", file=sys.stderr)
+        return EXIT_USAGE
+
     # Env check (skippable via HANKPDF_SKIP_ENV_CHECK=1 envvar). Runs AFTER
-    # --doctor so users on broken systems can still get a diagnostic. The
-    # check is cached process-wide; cost is one round of subprocess --version
-    # probes on the first call.
+    # --doctor and AFTER usage validation so:
+    #   * users on broken systems can still get a diagnostic via --doctor
+    #   * `hankpdf` with no args returns EXIT_USAGE (40) regardless of
+    #     whether the host has tesseract/qpdf installed (test contract)
+    # The check is cached process-wide; cost is one round of subprocess
+    # --version probes on the first call.
     from hankpdf._environment import assert_environment_ready
     from hankpdf.exceptions import EnvironmentError as _HankpdfEnvironmentError
 
@@ -1094,10 +1100,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(str(e), file=sys.stderr)
         return EXIT_ENV_MISSING
-
-    if args.input is None or args.output is None:
-        print("error: INPUT and -o/--output are required (or pass --doctor)", file=sys.stderr)
-        return EXIT_USAGE
 
     # Read input
     if str(args.input) == "-":

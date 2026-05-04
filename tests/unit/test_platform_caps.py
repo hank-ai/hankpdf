@@ -8,7 +8,6 @@ import sys
 import pytest
 
 from hankpdf.sandbox.platform_caps import (
-    CapsUnavailableError,
     apply_self_memory_cap,
     supported,
 )
@@ -51,7 +50,7 @@ def test_apply_self_memory_cap_darwin_raises_or_noops() -> None:
     if pid == 0:
         try:
             apply_self_memory_cap(2 * 1024**3)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             os._exit(0)  # expected on Darwin
         os._exit(7)  # unexpected success
     else:
