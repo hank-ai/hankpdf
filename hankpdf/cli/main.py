@@ -29,6 +29,7 @@ from hankpdf import (
     OcrTimeoutError,
     OversizeError,
     PerPageTimeoutError,
+    PolicyDecision,
     SignedPDFError,
     TotalTimeoutError,
     _enforce_input_policy,
@@ -277,7 +278,24 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     # Safety gates
-    p.add_argument("--allow-signed-invalidation", action="store_true")
+    sig_group = p.add_mutually_exclusive_group()
+    sig_group.add_argument(
+        "--allow-signed-invalidation",
+        action="store_true",
+        help=(
+            "When the input has a digital signature, recompress anyway. "
+            "The signature WILL become invalid."
+        ),
+    )
+    sig_group.add_argument(
+        "--preserve-signatures",
+        action="store_true",
+        help=(
+            "When the input has a digital signature, copy bytes verbatim "
+            "(no compression) so the signature stays valid. Mutually "
+            "exclusive with --allow-signed-invalidation."
+        ),
+    )
     p.add_argument("--allow-certified-invalidation", action="store_true")
     p.add_argument("--allow-embedded-files", action="store_true")
     p.add_argument("--password-file", type=Path, help="Read password from file")
@@ -576,6 +594,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         min_image_byte_fraction=args.per_page_min_image_fraction,
         allow_signed_invalidation=args.allow_signed_invalidation,
         allow_certified_invalidation=args.allow_certified_invalidation,
+        preserve_signatures=args.preserve_signatures,
         allow_embedded_files=args.allow_embedded_files,
         password=_read_password(args),
         max_pages=args.max_pages,
@@ -802,7 +821,7 @@ def _run_image_export(
     # Enforce the same safety gates as compress(). Encrypted/signed/oversize
     # PDFs must be refused regardless of output format.
     try:
-        _enforce_input_policy(tri, _build_options(args), input_bytes)
+        _decision = _enforce_input_policy(tri, _build_options(args), input_bytes)
     except EncryptedPDFError as e:
         print(
             _refuse("E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label),
@@ -821,6 +840,22 @@ def _run_image_export(
     except OversizeError as e:
         print(_refuse("E-INPUT-OVERSIZE", f"oversize ({e})", input_name=_label), file=sys.stderr)
         return EXIT_OVERSIZE
+
+    # Image-export can't honor --preserve-signatures: passthrough means
+    # "return input bytes verbatim", but the user asked for JPEG/PNG/WebP
+    # output — there's no equivalent. Refuse with a clear hint.
+    if _decision is PolicyDecision.PASSTHROUGH_PRESERVE_SIGNATURE:
+        print(
+            _refuse(
+                "E-INPUT-SIGNED",
+                "image export does not support --preserve-signatures; "
+                "drop --output-format to use the MRC pipeline (which can "
+                "passthrough), or pass --allow-signed-invalidation",
+                input_name=_label,
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_SIGNED
 
     if only_pages is not None:
         out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]

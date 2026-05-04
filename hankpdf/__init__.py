@@ -25,6 +25,7 @@ from concurrent.futures import (
 )
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from concurrent.futures.process import BrokenProcessPool
+from enum import Enum
 from typing import IO, Any, Literal
 
 import pikepdf
@@ -79,6 +80,7 @@ __all__ = [
     "OcrTimeoutError",
     "OversizeError",
     "PerPageTimeoutError",
+    "PolicyDecision",
     "ProgressEvent",
     "SignedPDFError",
     "TotalTimeoutError",
@@ -92,6 +94,24 @@ __all__ = [
     "compress_stream",
     "triage",
 ]
+
+
+class PolicyDecision(Enum):
+    """Outcome of :func:`_enforce_input_policy`.
+
+    ``PROCEED`` — every safety gate passed; caller runs the full pipeline.
+    ``PASSTHROUGH_PRESERVE_SIGNATURE`` — input is signed and the user opted
+    into ``preserve_signatures``; caller must skip the pipeline and return
+    the input bytes verbatim with ``signature_state='passthrough-preserved'``
+    so the signature stays valid.
+
+    All other policy violations still raise from the
+    :class:`CompressError` hierarchy as before — only the signed-PDF
+    passthrough branch needed a non-exceptional return.
+    """
+
+    PROCEED = "proceed"
+    PASSTHROUGH_PRESERVE_SIGNATURE = "passthrough-preserve-signature"
 
 
 _JBIG2_CASCADE_STATE = threading.local()
@@ -487,6 +507,12 @@ def _build_passthrough_report(
     warning_code: str,
     *,
     correlation_id: str | None = None,
+    signature_state: Literal[
+        "none",
+        "passthrough-preserved",
+        "invalidated-allowed",
+        "certified-invalidated-allowed",
+    ] = "none",
 ) -> CompressReport:
     """Construct a CompressReport for a passthrough return (input unchanged).
 
@@ -494,6 +520,8 @@ def _build_passthrough_report(
     (min_input_mb, min_ratio) short-circuits the pipeline — the output
     equals the input, verifier is marked "skipped" (nothing to compare),
     and a kebab-case warning code names the specific gate that tripped.
+    Also used for the signed-PDF preserve-signatures path
+    (``signature_state='passthrough-preserved'``).
 
     Delegates to ``_VerifierAggregator().skipped_result()`` so there's a
     single source of truth for the fail-closed sentinel policy. Without
@@ -528,6 +556,8 @@ def _build_passthrough_report(
         reason=reason,
         build_info=resolve_build_info(),
         correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),
+        signature_state=signature_state,
+        signature_invalidated=False,
     )
 
 
@@ -535,13 +565,16 @@ def _enforce_input_policy(
     tri: TriageReport,
     options: CompressOptions,
     input_data: bytes,
-) -> None:
+) -> PolicyDecision:
     """Apply every safety gate that compress() enforces on the input.
 
-    Raises the appropriate exception from the CompressError hierarchy if
-    a gate is tripped. Both compress() and the CLI's image-export path
-    must route through this so users get the same refusal behavior
-    regardless of the chosen output format.
+    Raises the appropriate exception from the :class:`CompressError`
+    hierarchy if a refusal gate is tripped. Returns a
+    :class:`PolicyDecision` to signal whether the caller should
+    ``PROCEED`` with the full pipeline or take the signed-PDF passthrough
+    shortcut (``PASSTHROUGH_PRESERVE_SIGNATURE``). Both compress() and
+    the CLI's image-export path must route through this so users get the
+    same refusal behavior regardless of the chosen output format.
     """
     if tri.classification == "require-password" and options.password is None:
         msg = "input is encrypted; supply CompressOptions.password"
@@ -551,9 +584,16 @@ def _enforce_input_policy(
         msg = "input carries a certifying signature; --allow-certified-invalidation required"
         raise CertifiedSignatureError(msg)
 
-    if tri.is_signed and not options.allow_signed_invalidation:
-        msg = "input is signed; --allow-signed-invalidation required"
-        raise SignedPDFError(msg)
+    if tri.is_signed and not tri.is_certified_signature:
+        if options.preserve_signatures:
+            return PolicyDecision.PASSTHROUGH_PRESERVE_SIGNATURE
+        if not options.allow_signed_invalidation:
+            msg = (
+                "input is signed; pass --allow-signed-invalidation to recompress "
+                "(invalidates signature) or --preserve-signatures to passthrough "
+                "(no compression)"
+            )
+            raise SignedPDFError(msg)
 
     if options.max_pages is not None and tri.pages > options.max_pages:
         msg = (
@@ -570,6 +610,8 @@ def _enforce_input_policy(
             "(default tightened from 2000.0; pass --max-input-mb 2000 to relax)"
         )
         raise OversizeError(msg)
+
+    return PolicyDecision.PROCEED
 
 
 def _mrc_compose(
@@ -1254,7 +1296,20 @@ def compress(
         total=len(_selected_indices),
     )
 
-    _enforce_input_policy(tri, options, input_data)
+    decision = _enforce_input_policy(tri, options, input_data)
+    if decision is PolicyDecision.PASSTHROUGH_PRESERVE_SIGNATURE:
+        # Signed input + preserve_signatures=True → return bytes verbatim
+        # so the signature stays valid. No pipeline, no rewrite, no merge.
+        wall_ms = int((time.monotonic() - t0) * 1000)
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=wall_ms,
+            reason="passthrough-signed: preserve_signatures=True",
+            warning_code="passthrough-signed",
+            correlation_id=correlation_id,
+            signature_state="passthrough-preserved",
+        )
     _check_total_timeout("triage")
 
     # --- Passthrough: min_input_mb floor ---
@@ -1795,6 +1850,26 @@ def compress(
     if _verbatim_pages and len(_verbatim_pages) < tri.pages:
         warnings_list.append(f"pages-skipped-verbatim-{len(_verbatim_pages)}")
 
+    # Signature outcome — derived from triage + the opt-in flags. The
+    # passthrough-preserve case never reaches this codepath (it returns
+    # early upstream), so the only options here are the two
+    # invalidation paths or "no signature in the input at all".
+    _sig_state: Literal[
+        "none",
+        "passthrough-preserved",
+        "invalidated-allowed",
+        "certified-invalidated-allowed",
+    ]
+    if tri.is_certified_signature and options.allow_certified_invalidation:
+        _sig_state = "certified-invalidated-allowed"
+        _sig_invalidated = True
+    elif tri.is_signed and options.allow_signed_invalidation:
+        _sig_state = "invalidated-allowed"
+        _sig_invalidated = True
+    else:
+        _sig_state = "none"
+        _sig_invalidated = False
+
     report = CompressReport(
         status=status,
         exit_code=exit_code,
@@ -1814,6 +1889,8 @@ def compress(
         strategy_distribution=dict(strategy_counts),
         build_info=resolve_build_info(),
         correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),
+        signature_state=_sig_state,
+        signature_invalidated=_sig_invalidated,
     )
     return output_bytes, report
 

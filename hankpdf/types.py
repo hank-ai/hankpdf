@@ -61,6 +61,13 @@ class CompressOptions:
     # Safety / behavior gates
     allow_signed_invalidation: bool = False
     allow_certified_invalidation: bool = False
+    # Mutually exclusive with allow_signed_invalidation. When True and the
+    # input carries a non-certifying digital signature, compress() returns
+    # the input bytes verbatim (status="passed_through",
+    # signature_state="passthrough-preserved") instead of refusing — so the
+    # signature stays valid. Certifying signatures still require the
+    # explicit allow_certified_invalidation opt-in.
+    preserve_signatures: bool = False
     allow_embedded_files: bool = False
     accept_drift: bool = False  # if True, drift → warning instead of abort
     # Skip the content-drift verifier by default. It's slow (adds ~3s/page for
@@ -107,6 +114,11 @@ class CompressOptions:
     # Output
     emit_sidecar_manifest: bool = True
     output_pdf_version: str = "1.7"
+
+    def __post_init__(self) -> None:
+        if self.preserve_signatures and self.allow_signed_invalidation:
+            msg = "preserve_signatures and allow_signed_invalidation are mutually exclusive"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True)
@@ -235,8 +247,33 @@ class CompressReport:
     warnings: tuple[str, ...] = ()
     strips: tuple[str, ...] = ()
     reason: str | None = None
+    # Signature handling outcome. "none" = input wasn't signed. The
+    # other three values let downstream tooling distinguish a clean
+    # passthrough (signature still valid) from one of the two opt-in
+    # invalidation paths.
+    signature_state: Literal[
+        "none",
+        "passthrough-preserved",
+        "invalidated-allowed",
+        "certified-invalidated-allowed",
+    ] = "none"
+    signature_invalidated: bool = False
+    # Per-worker memory cap actually applied this run, in bytes (Task 8).
+    # 0 = caps disabled (max_worker_memory_mb=0). None = caps not applied
+    # (e.g., thread pool, or no per-page parallelism happened).
+    worker_memory_cap_bytes: int | None = None
+    # Maximum observed peak RSS across all workers, in bytes. None if
+    # we couldn't sample (no parallelism, or psutil probe failed).
+    worker_peak_rss_max_bytes: int | None = None
     # Schema version history (additive only; readers must not assert
     # equality on the version number — see SPEC.md §11.1).
+    #   v5 (2026-05-02, signed-PDF passthrough + worker memory caps):
+    #     - CompressReport.signature_state: Literal[...]
+    #     - CompressReport.signature_invalidated: bool
+    #     - CompressReport.worker_memory_cap_bytes: int | None
+    #     - CompressReport.worker_peak_rss_max_bytes: int | None
+    #     - CompressOptions.preserve_signatures: bool = False
+    #     - CompressOptions.max_worker_memory_mb: int | None
     #   v4 (2026-04-27, per-page MRC):
     #     - CompressReport.pages_skipped_verbatim: tuple[int, ...]
     #     - CompressOptions.min_image_byte_fraction: float = 0.30
@@ -251,7 +288,7 @@ class CompressReport:
     #       on-call grep a batch log and tie each line back to its report.
     #   v2 (Wave 3): "skipped" verifier status, kebab-case warning codes,
     #     populated strategy_distribution.
-    schema_version: int = field(default=4)
+    schema_version: int = field(default=5)
     strategy_distribution: Mapping[str, int] = field(default_factory=dict)
     build_info: BuildInfo | None = None
     correlation_id: str = field(default_factory=_new_correlation_id)
