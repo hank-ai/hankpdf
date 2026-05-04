@@ -338,6 +338,7 @@ class _WatchdogState:
     __slots__ = (
         "any_cap_exceeded",
         "exitcodes",
+        "peak_rss",
         "stop_event",
         "thread_died",
     )
@@ -347,6 +348,10 @@ class _WatchdogState:
         self.thread_died: bool = False
         self.stop_event: threading.Event = threading.Event()
         self.exitcodes: dict[int, int] = {}
+        # Highest RSS observed across all workers during this run, in
+        # bytes. Updated by the watchdog poll loop; surfaced on
+        # CompressReport.worker_peak_rss_max_bytes.
+        self.peak_rss: int = 0
 
 
 def _start_rss_watchdog(
@@ -402,6 +407,12 @@ def _start_rss_watchdog(
                         psutil.ZombieProcess,
                     ):
                         continue
+                    # Track peak RSS so CompressReport can surface it
+                    # (worker_peak_rss_max_bytes). Done BEFORE the cap
+                    # comparison so even pre-overrun samples land in the
+                    # high-water mark.
+                    if rss > state.peak_rss:
+                        state.peak_rss = rss
                     if rss > mem_cap:
                         sys.stderr.write(
                             f"[W-MEM-RSS-WATCHDOG] worker pid={pid} "
@@ -1531,6 +1542,13 @@ def compress(
     n_workers = _resolve_worker_count(options, len(_selected_indices))
     use_pool = n_workers > 1 and len(_selected_indices) >= _PARALLEL_MIN_PAGES
 
+    # Observability hooks for CompressReport.worker_memory_cap_bytes and
+    # worker_peak_rss_max_bytes (schema v5). The use_pool branch overwrites
+    # these; the serial path leaves them at 0 (no per-worker cap applies
+    # when pages run in-process, and the watchdog never spawned).
+    _run_mem_cap: int = 0
+    _run_wd_state: _WatchdogState | None = None
+
     def _page_error_context(page_index: int, exc: BaseException) -> str:
         return f"compression failed on page {page_index + 1}/{tri.pages}: {exc}"
 
@@ -1572,6 +1590,7 @@ def compress(
             available = _mp.get_all_start_methods()
             chosen_method = "forkserver" if "forkserver" in available else "spawn"
             mem_cap = _compute_worker_mem_cap(len(input_data), n_workers, options)
+            _run_mem_cap = mem_cap
             # 0 is the documented test escape hatch — skip the floor check.
             if mem_cap > 0 and mem_cap < (256 * 1024 * 1024):
                 # Less than 256 MB per worker is below the floor for legitimate
@@ -1642,6 +1661,7 @@ def compress(
             # the shared abort_event on cap-overrun; workers cooperatively
             # exit at the next check_abort() boundary.
             _wd_state = _WatchdogState()
+            _run_wd_state = _wd_state
             _watchdog = _start_rss_watchdog(ex, mem_cap, shared_abort_event, _wd_state)
             try:
                 future_to_winput: dict[Any, _WorkerInput] = {
@@ -1936,6 +1956,12 @@ def compress(
         correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),
         signature_state=_sig_state,
         signature_invalidated=_sig_invalidated,
+        # Schema v5 observability — see SPEC.md §11. _run_mem_cap is the
+        # cap actually applied (0 when caps disabled / serial path /
+        # thread pool). _run_wd_state.peak_rss is the high-water mark
+        # observed by the parent-side watchdog (0 when no watchdog ran).
+        worker_memory_cap_bytes=_run_mem_cap,
+        worker_peak_rss_max_bytes=_run_wd_state.peak_rss if _run_wd_state else 0,
     )
     return output_bytes, report
 

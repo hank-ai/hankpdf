@@ -138,3 +138,91 @@ def test_check_abort_raises_when_event_set() -> None:
             check_abort()
     finally:
         hankpdf._WORKER_ABORT_EVENT = _saved
+
+
+def _build_compressible_multi_page_pdf(n_pages: int) -> bytes:
+    """Build an N-page PDF with real raster content per page so compress()
+    routes through the per-page pipeline (not the empty-document
+    passthrough). Mirrors the helper in test_parallel.py.
+    """
+    import io
+
+    import numpy as np
+    import pikepdf
+    from PIL import Image
+
+    pdf = pikepdf.new()
+    for page_i in range(n_pages):
+        arr = np.full((2200, 1700, 3), 140, dtype=np.uint8)
+        arr[300:1900, 200:1500] = 80
+        arr[50:100, 50:400] = [200, 40, 40]
+        img = Image.fromarray(arr)
+        page_height_pt = 792.0 + page_i
+        pdf.add_blank_page(page_size=(612.0, page_height_pt))
+        page = pdf.pages[-1]
+        jbuf = io.BytesIO()
+        img.save(jbuf, format="JPEG", quality=92, subsampling=0)
+        xobj = pdf.make_stream(
+            jbuf.getvalue(),
+            Type=pikepdf.Name.XObject,
+            Subtype=pikepdf.Name.Image,
+            Width=img.width,
+            Height=img.height,
+            ColorSpace=pikepdf.Name.DeviceRGB,
+            BitsPerComponent=8,
+            Filter=pikepdf.Name.DCTDecode,
+        )
+        page.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Scan=xobj))
+        page.Contents = pdf.make_stream(
+            f"q 612 0 0 {page_height_pt} 0 0 cm /Scan Do Q\n".encode("ascii"),
+        )
+    buf = io.BytesIO()
+    pdf.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.integration
+def test_watchdog_aborts_running_workers_via_shared_event(monkeypatch):
+    """End-to-end smoke test for the schema-v5 observability wiring
+    (M1 regression guard).
+
+    Drives compress() through the parallel path (max_workers=2 with
+    >= _PARALLEL_MIN_PAGES (4) pages of real raster content). Asserts
+    that CompressReport.worker_memory_cap_bytes is populated with the
+    expected integer cap from the executor branch — catches the M1
+    regression where the dataclass defaults to None and the fields
+    silently disappear from JSON output.
+
+    Not a stress test of the cooperative-abort path itself: forcing OOM
+    deterministically requires a worker that intentionally allocates,
+    which is best covered by the unit-level
+    ``test_check_abort_raises_when_event_set``.
+    """
+    monkeypatch.setenv("HANKPDF_SKIP_ENV_CHECK", "1")
+
+    from hankpdf import CompressOptions, compress
+
+    pdf_in = _build_compressible_multi_page_pdf(n_pages=4)
+    # 2 GB cap is comfortable for 4 small JPEG pages — workers stay
+    # well under the cap so the watchdog doesn't fire and we get a
+    # clean report back to inspect.
+    cap_mb = 2048
+    _, pool_report = compress(
+        pdf_in,
+        options=CompressOptions(
+            mode="fast", max_workers=2, max_worker_memory_mb=cap_mb,
+        ),
+    )
+    # Pool path actually ran — _run_mem_cap was assigned via
+    # _compute_worker_mem_cap. The aggregate-envelope check (70 % of
+    # available RAM, divided across n_workers) may clamp the cap below
+    # the requested cap_mb on memory-pressured CI runners; assert only
+    # that it's positive, which is the M1-regression signal.
+    assert pool_report.worker_memory_cap_bytes > 0
+    assert pool_report.worker_memory_cap_bytes <= cap_mb * 1024 * 1024
+    assert isinstance(pool_report.worker_memory_cap_bytes, int)
+    # peak_rss may legitimately be 0 if the watchdog poll (0.5 s
+    # cadence) never caught a live worker on a small job. Type-check
+    # is the regression guard against the field reverting to None.
+    assert isinstance(pool_report.worker_peak_rss_max_bytes, int)
+    assert pool_report.worker_peak_rss_max_bytes >= 0

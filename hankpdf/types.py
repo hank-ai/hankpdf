@@ -259,19 +259,21 @@ class CompressReport:
     ] = "none"
     signature_invalidated: bool = False
     # Per-worker memory cap actually applied this run, in bytes (Task 8).
-    # 0 = caps disabled (max_worker_memory_mb=0). None = caps not applied
-    # (e.g., thread pool, or no per-page parallelism happened).
-    worker_memory_cap_bytes: int | None = None
-    # Maximum observed peak RSS across all workers, in bytes. None if
-    # we couldn't sample (no parallelism, or psutil probe failed).
-    worker_peak_rss_max_bytes: int | None = None
+    # 0 = caps disabled (max_worker_memory_mb=0, thread pool, or no
+    # per-page parallelism happened). Always populated; matches SPEC.md
+    # §11 schema-v5 declaration of `int = 0`.
+    worker_memory_cap_bytes: int = 0
+    # Maximum observed peak RSS across all workers, in bytes. 0 if we
+    # couldn't sample (no parallelism, or psutil probe failed). Always
+    # populated; matches SPEC.md §11 schema-v5 declaration of `int = 0`.
+    worker_peak_rss_max_bytes: int = 0
     # Schema version history (additive only; readers must not assert
     # equality on the version number — see SPEC.md §11.1).
     #   v5 (2026-05-02, signed-PDF passthrough + worker memory caps):
     #     - CompressReport.signature_state: Literal[...]
     #     - CompressReport.signature_invalidated: bool
-    #     - CompressReport.worker_memory_cap_bytes: int | None
-    #     - CompressReport.worker_peak_rss_max_bytes: int | None
+    #     - CompressReport.worker_memory_cap_bytes: int = 0
+    #     - CompressReport.worker_peak_rss_max_bytes: int = 0
     #     - CompressOptions.preserve_signatures: bool = False
     #     - CompressOptions.max_worker_memory_mb: int | None
     #   v4 (2026-04-27, per-page MRC):

@@ -107,8 +107,8 @@ def test_compress_report_construct() -> None:
     # The new v5 fields default to safe values when constructed directly.
     assert report.signature_state == "none"
     assert report.signature_invalidated is False
-    assert report.worker_memory_cap_bytes is None
-    assert report.worker_peak_rss_max_bytes is None
+    assert report.worker_memory_cap_bytes == 0
+    assert report.worker_peak_rss_max_bytes == 0
     assert report.ratio == 2.0
     # correlation_id auto-generates via default_factory — shouldn't be empty.
     assert report.correlation_id

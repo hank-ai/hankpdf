@@ -1087,6 +1087,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         assert_environment_ready()
     except _HankpdfEnvironmentError as e:
+        # Multi-line install hint follows the bracketed tag for grep-ability.
+        print(
+            _refuse("E-ENV-MISSING", "native dependency check failed", input_name=None),
+            file=sys.stderr,
+        )
         print(str(e), file=sys.stderr)
         return EXIT_ENV_MISSING
 
@@ -1313,7 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
         except MemoryCapExceededError as e:
             print(
                 _refuse(
-                    "E-INPUT-OVERSIZE",
+                    "E-MEM-CAP",
                     f"worker memory cap exceeded ({e})",
                     input_name=_label,
                 ),
