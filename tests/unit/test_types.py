@@ -95,14 +95,20 @@ def test_compress_report_construct() -> None:
         output_sha256="1" * 64,
         canonical_input_sha256="2" * 64,
     )
-    # Schema v3 bump — see SPEC.md §11. v3 added (Wave 5):
-    #   - CompressReport.build_info (BuildInfo | None)
-    #   - CompressReport.correlation_id (UUID4 hex)
-    # v2 added:
-    #   - VerifierResult.status "skipped" literal
-    #   - CompressReport.warnings kebab-case codes (e.g. verifier-skipped)
-    #   - CompressReport.strategy_distribution populated
-    assert report.schema_version == 4
+    # Schema version — see SPEC.md §11. Each major rev tracked here:
+    # v5 (2026-05-02, signed-PDF passthrough + worker memory caps):
+    #   - CompressReport.signature_state / signature_invalidated
+    #   - CompressReport.worker_memory_cap_bytes / worker_peak_rss_max_bytes
+    # v4 (2026-04-27, per-page MRC):
+    #   - CompressReport.pages_skipped_verbatim
+    # v3 (Wave 5) added build_info + correlation_id.
+    # v2 (Wave 3) added the "skipped" verifier status and kebab warnings.
+    assert report.schema_version == 5
+    # The new v5 fields default to safe values when constructed directly.
+    assert report.signature_state == "none"
+    assert report.signature_invalidated is False
+    assert report.worker_memory_cap_bytes == 0
+    assert report.worker_peak_rss_max_bytes == 0
     assert report.ratio == 2.0
     # correlation_id auto-generates via default_factory — shouldn't be empty.
     assert report.correlation_id

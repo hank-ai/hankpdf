@@ -1,5 +1,5 @@
-"""Smoke test: build the wheel, install into a clean venv, exercise both
-the canonical ``hankpdf`` import and the legacy ``pdf_smasher`` shim.
+"""Smoke test: build the wheel, install into a clean venv, exercise the
+canonical ``hankpdf`` import.
 
 Catches partial renames (Scenario 3 from the v0.2.0 rename pre-mortem):
 ``hankpdf --doctor`` reports ``0.0.0`` because ``_version.py`` still
@@ -56,32 +56,6 @@ def test_canonical_hankpdf_import_exposes_public_api() -> None:
 
 
 @pytest.mark.integration
-def test_legacy_pdf_smasher_shim_emits_deprecation_warning() -> None:
-    """``from pdf_smasher import compress`` still works for one cycle but
-    fires a DeprecationWarning pointing users at ``hankpdf``. Removal is
-    scheduled for v0.3.0."""
-    # Force-re-import the shim so the module-level warning fires inside
-    # this test's catch_warnings context (other tests may have triggered
-    # it already, in which case Python won't re-emit by default).
-    import importlib
-
-    sys.modules.pop("pdf_smasher", None)
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", DeprecationWarning)
-        importlib.import_module("pdf_smasher")
-
-        from pdf_smasher import CompressOptions, compress  # noqa: F401
-
-    deprecation_msgs = [
-        str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)
-    ]
-    assert any(
-        "renamed to `hankpdf`" in m and "v0.2.0" in m and "v0.3.0" in m for m in deprecation_msgs
-    ), f"expected rename DeprecationWarning; saw: {deprecation_msgs}"
-
-
-@pytest.mark.integration
 def test_version_resolves_from_installed_dist_metadata() -> None:
     """``hankpdf.__version__`` MUST match the installed dist's PKG-INFO,
     NOT the dev fallback. This is the test that would have caught the
@@ -118,6 +92,7 @@ def test_clean_venv_install_exposes_cli_and_api(tmp_path: Path) -> None:
     1. ``hankpdf --version`` exits 0 and prints the pyproject version
     2. ``import hankpdf; from hankpdf import compress`` works
     3. ``importlib.metadata.version('hankpdf') == hankpdf.__version__``
+    4. The legacy ``pdf_smasher`` import package no longer resolves.
 
     This is the test the rename pre-mortem flagged as missing — without
     it, partial renames (e.g. ``_version.py`` not updated) ship silently.
@@ -177,7 +152,7 @@ def test_clean_venv_install_exposes_cli_and_api(tmp_path: Path) -> None:
         f"fallback because the dist-name lookup string is wrong."
     )
 
-    # 2. Both import paths work; the legacy one fires the warning.
+    # 2. Canonical import works without firing any DeprecationWarning.
     api_check = subprocess.run(
         [
             str(venv_python),
@@ -193,24 +168,24 @@ def test_clean_venv_install_exposes_cli_and_api(tmp_path: Path) -> None:
     )
     assert "hankpdf:OK" in api_check.stdout
 
+    # 3. The legacy `pdf_smasher` import package was removed in v0.3.0.
+    # `python -c "import pdf_smasher"` must exit non-zero with
+    # ModuleNotFoundError.
     legacy_check = subprocess.run(
-        [
-            str(venv_python),
-            "-c",
-            "from pdf_smasher import compress, CompressOptions; print('pdf_smasher-shim:OK')",
-        ],
-        check=True,
+        [str(venv_python), "-c", "import pdf_smasher"],
+        check=False,
         capture_output=True,
         text=True,
     )
-    assert "pdf_smasher-shim:OK" in legacy_check.stdout
-    # The DeprecationWarning is printed by Python on stderr by default
-    # because pdf_smasher uses stacklevel=2; assert it fires.
-    assert (
-        "renamed to `hankpdf`" in legacy_check.stderr or "DeprecationWarning" in legacy_check.stderr
-    ), f"pdf_smasher shim must emit a DeprecationWarning; stderr={legacy_check.stderr!r}"
+    assert legacy_check.returncode != 0, (
+        "pdf_smasher must NOT be importable in v0.3.0+; "
+        f"stdout={legacy_check.stdout!r} stderr={legacy_check.stderr!r}"
+    )
+    assert "ModuleNotFoundError" in legacy_check.stderr, (
+        f"expected ModuleNotFoundError; stderr={legacy_check.stderr!r}"
+    )
 
-    # 3. importlib.metadata + hankpdf.__version__ agree.
+    # 4. importlib.metadata + hankpdf.__version__ agree.
     metadata_check = subprocess.run(
         [
             str(venv_python),

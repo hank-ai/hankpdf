@@ -54,6 +54,12 @@ class EnvironmentError(CompressError):  # noqa: A001 — this is our own subclas
     The ``--doctor`` subcommand provides a full diagnostic report.
     """
 
+    # Populated by ``hankpdf._environment.assert_environment_ready`` with a
+    # tuple of :class:`hankpdf._environment.EnvFailure` records describing
+    # the floor violations. Typed as ``tuple[object, ...]`` to keep
+    # ``exceptions.py`` import-free of the probe module.
+    failures: tuple[object, ...] = ()
+
 
 class OcrTimeoutError(CompressError):
     """Tesseract subprocess exceeded the configured per-page timeout.
@@ -79,4 +85,25 @@ class TotalTimeoutError(CompressError):
 
     Top-level wall-clock watchdog raised when the cumulative elapsed time
     in :func:`hankpdf.compress` exceeds the configured total budget.
+    """
+
+
+class MemoryCapExceededError(CompressError):
+    """A per-page worker exceeded its memory cap.
+
+    The kernel-level RLIMIT_AS / Job Object cap kills the worker; the
+    parent's psutil RSS watchdog also catches malloc-by-mmap escapes.
+    Either way the parent surfaces the failure as this exception so
+    callers can distinguish "process died from memory pressure" from
+    "process crashed".
+    """
+
+
+class HostResourceError(CompressError):
+    """The host has insufficient memory to run with the requested cap.
+
+    Distinct from MemoryCapExceededError (which fires after a worker
+    actually died). Raised at startup when the aggregate-envelope check
+    determines that ``per_worker_cap × n_workers`` would exceed 70% of
+    available host RAM. CLI maps this to exit code 19 (E-HOST-RESOURCE).
     """

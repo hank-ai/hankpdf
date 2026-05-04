@@ -4,6 +4,115 @@ All notable changes to `hankpdf` (formerly `pdf-smasher` on PyPI) are documented
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-03
+
+### Removed (BREAKING)
+
+- `pdf_smasher/` deprecation shim. The shim was a one-cycle soft landing
+  for the v0.2.0 distribution rename. Migrate now:
+  - Was: `from pdf_smasher import compress`
+  - Now: `from hankpdf import compress`
+  - Was: `pdf_smasher.__version__`
+  - Now: `hankpdf.__version__`
+  - Was: `importlib.metadata.version("pdf-smasher")`
+  - Now: `importlib.metadata.version("hankpdf")`
+  Run your test suite under
+  `PYTHONWARNINGS=error::DeprecationWarning` to catch any remaining
+  shim usage before upgrading.
+
+### Added
+
+- **Native-dep boot check.** `hankpdf` now fails loud at startup with
+  a per-platform install hint when Tesseract / qpdf / OpenJPEG /
+  jbig2enc are missing or below the supported floor. Run
+  `hankpdf --doctor` for the full report. Exit code 17
+  (`E-ENV-MISSING`).
+- **Per-page worker memory caps with cooperative shutdown.** Linux
+  uses `RLIMIT_AS`; Windows ≥ 8 uses Job Object self-assign via ctypes
+  (no pywin32). macOS attempts `RLIMIT_AS` but the kernel rejects it
+  — falls back to the watchdog. Default cap formula:
+  `min(max(8 GB, 16 × input_size), 16 GB)`, further clamped by an
+  aggregate-envelope check against
+  `psutil.virtual_memory().available × 0.7 / n_workers`. A parent-side
+  psutil RSS watchdog runs as a backstop; when it observes a worker
+  exceeding the cap, it sets a shared `multiprocessing.Event` and ALL
+  in-flight workers cooperatively drain at the next safe-write
+  boundary (no SIGTERM mid-write — that path corrupts partial output
+  streams). Override via `--max-worker-memory-mb` or
+  `CompressOptions.max_worker_memory_mb`. Exit code 18 (`E-MEM-CAP`).
+- **`HostResourceError` + exit code 19 (`E-HOST-RESOURCE`).** Raised at
+  startup when the aggregate-envelope check determines that
+  `cap × n_workers` would exceed 70% of available host RAM. Distinct
+  from `MemoryCapExceededError` (worker died from cap) — the host has
+  insufficient memory before any worker spawns. Reduce `--max-workers`
+  or free memory; jobs that previously OOM-killed the host now refuse
+  cleanly at startup.
+- **`--max-worker-memory-mb INT` CLI flag.** Per-worker cap override in
+  megabytes. Pass `0` to disable (test escape hatch).
+- **`--correlation-id ID` CLI flag.** Format-validated
+  (`[A-Za-z0-9._:-]{1,64}`). Threaded into
+  `CompressReport.correlation_id` and stamped onto every stderr line
+  via the existing `corr=` prefix mechanism.
+- **`--preserve-signatures` flag.** Signed-PDF passthrough alternative
+  to `--allow-signed-invalidation`. Mutually exclusive.
+- **`correlation_id` kwarg on `compress_stream()`.** Validated against
+  `[A-Za-z0-9._:-]{1,64}`. Argument validation runs BEFORE the env
+  check, so bad formats produce `ValueError` not `EnvironmentError`.
+- **Decompression-bomb regression corpus.** 3 deterministic fixtures
+  (`huge_page_dimensions` → exit 16, `xref_loop` → exit 13,
+  `objstm_explosion` → exit 12) plus an on-demand `length_mismatch`
+  generator. Each refusal exits with a pinned structured code in
+  under 30 s. Wires `MAX_PAGE_AXIS_PT = 14400` (200 inches) check in
+  `_enforce_input_policy` for the huge-MediaBox fixture.
+- **`signature_state` and `signature_invalidated` on `CompressReport`.**
+  Schema v5 (additive — old consumers continue to work).
+- **`worker_memory_cap_bytes` and `worker_peak_rss_max_bytes` on
+  `CompressReport`.** Visibility into the cap that fired.
+- **`PolicyDecision` enum** — public API (re-exported via
+  `hankpdf/__init__.py:__all__`). Returned by `_enforce_input_policy`
+  to flag passthrough requests instead of raising a sentinel exception.
+- **`_environment.py`, `sandbox/platform_caps.py`,
+  `engine/per_page_gate.py`** — new internal modules; not part of the
+  public API.
+
+### Changed
+
+- **qpdf floor enforced at 11.6.3.** Was documented in
+  `docs/ENVIRONMENT.md`; now hard-checked at startup. Lower versions
+  abort with exit 17.
+- **OpenJPEG floor enforced at 2.5.4** (CVE-2025-54874). Probed via
+  Pillow encode test.
+- **Internal refactor:** the per-page MRC gate moved out of
+  `hankpdf/__init__.py` into the new `hankpdf.engine.per_page_gate`
+  module. No behavior change.
+
+### Migration
+
+```python
+# Was (0.2.x):
+from pdf_smasher import compress
+
+# Now (0.3.0):
+from hankpdf import compress
+```
+
+If you may have lingering `pdf_smasher` imports, run your test suite
+under `PYTHONWARNINGS=error::DeprecationWarning` against 0.2.x first
+to flag every call site. The 0.3.0 wheel does not ship the shim.
+
+```python
+# 0.2.x: signed PDF compressed by default (silently invalid signature).
+hankpdf.compress(signed_input)  # signature destroyed, no warning
+# 0.3.0: signed PDF refused by default; pick one:
+hankpdf.compress(signed_input, options=CompressOptions(preserve_signatures=True))
+hankpdf.compress(signed_input, options=CompressOptions(allow_signed_invalidation=True))
+```
+
+### Dependencies
+
+- New runtime dep: `psutil>=5.9,<8` (RSS watchdog).
+- New test-only dep: `pyhanko>=0.27,<1` (signed-PDF fixture generation).
+
 ## [0.2.2] - 2026-04-29
 
 **No code changes** — terminology refresh requested by the CTO. The PyPI project description, GHCR image label, `hankpdf --help` output, module docstring, and all docs now describe HankPDF as a **PDF compressor** rather than a "PDF shrinker." Reasoning: "shrinking" implies pixel resize / dimensional reduction, which is one operation in the pipeline (background-layer DPI downsampling) but not the product. The product is byte-level compression via codec changes (JBIG2 / JPEG / JPEG2000), MRC layering, and foreground/background segmentation.

@@ -1,0 +1,9 @@
+%PDF-1.7
+%intentional xref-loop bomb
+xref
+0 1
+0000000037 65535 n
+trailer<</Size 1/Root 1 0 R>>
+startxref
+37
+%%EOF

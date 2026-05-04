@@ -34,6 +34,12 @@ CliWarningCode = Literal[
     "W-VERIFIER-FAILED",
     "W-IMAGE-EXPORT-PARTIAL-FAILURE",
     "W-CHUNK-WRITE-PARTIAL-FAILURE",
+    # 0.3.0:
+    "W-PASSTHROUGH-SIGNED",
+    "W-MEM-RSS-WATCHDOG",
+    "W-CAPS-UNAVAILABLE",
+    "W-CAPS-FAILED",
+    "W-WATCHDOG-DIED",
 ]
 
 # Refusal / failure error codes. These tag the `[hankpdf] error` lines so
@@ -55,6 +61,10 @@ CliErrorCode = Literal[
     "E-TIMEOUT-PER-PAGE",
     "E-TIMEOUT-TOTAL",
     "E-OCR-TIMEOUT",
+    # 0.3.0:
+    "E-ENV-MISSING",
+    "E-MEM-CAP",
+    "E-HOST-RESOURCE",
 ]
 
 WARN_PREFIX: Final = "[hankpdf] warning"

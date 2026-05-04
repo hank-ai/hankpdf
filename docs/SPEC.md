@@ -52,6 +52,23 @@ class CompressOptions:
 
     # Concurrency — each worker gets its own single-page slice (memory scales with workers × 1 page, not workers × whole source)
     max_workers: int = 0                # 0 = auto (cpu_count-2, ≥1); 1 = serial; N>1 = exactly N workers
+    max_worker_memory_mb: int | None = None  # per-worker memory cap override (MB).
+                                             # None = auto via _compute_worker_mem_cap:
+                                             #   min(max(8 GB, 16 × input_size), 16 GB),
+                                             # then clamped by the aggregate-envelope check
+                                             #   psutil.virtual_memory().available × 0.7 / n_workers.
+                                             # 0 = disable cap entirely (advanced; opts out of
+                                             # both the platform setrlimit/Job Object cap and the
+                                             # parent-side psutil RSS watchdog).
+                                             # If the requested cap × n_workers would exceed
+                                             # 70% of host RAM at startup, compress() raises
+                                             # HostResourceError (exit 19, [E-HOST-RESOURCE]).
+
+    # Signature handling
+    preserve_signatures: bool = False   # if True, signed inputs are passed through verbatim
+                                        # (signature stays valid). status="passed_through",
+                                        # signature_state="passthrough-preserved",
+                                        # warning [W-PASSTHROUGH-SIGNED] emitted.
 
     # Output
     emit_sidecar_manifest: bool = True
@@ -75,12 +92,21 @@ class CompressReport:
     warnings: tuple[str, ...] = ()      # structured warning codes; see §8.5
     strips: tuple[str, ...] = ()        # what was stripped; see §4.4
     reason: str | None = None           # human-readable reason if refused/drift
-    schema_version: int = 4             # sidecar / JSON report schema version (see §11)
+    schema_version: int = 5             # sidecar / JSON report schema version (see §11)
     strategy_distribution: Mapping[str, int] = field(default_factory=dict)
     # strategy_distribution: per-page strategy counts — keys are
     # "text_only", "photo_only", "mixed", "already_optimized"; values are
     # page counts. Emitted by compress() for ratio post-mortems. See §8.5.
     pages_skipped_verbatim: tuple[int, ...] = ()  # 0-indexed page indices skipped by the per-page MRC gate; empty on full-pipeline runs and on whole-doc passthrough. See §4.1b.
+    signature_state: Literal[
+        "none",
+        "passthrough-preserved",
+        "invalidated-allowed",
+        "certified-invalidated-allowed",
+    ] = "none"
+    signature_invalidated: bool = False
+    worker_memory_cap_bytes: int = 0    # per-worker memory cap actually applied (bytes); 0 if uncapped
+    worker_peak_rss_max_bytes: int = 0  # max observed worker RSS across the run (bytes); 0 if not measured
 
 @dataclass(frozen=True)
 class VerifierResult:
@@ -103,6 +129,7 @@ class OversizeError(CompressError): ...            # exceeds max_input_mb or max
 class DecompressionBombError(CompressError): ...   # exceeds Pillow MAX_IMAGE_PIXELS or pixel-count cap
 class CorruptPDFError(CompressError): ...          # unrecoverable by pikepdf/qpdf
 class EnvironmentError(CompressError): ...         # qpdf/pdfium version floor violated; see --doctor
+class HostResourceError(CompressError): ...        # requested cap × n_workers exceeds 70% of host RAM (exit 19)
 ```
 
 `ProgressEvent` is emitted via the optional `progress_callback` parameter on `compress()` (see §1.2). Carries no PHI — only pipeline phase, page indices, strategy names, byte counts, and ratios. The CLI drives its tqdm bar from these events; programmatic callers can log them, collect metrics, or drive their own UI.
@@ -261,6 +288,11 @@ Safety:
   --allow-signed-invalidation    Explicit opt-in for signed PDFs.
   --allow-certified-invalidation Stricter opt-in for certifying signatures
                                  (/Perms/DocMDP).
+  --preserve-signatures          When the input is signed, pass the bytes
+                                 through verbatim (no compression) so the
+                                 signature stays valid. Mutually exclusive
+                                 with --allow-signed-invalidation.
+                                 Emits warning [W-PASSTHROUGH-SIGNED].
   --allow-embedded-files         Keep /EmbeddedFiles instead of stripping.
   --password-file PATH           Read password from file. Never use
                                  --password on CLI; env var
@@ -320,6 +352,25 @@ Limits:
                              exactly N workers. Each worker gets its own
                              single-page PDF slice, never the whole
                              source.
+  --max-worker-memory-mb INT Per-page worker memory cap in MB. Default
+                             (when not set) is computed as
+                             min(max(8 GB, 16 × input_size), 16 GB) and
+                             then clamped by an aggregate-envelope check
+                             against psutil.virtual_memory().available
+                             × 0.7 / n_workers. If the requested cap ×
+                             n_workers would exceed 70% of host RAM at
+                             startup, compress() raises
+                             HostResourceError → exit 19
+                             ([E-HOST-RESOURCE]). Workers self-apply the
+                             cap on init via RLIMIT_AS (Linux/macOS) or a
+                             Job Object (Windows). A parent-side psutil
+                             RSS watchdog runs as a redundant backstop
+                             with cooperative shutdown — workers check a
+                             shared mp.Event at safe-write boundaries
+                             (NOT psutil.Process.terminate() mid-write).
+                             Pass 0 to disable the cap entirely (escape
+                             hatch for tests / hosts without setrlimit
+                             support).
 
 Reporting:
   --report {text,json,jsonl,none}  Default: text.
@@ -353,6 +404,14 @@ Stable across versions. Scripts MUST branch on these, not on parsed stdout.
 | 40 | Invalid CLI usage (caught after parse: missing INPUT/-o, unreadable password file, out-of-range `--pages`, empty `--pages` set, stdout chosen with multi-page image export) | Fix invocation |
 | 2xx | Reserved for transient failures (network, license server, etc.); not used by the local CLI today | Retry with exponential backoff |
 
+Additional codes (added in v0.3.0):
+
+- `17` — `E-ENV-MISSING`: a native dependency is missing or below the
+  supported floor. Run `hankpdf --doctor` for the full report.
+- `18` — `E-MEM-CAP`: a per-page worker exceeded its memory cap.
+- `19` — `E-HOST-RESOURCE`: insufficient host memory for the requested
+  worker count × cap. Reduce `--max-workers` or free memory.
+
 **Note on argparse-level exit 2.** Flag values that fail argparse's own type validation — most notably `--image-dpi` outside the `[1, 1200]` range — exit with code `2` via argparse's built-in error handling, NOT via our `EXIT_USAGE = 40`. This is an intentional departure from the numeric contract: wrapping argparse to convert its `ArgumentTypeError` into exit 40 would require us to intercept `parse_args()` error handling, which would also suppress argparse's auto-generated help/usage output on malformed flags. Script authors who branch on exit codes should treat `2` as either "passthrough success" or "argparse rejected a flag value" and disambiguate via stderr (argparse writes `hankpdf: error: …` on the failure path).
 
 ### 2.3 JSON report schema
@@ -361,7 +420,7 @@ Stable across versions. Scripts MUST branch on these, not on parsed stdout.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "input": "chart-2026-04-21.pdf",
   "output": "chart-2026-04-21.compressed.pdf",
   "status": "ok",
@@ -526,7 +585,7 @@ Written alongside every successful output as `<output-basename>.hankpdf.json`.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "input_sha256": "...",
   "canonical_input_sha256": "...",
   "output_sha256": "...",
@@ -562,6 +621,7 @@ CompressError
 ├── ContentDriftError
 ├── OversizeError
 ├── CorruptPDFError
+├── HostResourceError
 └── LicenseError
 ```
 
@@ -673,6 +733,18 @@ Stable codes (see `hankpdf/cli/warning_codes.py` — the `CliWarningCode` Litera
 - `W-VERIFIER-FAILED` — the verifier flagged drift but the job was configured to warn instead of abort (via `--accept-drift` or `--mode fast`).
 - `W-IMAGE-EXPORT-PARTIAL-FAILURE` — image-export mode failed mid-way through a multi-page export. Emitted alongside the list of pages written before the failure. Exit code depends on the underlying cause (`EXIT_MALICIOUS=14`, `EXIT_DECOMPRESSION_BOMB=16`, `EXIT_ENGINE_ERROR=30`).
 - `W-CHUNK-WRITE-PARTIAL-FAILURE` — chunk write failed mid-way (disk full / permission / path error). Exit code `EXIT_ENGINE_ERROR=30`.
+- `[W-PASSTHROUGH-SIGNED]` — signed input passed through verbatim
+  (`--preserve-signatures`).
+- `[W-MEM-RSS-WATCHDOG]` — RSS watchdog observed a worker exceeding the
+  cap; sets the shared cooperative-abort event so all in-flight workers
+  drain at the next safe-write boundary.
+- `[W-CAPS-UNAVAILABLE]` — platform has no memory-cap primitive (rare;
+  e.g., misconfigured Docker without `setrlimit` capability).
+- `[W-CAPS-FAILED]` — kernel rejected the cap call. Worker continues
+  without the cap; psutil watchdog still applies.
+- `[W-WATCHDOG-DIED]` — RSS watchdog thread died unexpectedly; the
+  per-worker memory cap was effectively unenforced for at least part
+  of the run. Re-run with reduced `--max-workers` if this fires.
 
 Refusal / failure error codes (`E-*` — tag `[hankpdf] error` lines):
 
@@ -718,6 +790,15 @@ Exit codes disambiguate the refusal class for scripts that key on `$?`; the `E-*
 - v3 → v4 (additive): `pages_skipped_verbatim: tuple[int, ...]` field on `CompressReport`. `"already_optimized"` key in `strategy_distribution` may now be non-zero (was pre-allocated as 0 since v2). New warning codes `passthrough-no-image-content` and `pages-skipped-verbatim-N`. Per-page MRC gate documented above (§8.5).
   - `schema_version` bumped from 3 to 4.
   - No breaking field removals or renames — additive only.
+- v0.3.0:
+  - `schema_version` bumped from 4 to 5.
+  - Added `signature_state ∈ {none, passthrough-preserved,
+    invalidated-allowed, certified-invalidated-allowed}`.
+  - Added `signature_invalidated: bool`.
+  - Added `worker_memory_cap_bytes: int` and
+    `worker_peak_rss_max_bytes: int`.
+  - All additions are additive; v4 consumers reading by key continue
+    to work.
 
 - **v1 → v2** (DCR Wave 3, 2026-04-23):
   - `VerifierResult.status` gained the `"skipped"` literal (was only `"pass"`/`"fail"`). Readers that key on `verifier.status` must add a `"skipped"` branch; treat it as "no verification performed, caller should not assume pass."

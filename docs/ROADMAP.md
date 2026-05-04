@@ -201,7 +201,7 @@ Replaces the retired free-threaded smoke-test. Every invocation starts with a fl
 **T2.3 — Recompress module — segmentation refinement**
 - [ ] Per-region foreground color (not global median). Color averaged per connected component.
 - [ ] Color-page detection heuristic — if a page has significant non-grayscale content, use color foreground; else monochrome.
-- [ ] Handwriting handling — extend word boxes with looser grow kernel; add configurable `mode=medical` parameter for stricter mask preservation.
+- [ ] Handwriting handling — extend word boxes with looser grow kernel; add configurable `mode=strict` parameter for stricter mask preservation.
 - [ ] Small-print detection — flag pages where Tesseract confidence is below threshold; skip MRC and use full-page JPEG at higher quality (recorded as warning).
 - [ ] Unit tests on synthetic mask scenarios.
 
@@ -224,7 +224,7 @@ Replaces the retired free-threaded smoke-test. Every invocation starts with a fl
 - [x] Numeric-token confidence delta → replaced with digit-multiset exact-match (see T2.15).
 - [x] Structural audit (page count, annots, forms, sigs, attachments).
 - [x] `VerifierResult.status` widened to include `"skipped"` with fail-closed sentinel metrics.
-- [ ] Threshold config per `mode` (fast / standard / medical). *(thresholds exist; per-mode tuning not yet complete)*
+- [ ] Threshold config per `mode` (fast / standard / strict). *(thresholds exist; per-mode tuning not yet complete)*
 - [ ] Unit tests: assert pass on legitimate output, fail on tampered output.
 
 **T2.7 — Provenance / sidecar manifest**

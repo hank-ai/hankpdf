@@ -23,10 +23,13 @@ from hankpdf import (
     CorruptPDFError,
     DecompressionBombError,
     EncryptedPDFError,
+    HostResourceError,
     MaliciousPDFError,
+    MemoryCapExceededError,
     OcrTimeoutError,
     OversizeError,
     PerPageTimeoutError,
+    PolicyDecision,
     SignedPDFError,
     TotalTimeoutError,
     _enforce_input_policy,
@@ -193,6 +196,9 @@ EXIT_CORRUPT = 13
 EXIT_MALICIOUS = 14
 EXIT_CERTIFIED_SIG = 15
 EXIT_DECOMPRESSION_BOMB = 16
+EXIT_ENV_MISSING = 17
+EXIT_MEM_CAP = 18
+EXIT_HOST_RESOURCE = 19
 EXIT_VERIFIER_FAIL = 20
 EXIT_ENGINE_ERROR = 30
 EXIT_USAGE = 40
@@ -272,7 +278,24 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     # Safety gates
-    p.add_argument("--allow-signed-invalidation", action="store_true")
+    sig_group = p.add_mutually_exclusive_group()
+    sig_group.add_argument(
+        "--allow-signed-invalidation",
+        action="store_true",
+        help=(
+            "When the input has a digital signature, recompress anyway. "
+            "The signature WILL become invalid."
+        ),
+    )
+    sig_group.add_argument(
+        "--preserve-signatures",
+        action="store_true",
+        help=(
+            "When the input has a digital signature, copy bytes verbatim "
+            "(no compression) so the signature stays valid. Mutually "
+            "exclusive with --allow-signed-invalidation."
+        ),
+    )
     p.add_argument("--allow-certified-invalidation", action="store_true")
     p.add_argument("--allow-embedded-files", action="store_true")
     p.add_argument("--password-file", type=Path, help="Read password from file")
@@ -367,6 +390,16 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--max-worker-memory-mb",
+        type=int,
+        default=None,
+        help=(
+            "Per-page worker memory cap in MB. Default: max(8 GB, 16 × input_size) "
+            "clamped to 16 GB and an aggregate-envelope check against host RAM. "
+            "Set explicitly to override; pass 0 to disable (test escape hatch)."
+        ),
+    )
+    p.add_argument(
         "--per-page-timeout-seconds",
         type=_positive_int,
         default=120,
@@ -390,6 +423,16 @@ def _parser() -> argparse.ArgumentParser:
     # Reporting
     p.add_argument("--report", choices=["text", "json", "jsonl", "none"], default="text")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument(
+        "--correlation-id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help=(
+            "Stamp this correlation ID onto the CompressReport and stderr "
+            "lines. Format: [A-Za-z0-9._:-]{1,64}. Default: fresh UUID4 hex."
+        ),
+    )
 
     # Image export mode (JPEG / PNG per page — skips the MRC pipeline).
     p.add_argument(
@@ -541,6 +584,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         # --skip-verify still accepted as a no-op alias for the default.
         skip_verify=not args.verify,
         max_workers=args.max_workers,
+        max_worker_memory_mb=args.max_worker_memory_mb,
         legal_codec_profile="ccitt-g4" if args.legal_mode else None,
         target_pdf_a=args.target_pdfa,
         ocr=args.ocr,
@@ -550,6 +594,7 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
         min_image_byte_fraction=args.per_page_min_image_fraction,
         allow_signed_invalidation=args.allow_signed_invalidation,
         allow_certified_invalidation=args.allow_certified_invalidation,
+        preserve_signatures=args.preserve_signatures,
         allow_embedded_files=args.allow_embedded_files,
         password=_read_password(args),
         max_pages=args.max_pages,
@@ -562,15 +607,25 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
 
 
 def _doctor_report() -> str:
+    """Render the ``--doctor`` diagnostic report.
+
+    Uses :func:`hankpdf._environment.get_environment_report` as the single
+    source of truth so the boot-check failure message and ``--doctor``
+    output never drift apart. Adds PATH lookup (via :mod:`shutil`) for
+    each tool so users can see *where* the binary lives, not just what
+    version we found.
+    """
     import platform
     import shutil
-    import subprocess
 
+    from hankpdf._environment import get_environment_report
     from hankpdf._version import build_info, version_line
 
+    report = get_environment_report()
     lines = [
         version_line(),
         f"platform {platform.platform()}",
+        f"python   {report.python_version}",
     ]
     _info = build_info()
     if _info is not None:
@@ -588,50 +643,36 @@ def _doctor_report() -> str:
         ):
             val = _info.get(key, "?")
             lines.append(f"  {key:20s} {val}")
-    for tool in ("tesseract", "qpdf", "jbig2"):
-        path = shutil.which(tool)
-        if path:
-            try:
-                out = subprocess.run(
-                    [tool, "--version"],
-                    capture_output=True,
-                    check=False,
-                    timeout=5,
-                    text=True,
-                )
-                first_line = (out.stdout or out.stderr).splitlines()[:1]
-                ver = first_line[0] if first_line else "unknown"
-            except subprocess.TimeoutExpired, OSError:
-                ver = "unreachable"
-            lines.append(f"  {tool:12s} {ver}")
-        else:
-            lines.append(f"  {tool:12s} NOT FOUND")
 
-    # JPEG2000 via Pillow's bundled OpenJPEG — probe by attempting encode.
-    # A Pillow wheel built without OpenJPEG silently falls back to JPEG on
-    # the bg_codec=jpeg2000 path; surface that here so users can diagnose.
-    try:
-        import io as _io_probe
+    def _fmt(component: str, tool_name: str, version: str | None) -> str:
+        path = shutil.which(tool_name)
+        if version is None and path is None:
+            return f"  {component:12s} NOT FOUND"
+        if version is None:
+            return f"  {component:12s} unparseable  ({path})"
+        if path is None:
+            return f"  {component:12s} {version}"
+        return f"  {component:12s} {version}  ({path})"
 
-        from PIL import Image as _PILImage
+    lines.append(_fmt("tesseract", "tesseract", report.tesseract))
+    lines.append(_fmt("qpdf", "qpdf", report.qpdf))
+    lines.append(_fmt("jbig2enc", "jbig2", report.jbig2enc))
+    lines.append(
+        f"  {'JPEG2000':12s} "
+        + (report.openjpeg_via_pillow or "UNAVAILABLE — bg_codec=jpeg2000 will fall back to JPEG")
+    )
+    if report.pdfium_revision:
+        lines.append(f"  {'pdfium':12s} {report.pdfium_revision}")
+    lines.append(f"  {'Pillow MAX':12s} {report.pillow_max_image_pixels}")
 
-        _buf = _io_probe.BytesIO()
-        _PILImage.new("RGB", (8, 8)).save(_buf, format="JPEG2000")
-        lines.append(f"  {'JPEG2000':12s} available (Pillow/OpenJPEG)")
-    except (OSError, ImportError) as e:
-        lines.append(
-            f"  {'JPEG2000':12s} UNAVAILABLE ({type(e).__name__}) — "
-            "bg_codec=jpeg2000 will fall back to JPEG"
+    if report.failures:
+        lines.append("")
+        lines.append("FAILURES:")
+        lines.extend(
+            f"  {f.component}: {f.reason} (found={f.found}, required={f.required})"
+            for f in report.failures
         )
 
-    # jbig2enc presence: absence drops text-only ratio from ~50x to ~6x.
-    if shutil.which("jbig2") is None:
-        lines.append(
-            f"  {'jbig2enc':12s} NOT FOUND — text-only compression will fall "
-            "back to flate (~6x reduction vs ~50x with jbig2)"
-        )
-    else:
-        lines.append(f"  {'jbig2enc':12s} available")
     return "\n".join(lines)
 
 
@@ -777,7 +818,7 @@ def _run_image_export(
     # Enforce the same safety gates as compress(). Encrypted/signed/oversize
     # PDFs must be refused regardless of output format.
     try:
-        _enforce_input_policy(tri, _build_options(args), input_bytes)
+        _decision = _enforce_input_policy(tri, _build_options(args), input_bytes)
     except EncryptedPDFError as e:
         print(
             _refuse("E-INPUT-ENCRYPTED", f"encrypted without password ({e})", input_name=_label),
@@ -796,6 +837,22 @@ def _run_image_export(
     except OversizeError as e:
         print(_refuse("E-INPUT-OVERSIZE", f"oversize ({e})", input_name=_label), file=sys.stderr)
         return EXIT_OVERSIZE
+
+    # Image-export can't honor --preserve-signatures: passthrough means
+    # "return input bytes verbatim", but the user asked for JPEG/PNG/WebP
+    # output — there's no equivalent. Refuse with a clear hint.
+    if _decision is PolicyDecision.PASSTHROUGH_PRESERVE_SIGNATURE:
+        print(
+            _refuse(
+                "E-INPUT-SIGNED",
+                "image export does not support --preserve-signatures; "
+                "drop --output-format to use the MRC pipeline (which can "
+                "passthrough), or pass --allow-signed-invalidation",
+                input_name=_label,
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_SIGNED
 
     if only_pages is not None:
         out_of_range = [p for p in only_pages if p < 1 or p > tri.pages]
@@ -980,6 +1037,18 @@ def _run_image_export(
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
 
+    # Validate user-supplied --correlation-id at the CLI boundary BEFORE
+    # the env-check below, so a bad format short-circuits to EXIT_USAGE
+    # (40) instead of being masked by an exit-17 env failure.
+    if args.correlation_id is not None:
+        from hankpdf import _validate_correlation_id
+
+        try:
+            _validate_correlation_id(args.correlation_id)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return EXIT_USAGE
+
     # Generate a correlation id for this invocation and register it with
     # the audit module so every warning_codes stderr line gets stamped.
     # Wave 5 / C2: on-call can grep a batch log for `corr=<id>` and tie
@@ -989,7 +1058,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from hankpdf.audit import set_correlation_id
 
-    _run_correlation_id = _uuid.uuid4().hex
+    _run_correlation_id = (
+        args.correlation_id if args.correlation_id is not None else _uuid.uuid4().hex
+    )
     set_correlation_id(_run_correlation_id)
 
     if args.version:
@@ -1008,6 +1079,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.input is None or args.output is None:
         print("error: INPUT and -o/--output are required (or pass --doctor)", file=sys.stderr)
         return EXIT_USAGE
+
+    # Env check (skippable via HANKPDF_SKIP_ENV_CHECK=1 envvar). Runs AFTER
+    # --doctor and AFTER usage validation so:
+    #   * users on broken systems can still get a diagnostic via --doctor
+    #   * `hankpdf` with no args returns EXIT_USAGE (40) regardless of
+    #     whether the host has tesseract/qpdf installed (test contract)
+    # The check is cached process-wide; cost is one round of subprocess
+    # --version probes on the first call.
+    from hankpdf._environment import assert_environment_ready
+    from hankpdf.exceptions import EnvironmentError as _HankpdfEnvironmentError
+
+    try:
+        assert_environment_ready()
+    except _HankpdfEnvironmentError as e:
+        # Multi-line install hint follows the bracketed tag for grep-ability.
+        print(
+            _refuse("E-ENV-MISSING", "native dependency check failed", input_name=None),
+            file=sys.stderr,
+        )
+        print(str(e), file=sys.stderr)
+        return EXIT_ENV_MISSING
 
     # Read input
     if str(args.input) == "-":
@@ -1215,6 +1307,26 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return EXIT_VERIFIER_FAIL
+        except HostResourceError as e:
+            print(
+                _refuse(
+                    "E-HOST-RESOURCE",
+                    f"insufficient host memory for the requested workers ({e})",
+                    input_name=_label,
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_HOST_RESOURCE
+        except MemoryCapExceededError as e:
+            print(
+                _refuse(
+                    "E-MEM-CAP",
+                    f"worker memory cap exceeded ({e})",
+                    input_name=_label,
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_MEM_CAP
         # Timeouts — subclasses of CompressError; catch BEFORE the generic
         # handler so they carry stable codes (exit code is EXIT_ENGINE_ERROR
         # since timeouts aren't a separate code in the SPEC §2.2 table).

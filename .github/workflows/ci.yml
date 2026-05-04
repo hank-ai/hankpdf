@@ -124,15 +124,23 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.14"
-      - name: Install tesseract (Linux)
+      - name: Install tesseract + qpdf (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
-      - name: Install tesseract (macOS)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr qpdf
+      - name: Install tesseract + qpdf (macOS)
         if: runner.os == 'macOS'
-        run: brew install tesseract
-      # Windows tesseract is painful on CI; OCR unit tests auto-skip via
-      # pytestmark when the binary is absent (see tests/unit/engine/test_ocr.py).
+        run: brew install tesseract qpdf
+      # Windows tesseract+qpdf are painful on CI. We set HANKPDF_SKIP_ENV_CHECK=1
+      # for the Windows test step so the lazy boot probe short-circuits; OCR
+      # unit tests already auto-skip via pytestmark when the tesseract binary
+      # is absent (see tests/unit/engine/test_ocr.py).
       - name: Install project + dev deps
         run: uv sync --dev
-      - name: Run unit tests
+      - name: Run unit tests (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: uv run pytest tests/unit -v
+      - name: Run unit tests (Windows)
+        if: runner.os == 'Windows'
+        env:
+          HANKPDF_SKIP_ENV_CHECK: "1"
         run: uv run pytest tests/unit -v

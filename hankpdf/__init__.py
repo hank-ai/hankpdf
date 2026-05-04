@@ -13,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re as _re
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -23,14 +25,18 @@ from concurrent.futures import (
     as_completed,
 )
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from concurrent.futures.process import BrokenProcessPool
+from enum import Enum
 from typing import IO, Any, Literal
 
 import pikepdf
+import psutil
 
 # Import for side effect: installs PIL.Image.MAX_IMAGE_PIXELS per SECURITY.md
 # and docs/THREAT_MODEL.md. Must run before any other module that opens images
 # via Pillow, so keep this import early in __init__.
 from hankpdf import _pillow_hardening as _pillow_hardening
+from hankpdf._limits import MAX_PAGE_AXIS_PT
 from hankpdf._version import __engine_version__, __version__
 from hankpdf.exceptions import (
     CertifiedSignatureError,
@@ -40,7 +46,9 @@ from hankpdf.exceptions import (
     DecompressionBombError,
     EncryptedPDFError,
     EnvironmentError,  # noqa: A004 — part of our public error hierarchy
+    HostResourceError,
     MaliciousPDFError,
+    MemoryCapExceededError,
     OcrTimeoutError,
     OversizeError,
     PerPageTimeoutError,
@@ -68,10 +76,13 @@ __all__ = [
     "DecompressionBombError",
     "EncryptedPDFError",
     "EnvironmentError",
+    "HostResourceError",
     "MaliciousPDFError",
+    "MemoryCapExceededError",
     "OcrTimeoutError",
     "OversizeError",
     "PerPageTimeoutError",
+    "PolicyDecision",
     "ProgressEvent",
     "SignedPDFError",
     "TotalTimeoutError",
@@ -79,10 +90,30 @@ __all__ = [
     "VerifierResult",
     "__version__",
     "_enforce_input_policy",
+    "_init_worker",
+    "check_abort",
     "compress",
     "compress_stream",
     "triage",
 ]
+
+
+class PolicyDecision(Enum):
+    """Outcome of :func:`_enforce_input_policy`.
+
+    ``PROCEED`` — every safety gate passed; caller runs the full pipeline.
+    ``PASSTHROUGH_PRESERVE_SIGNATURE`` — input is signed and the user opted
+    into ``preserve_signatures``; caller must skip the pipeline and return
+    the input bytes verbatim with ``signature_state='passthrough-preserved'``
+    so the signature stays valid.
+
+    All other policy violations still raise from the
+    :class:`CompressError` hierarchy as before — only the signed-PDF
+    passthrough branch needed a non-exceptional return.
+    """
+
+    PROCEED = "proceed"
+    PASSTHROUGH_PRESERVE_SIGNATURE = "passthrough-preserve-signature"
 
 
 _JBIG2_CASCADE_STATE = threading.local()
@@ -112,6 +143,38 @@ _AUTO_WORKER_RESERVE = 1
 # options.max_workers values: 0 = auto, 1 = serial, N >= this = N workers.
 _MIN_EXPLICIT_WORKER_COUNT = 2
 
+# Per-page worker memory cap constants (Task 8).
+# Hard ceiling — even legit huge scans don't justify >16 GB per worker
+# (rasterized bombs are already bounded by Pillow MAX_IMAGE_PIXELS).
+_HARD_CEILING_BYTES = 16 * 1024**3
+# Floor — small inputs still get a generous cap for legitimate raster work.
+_FLOOR_BYTES = 8 * 1024**3
+# Per-page raster inflation factor over input bytes (300 DPI rasterization).
+_INFLATION_FACTOR = 16
+# Worker death exit codes that signal kernel-level memory-cap kill.
+_KERNEL_CAP_KILL_EXITCODES_UNIX = {-9, 137}  # SIGKILL or 128+9
+_STATUS_QUOTA_EXCEEDED = 0xC0000044  # Windows: Job Object kill exit code
+
+# Module-global so worker code can reach it without threading through
+# every dataclass. Set ONCE per worker via _init_worker.
+_WORKER_ABORT_EVENT: Any = None
+# Worker-local boot warnings (e.g., W-CAPS-UNAVAILABLE, W-CAPS-FAILED).
+# Drained into the first _PageResult.per_page_warnings tuple emitted by
+# this worker so the parent's CompressReport.warnings surfaces them.
+_WORKER_BOOT_WARNINGS: list[str] = []
+_WORKER_BOOT_WARNINGS_DRAINED: bool = False
+
+
+_CORRELATION_ID_RE = _re.compile(r"\A[A-Za-z0-9._:-]{1,64}\Z")
+
+
+def _validate_correlation_id(cid: str | None) -> None:
+    if cid is None:
+        return
+    if not _CORRELATION_ID_RE.match(cid):
+        msg = f"correlation_id must match [A-Za-z0-9._:-]{{1,64}} (got {cid!r})"
+        raise ValueError(msg)
+
 
 def _resolve_worker_count(options: CompressOptions, n_pages: int) -> int:
     """Return the actual number of workers for this run. 1 == serial path."""
@@ -123,8 +186,10 @@ def _resolve_worker_count(options: CompressOptions, n_pages: int) -> int:
     return min(auto, n_pages)
 
 
-def _init_worker() -> None:
-    """ProcessPoolExecutor initializer. Pins each worker to single-threaded
+def _pin_blas_threads() -> None:
+    """Pin OMP/BLAS to single-thread per process.
+
+    Pins each worker (and the parent, for consistency) to single-threaded
     native libraries so N workers use exactly N cores, not N * cpu_count cores.
 
     Without this, Tesseract's OpenMP (and numpy BLAS + OpenCV) each try to
@@ -132,12 +197,258 @@ def _init_worker() -> None:
     in parallel workers then creates N*cpu_count threads competing for
     cpu_count cores — context-switch thrash can fully eat the parallel
     speedup (sometimes making parallel slower than serial on the same box).
+
+    Safe to call from both parent and worker — env-vars only, no caps.
+    Idempotent.
     """
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+
+def _init_worker(mem_cap: int, abort_event: Any) -> None:
+    """ProcessPoolExecutor initializer (worker-only).
+
+    Pins OMP/BLAS threads, applies per-worker memory cap, and stashes
+    the shared cooperative-abort event on a module-global the worker
+    code path checks at safe-write boundaries.
+
+    ``mem_cap`` is bytes; ``0`` disables the cap (test escape hatch).
+    ``abort_event`` is the shared mp.Event — created from the same
+    mp_context as the executor by the parent — that all workers see;
+    when the parent's RSS watchdog fires, it sets this event and ALL
+    in-flight workers cooperatively drain and exit.
+    """
+    global _WORKER_ABORT_EVENT
+    _WORKER_ABORT_EVENT = abort_event
+    _pin_blas_threads()
+
+    if mem_cap > 0:
+        # Local import keeps the parent process from paying the
+        # platform_caps import cost when no cap is requested.
+        from hankpdf.sandbox import (
+            CapsUnavailableError,
+            apply_self_memory_cap,
+        )
+
+        try:
+            apply_self_memory_cap(mem_cap)
+        except CapsUnavailableError as e:
+            sys.stderr.write(f"[W-CAPS-UNAVAILABLE] {e}\n")
+            _WORKER_BOOT_WARNINGS.append("W-CAPS-UNAVAILABLE")
+        except (OSError, ValueError) as e:
+            # macOS rejects setrlimit(RLIMIT_AS, ...) with ValueError
+            # ("current limit exceeds maximum limit") — the kernel
+            # facility is unsupported, not a Python-level argument bug.
+            # Treat the same as a kernel rejection so the worker still
+            # boots and the parent's RSS watchdog backstops.
+            sys.stderr.write(f"[W-CAPS-FAILED] {e}\n")
+            _WORKER_BOOT_WARNINGS.append("W-CAPS-FAILED")
+
+
+def check_abort() -> None:
+    """Worker-side cooperative-abort check.
+
+    Call this at safe-write boundaries inside _process_single_page
+    (before each pikepdf.save() chunk emission, before heavy raster
+    allocations, before strategy compose calls). Raises
+    MemoryCapExceededError if the parent's watchdog has signaled abort.
+    """
+    if _WORKER_ABORT_EVENT is not None and _WORKER_ABORT_EVENT.is_set():
+        msg = "aborted by parent watchdog (host memory pressure)"
+        raise MemoryCapExceededError(msg)
+
+
+def _compute_worker_mem_cap(
+    input_size_bytes: int,
+    n_workers: int,
+    options: CompressOptions,
+) -> int:
+    """Compute the per-worker memory cap with hard ceiling + aggregate envelope.
+
+    Three constraints, in order of precedence:
+
+    1. Aggregate envelope: cap × n_workers must not exceed 70% of host
+       available RAM. We pick the smaller of (per-worker computed cap)
+       and (host-available × 0.7 / n_workers). Avoids the 7 × 8 GB =
+       56 GB scenario on a 32 GB host.
+    2. Hard ceiling: never more than 16 GB per worker, regardless of
+       input size. A library caller passing 4 GB of bytes would
+       otherwise lift the cap to 64 GB (16 × 4 GB) — defeats the bomb
+       defense for that input. The CLI clamps via --max-input-mb=250
+       but the library API has no such clamp, hence this absolute cap.
+    3. Per-input scaling: max(floor, inflation × input_size). Floor is
+       8 GB so trivial inputs still get headroom for legitimate
+       rasterization.
+
+    options.max_worker_memory_mb overrides constraints 2 and 3 (caller
+    knows their workload); constraint 1 (aggregate envelope) still
+    applies as a host-protection floor.
+    """
+    if options.max_worker_memory_mb is not None:
+        # 0 is the documented test escape hatch; bypass all clamps.
+        if options.max_worker_memory_mb == 0:
+            return 0
+        per_worker = int(options.max_worker_memory_mb) * 1024 * 1024
+    else:
+        per_worker = max(_FLOOR_BYTES, _INFLATION_FACTOR * input_size_bytes)
+        per_worker = min(per_worker, _HARD_CEILING_BYTES)
+
+    # Aggregate envelope — protect the host.
+    try:
+        available = psutil.virtual_memory().available
+    except Exception:
+        # If psutil can't read /proc on a sealed container, skip the
+        # envelope check. The hard ceiling above still applies.
+        return per_worker
+    aggregate_budget = int(available * 0.7)
+    envelope_per_worker = aggregate_budget // max(1, n_workers)
+    return min(per_worker, envelope_per_worker)
+
+
+def _requested_worker_count(options: CompressOptions) -> int:
+    """Return the user's requested worker count, *not* clamped by n_pages.
+
+    Used for the host-resource envelope check, which must fire on the
+    user's intent (max_workers=8) regardless of how many pages the input
+    actually has. ``_resolve_worker_count`` clamps to ``min(N, n_pages)``
+    which would mask the host-pressure issue on degenerate inputs.
+    """
+    if options.max_workers >= _MIN_EXPLICIT_WORKER_COUNT:
+        return options.max_workers
+    if options.max_workers == 1:
+        return 1
+    return max(1, (os.cpu_count() or 4) - _AUTO_WORKER_RESERVE)
+
+
+class _WatchdogState:
+    """Watchdog state object — readable by the result-collection loop
+    after the watchdog has exited. ``exitcodes`` is populated as workers
+    disappear from the executor's process table; this avoids the race
+    where ``BrokenProcessPool`` clears ``_processes`` before
+    ``_classify_worker_death`` reads it.
+    """
+
+    __slots__ = (
+        "any_cap_exceeded",
+        "exitcodes",
+        "peak_rss",
+        "stop_event",
+        "thread_died",
+    )
+
+    def __init__(self) -> None:
+        self.any_cap_exceeded: bool = False
+        self.thread_died: bool = False
+        self.stop_event: threading.Event = threading.Event()
+        self.exitcodes: dict[int, int] = {}
+        # Highest RSS observed across all workers during this run, in
+        # bytes. Updated by the watchdog poll loop; surfaced on
+        # CompressReport.worker_peak_rss_max_bytes.
+        self.peak_rss: int = 0
+
+
+def _start_rss_watchdog(
+    ex: Any,  # ProcessPoolExecutor — kept Any for the thread-pool escape hatch
+    mem_cap: int,
+    abort_event: Any,  # mp.Event, shared with all workers
+    state: _WatchdogState,
+) -> threading.Thread:
+    """Poll each worker's RSS; if any exceeds the cap, set the shared
+    abort_event so ALL workers cooperatively exit at the next
+    safe-write boundary.
+
+    The kernel-level cap (RLIMIT_AS on Unix, Job Object on Windows) is
+    the authoritative SIGKILL. This watchdog catches malloc-by-mmap
+    escapes from RLIMIT_AS on Linux and provides observability for all
+    platforms. It does NOT call psutil.Process.terminate() — that path
+    corrupts partial output streams.
+
+    Cost: one psutil call per worker per 500ms. Negligible on idle
+    hosts; under heavy load /proc reads can take >10ms each.
+
+    Also proactively snapshots worker exitcodes as workers exit, so the
+    result-collection loop can classify deaths even after
+    BrokenProcessPool clears the executor's _processes table.
+    """
+    if mem_cap <= 0:
+        # No cap: return a stub thread so the finally-block join is safe.
+        t = threading.Thread(target=lambda: None, daemon=True)
+        t.start()
+        return t
+
+    def _loop() -> None:
+        try:
+            seen_pids: set[int] = set()
+            while not state.stop_event.wait(0.5):
+                processes = dict(getattr(ex, "_processes", {}))
+                for pid, proc in processes.items():
+                    seen_pids.add(pid)
+                    # Snapshot exitcode if the worker has died; do this
+                    # before the RSS poll so we capture deaths the poll
+                    # missed. OVERWRITE only when we have a real exit
+                    # code to replace a placeholder.
+                    ec = getattr(proc, "exitcode", None)
+                    if ec is not None:
+                        existing = state.exitcodes.get(pid)
+                        if existing is None or existing == -1:
+                            state.exitcodes[pid] = ec
+                    try:
+                        rss = psutil.Process(pid).memory_info().rss
+                    except (
+                        psutil.NoSuchProcess,
+                        psutil.AccessDenied,
+                        psutil.ZombieProcess,
+                    ):
+                        continue
+                    # Track peak RSS so CompressReport can surface it
+                    # (worker_peak_rss_max_bytes). Done BEFORE the cap
+                    # comparison so even pre-overrun samples land in the
+                    # high-water mark.
+                    state.peak_rss = max(state.peak_rss, rss)
+                    if rss > mem_cap:
+                        sys.stderr.write(
+                            f"[W-MEM-RSS-WATCHDOG] worker pid={pid} "
+                            f"RSS={rss} exceeded cap={mem_cap}; "
+                            f"requesting cooperative shutdown\n"
+                        )
+                        # Set the shared event — ALL workers see it and
+                        # cooperatively drain at next safe-write boundary.
+                        abort_event.set()
+                        state.any_cap_exceeded = True
+                # Capture exitcodes for workers that left the table.
+                for pid in list(seen_pids - set(processes.keys())):
+                    if pid not in state.exitcodes:
+                        # Best-effort placeholder — table may not have
+                        # entries for workers that already cleaned up.
+                        state.exitcodes.setdefault(pid, -1)
+        except Exception as e:  # never let the watchdog die silently
+            state.thread_died = True
+            sys.stderr.write(f"[W-WATCHDOG-DIED] {type(e).__name__}: {e}\n")
+            raise
+
+    t = threading.Thread(target=_loop, daemon=True, name="hankpdf-rss-watchdog")
+    t.start()
+    return t
+
+
+def _classify_worker_death(state: _WatchdogState) -> bool:
+    """Return True iff at least one worker died from a memory cap.
+
+    Reads ONLY from the watchdog's snapshot state (state.exitcodes,
+    state.any_cap_exceeded) — never from executor._processes, which
+    may be cleared by BrokenProcessPool before this is called.
+    """
+    if state.any_cap_exceeded:
+        return True
+    for ec in state.exitcodes.values():
+        if ec in _KERNEL_CAP_KILL_EXITCODES_UNIX:
+            return True
+        if sys.platform == "win32" and ec == _STATUS_QUOTA_EXCEEDED:
+            return True
+    return False
 
 
 from dataclasses import dataclass as _dc  # noqa: E402 — adjacent to other module-level aliases
@@ -203,6 +514,12 @@ def _build_passthrough_report(
     warning_code: str,
     *,
     correlation_id: str | None = None,
+    signature_state: Literal[
+        "none",
+        "passthrough-preserved",
+        "invalidated-allowed",
+        "certified-invalidated-allowed",
+    ] = "none",
 ) -> CompressReport:
     """Construct a CompressReport for a passthrough return (input unchanged).
 
@@ -210,6 +527,8 @@ def _build_passthrough_report(
     (min_input_mb, min_ratio) short-circuits the pipeline — the output
     equals the input, verifier is marked "skipped" (nothing to compare),
     and a kebab-case warning code names the specific gate that tripped.
+    Also used for the signed-PDF preserve-signatures path
+    (``signature_state='passthrough-preserved'``).
 
     Delegates to ``_VerifierAggregator().skipped_result()`` so there's a
     single source of truth for the fail-closed sentinel policy. Without
@@ -244,6 +563,8 @@ def _build_passthrough_report(
         reason=reason,
         build_info=resolve_build_info(),
         correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),
+        signature_state=signature_state,
+        signature_invalidated=False,
     )
 
 
@@ -251,13 +572,16 @@ def _enforce_input_policy(
     tri: TriageReport,
     options: CompressOptions,
     input_data: bytes,
-) -> None:
+) -> PolicyDecision:
     """Apply every safety gate that compress() enforces on the input.
 
-    Raises the appropriate exception from the CompressError hierarchy if
-    a gate is tripped. Both compress() and the CLI's image-export path
-    must route through this so users get the same refusal behavior
-    regardless of the chosen output format.
+    Raises the appropriate exception from the :class:`CompressError`
+    hierarchy if a refusal gate is tripped. Returns a
+    :class:`PolicyDecision` to signal whether the caller should
+    ``PROCEED`` with the full pipeline or take the signed-PDF passthrough
+    shortcut (``PASSTHROUGH_PRESERVE_SIGNATURE``). Both compress() and
+    the CLI's image-export path must route through this so users get the
+    same refusal behavior regardless of the chosen output format.
     """
     if tri.classification == "require-password" and options.password is None:
         msg = "input is encrypted; supply CompressOptions.password"
@@ -267,9 +591,16 @@ def _enforce_input_policy(
         msg = "input carries a certifying signature; --allow-certified-invalidation required"
         raise CertifiedSignatureError(msg)
 
-    if tri.is_signed and not options.allow_signed_invalidation:
-        msg = "input is signed; --allow-signed-invalidation required"
-        raise SignedPDFError(msg)
+    if tri.is_signed and not tri.is_certified_signature:
+        if options.preserve_signatures:
+            return PolicyDecision.PASSTHROUGH_PRESERVE_SIGNATURE
+        if not options.allow_signed_invalidation:
+            msg = (
+                "input is signed; pass --allow-signed-invalidation to recompress "
+                "(invalidates signature) or --preserve-signatures to passthrough "
+                "(no compression)"
+            )
+            raise SignedPDFError(msg)
 
     if options.max_pages is not None and tri.pages > options.max_pages:
         msg = (
@@ -286,6 +617,52 @@ def _enforce_input_policy(
             "(default tightened from 2000.0; pass --max-input-mb 2000 to relax)"
         )
         raise OversizeError(msg)
+
+    # Page-dimension bomb guard. Rasterize-time check_render_size catches
+    # over-pixel allocations inside the worker, but a 60000x20000 pt page
+    # that is empty of image content gets routed to the verbatim/passthrough
+    # fast path *before* any worker is dispatched — so the rasterize guard
+    # never fires. Refuse at triage time regardless of page content density.
+    _enforce_page_axis_cap(input_data, options)
+
+    return PolicyDecision.PROCEED
+
+
+def _enforce_page_axis_cap(input_data: bytes, options: CompressOptions) -> None:
+    """Refuse if any page's MediaBox/CropBox axis exceeds MAX_PAGE_AXIS_PT.
+
+    Walks pikepdf-parsed pages once; the open is cheap because triage has
+    already validated the document. Uses CropBox when present (visible
+    region) and falls back to MediaBox; either axis exceeding the cap
+    triggers a :class:`DecompressionBombError`.
+    """
+    try:
+        with pikepdf.open(io.BytesIO(input_data), password=options.password or "") as pdf:
+            for idx, page in enumerate(pdf.pages):
+                box = page.obj.get("/CropBox") or page.obj.get("/MediaBox")
+                if box is None:
+                    continue
+                try:
+                    coords = [float(v) for v in box]  # type: ignore[attr-defined]
+                except TypeError, ValueError:
+                    continue
+                if len(coords) < 4:
+                    continue
+                width = abs(coords[2] - coords[0])
+                height = abs(coords[3] - coords[1])
+                if width > MAX_PAGE_AXIS_PT or height > MAX_PAGE_AXIS_PT:
+                    msg = (
+                        f"page {idx + 1} declares {width:.0f}x{height:.0f} pt "
+                        f"(MediaBox/CropBox); axis cap is {MAX_PAGE_AXIS_PT:.0f} pt "
+                        f"(200 in). Refusing as a decompression-bomb candidate."
+                    )
+                    raise DecompressionBombError(msg)
+    except pikepdf.PdfError as e:
+        # Triage already accepted the document; if pikepdf can't reopen
+        # it here, surface as CorruptPDFError so callers see a structured
+        # exit code (13) rather than EXIT_ENGINE_ERROR=30.
+        msg = f"unable to inspect page dimensions: {e}"
+        raise CorruptPDFError(msg) from e
 
 
 def _mrc_compose(
@@ -367,6 +744,18 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     )
 
     _worker_t0 = time.monotonic()
+    # Cooperative-abort check (Task 8): bail before any work begins.
+    check_abort()
+    # Drain boot warnings (e.g., W-CAPS-UNAVAILABLE, W-CAPS-FAILED) that
+    # the worker accumulated in _init_worker. One worker may process
+    # many pages; only include boot warnings on the FIRST page result
+    # to avoid duplication. We track this with a worker-local "drained"
+    # flag.
+    _boot_warnings: tuple[str, ...] = ()
+    global _WORKER_BOOT_WARNINGS_DRAINED
+    if not _WORKER_BOOT_WARNINGS_DRAINED:
+        _boot_warnings = tuple(_WORKER_BOOT_WARNINGS)
+        _WORKER_BOOT_WARNINGS_DRAINED = True
     i = winput.page_index
     width_pt, height_pt = winput.page_size
     options = winput.options
@@ -387,8 +776,9 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         # Synthetic verdict invariant: this fast path emits
         # _PageVerdict(lev=1.0, ssim_global=0.0, ssim_tile_min=0.0, ...)
         # — sentinel values, not real measurements. They are SAFE only
-        # because compress()'s _force_full_pipeline interlock disables
-        # the gate when --verify is on, so verbatim verdicts never feed
+        # because the _force_full_pipeline interlock (now in
+        # hankpdf.engine.per_page_gate) disables the gate when --verify
+        # is on, so verbatim verdicts never feed
         # _VerifierAggregator.merge(). If a future change relaxes the
         # interlock (or adds a new gate-disable path), the invariant
         # below will trip first instead of silently corrupting metrics.
@@ -396,7 +786,8 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             msg = (
                 "verbatim worker fast-path reached with skip_verify=False; "
                 "synthetic PageVerdict would pollute _VerifierAggregator. "
-                "Check the _force_full_pipeline interlock in compress()."
+                "Check the _force_full_pipeline interlock in "
+                "hankpdf.engine.per_page_gate."
             )
             raise AssertionError(msg)
         from hankpdf.engine.verifier import PageVerdict as _PageVerdict
@@ -415,7 +806,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             composed_bytes=winput.input_page_pdf,
             strategy_name="already_optimized",
             verdict=_verdict,
-            per_page_warnings=(),
+            per_page_warnings=_boot_warnings,
             input_bytes=len(winput.input_page_pdf),
             output_bytes=len(winput.input_page_pdf),
             ratio=1.0,
@@ -423,6 +814,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
         )
 
     # --- Rasterize input ---
+    check_abort()  # heavy raster allocation — bail if parent watchdog signaled
     raster = rasterize_page(
         winput.input_page_pdf, page_index=0, dpi=winput.source_dpi, password=None
     )
@@ -563,6 +955,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             raise AssertionError(msg)
 
         # --- Strategy dispatch ---
+        check_abort()  # bail before strategy compose (allocation-heavy)
         if strategy == PageStrategy.TEXT_ONLY:
             if not options.force_monochrome and not is_effectively_monochrome(raster):
                 warnings.append(f"page-{i + 1}-text-only-demoted-to-mixed-color-detected")
@@ -633,6 +1026,7 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
             if not word_boxes and _need_tesseract_for_text_layer:
                 _await_input_ocr()
             if word_boxes:
+                check_abort()  # bail before text-layer pikepdf.save() boundary
                 composed = add_text_layer(
                     composed,
                     page_index=0,
@@ -734,12 +1128,13 @@ def _process_single_page(winput: _WorkerInput) -> _PageResult:
     out_bytes = len(composed)
     true_ratio = in_bytes / max(1, out_bytes)
 
+    check_abort()  # last chance to bail before parent merges this result
     return _PageResult(
         page_index=i,
         composed_bytes=composed,
         strategy_name=strategy.name.lower(),
         verdict=verdict,
-        per_page_warnings=tuple(warnings),
+        per_page_warnings=tuple(warnings) + _boot_warnings,
         input_bytes=in_bytes,
         output_bytes=out_bytes,
         ratio=true_ratio,
@@ -774,7 +1169,7 @@ def _extract_ground_truth_text(
                 _tp.close()
         finally:
             _doc.close()
-    except Exception:  # noqa: BLE001, S110 — best-effort native-text probe; any error → fall back to OCR.
+    except Exception:  # noqa: S110 — best-effort native-text probe; any error → fall back to OCR.
         pass
     return fallback_ocr_text
 
@@ -817,6 +1212,18 @@ def compress(
     fresh UUID4 is generated. Library callers who drive multiple pages
     through one logger should pass the same id they prefix stderr with.
     """
+    # NEW (Task 3): validate args before env precondition
+    _validate_correlation_id(correlation_id)
+
+    # Lazy native-dep boot check (cached for the process lifetime via
+    # functools.cache on get_environment_report). Raises EnvironmentError
+    # with a friendly install hint if tesseract/qpdf/openjpeg are missing
+    # or below their floors. Library callers only pay the subprocess
+    # probe cost once, on first compress() call in the process.
+    from hankpdf._environment import assert_environment_ready
+
+    assert_environment_ready()
+
     t0 = time.monotonic()
     options = options or CompressOptions()
 
@@ -873,6 +1280,30 @@ def compress(
         )
         raise NotImplementedError(msg)
 
+    # ── Host-resource envelope check (Task 8) ──────────────────────────
+    # Fires BEFORE triage / per-page gate / passthrough / executor setup
+    # so a host with insufficient available RAM gets a clean refusal
+    # regardless of whether the input would otherwise short-circuit
+    # (0-page input, whole-doc passthrough, corrupt-PDF refusal, etc.).
+    # Uses the user's *requested* worker count (not clamped to n_pages)
+    # so the error reflects user intent.
+    #
+    # The thread-pool escape hatch (HANKPDF_POOL=thread) deliberately
+    # bypasses this check — applying RLIMIT_AS to threads would cap the
+    # parent. Tests and library callers that want to disable the check
+    # also use ``CompressOptions(max_worker_memory_mb=0)``.
+    _pool_kind_for_check = os.environ.get("HANKPDF_POOL", "process").lower()
+    if _pool_kind_for_check != "thread":
+        _check_n_workers = _requested_worker_count(options)
+        _check_mem_cap = _compute_worker_mem_cap(len(input_data), _check_n_workers, options)
+        if _check_mem_cap > 0 and _check_mem_cap < (256 * 1024 * 1024):
+            _msg = (
+                f"computed worker memory cap {_check_mem_cap / 1024**2:.0f} MB is below "
+                "the 256 MB minimum (host RAM pressure). Reduce --max-workers or "
+                "free memory before retrying."
+            )
+            raise HostResourceError(_msg)
+
     # Lazy imports of engine modules so ``from hankpdf import CompressOptions``
     # doesn't pay the startup cost of loading pdfium / OpenCV / Tesseract.
     from hankpdf.engine.canonical import canonical_input_sha256
@@ -914,7 +1345,20 @@ def compress(
         total=len(_selected_indices),
     )
 
-    _enforce_input_policy(tri, options, input_data)
+    decision = _enforce_input_policy(tri, options, input_data)
+    if decision is PolicyDecision.PASSTHROUGH_PRESERVE_SIGNATURE:
+        # Signed input + preserve_signatures=True → return bytes verbatim
+        # so the signature stays valid. No pipeline, no rewrite, no merge.
+        wall_ms = int((time.monotonic() - t0) * 1000)
+        return input_data, _build_passthrough_report(
+            input_data,
+            pages=tri.pages,
+            wall_ms=wall_ms,
+            reason="passthrough-signed: preserve_signatures=True",
+            warning_code="passthrough-signed",
+            correlation_id=correlation_id,
+            signature_state="passthrough-preserved",
+        )
     _check_total_timeout("triage")
 
     # --- Passthrough: min_input_mb floor ---
@@ -954,35 +1398,12 @@ def compress(
     #                          PageVerdict values into _VerifierAggregator
     #                          and pollute the aggregate ssim/lev/digit
     #                          metrics on partial-passthrough runs.
-    from hankpdf.engine.page_classifier import score_pages_for_mrc
+    from hankpdf.engine.per_page_gate import run_per_page_gate
 
-    _force_full_pipeline = (
-        bool(options.re_ocr)
-        or bool(options.strip_text_layer)
-        or bool(options.legal_codec_profile)
-        or not options.skip_verify
-    )
-    if _force_full_pipeline:
-        _mrc_flags = [True] * tri.pages
-    else:
-        _mrc_flags = score_pages_for_mrc(
-            input_data,
-            password=options.password,
-            min_image_byte_fraction=options.min_image_byte_fraction,
-        )
+    _gate = run_per_page_gate(input_data, tri, options)
+    _mrc_flags = list(_gate.mrc_worthy)
 
-    # Defensive: if the classifier disagreed with triage on the page count
-    # (qpdf-repaired inputs, or a future pikepdf upgrade that changes the
-    # iteration semantics), surface the contract drift now rather than
-    # IndexError-ing deep in the per-page loop. Coerce to triage's count
-    # (the source of truth for everything downstream) and emit a warning.
-    if len(_mrc_flags) != tri.pages:
-        _mrc_flags = (_mrc_flags + [True] * tri.pages)[: tri.pages]
-        # Note: this falls through to per-page processing without a
-        # CompressReport.warnings entry today (warnings is built later);
-        # if the drift is ever observed in production, wire a code.
-
-    if not any(_mrc_flags):
+    if _gate.whole_doc_passthrough:
         # Whole-doc shortcut: every page is verbatim → return input unchanged.
         # compress() returns tuple[bytes, CompressReport]; the unchanged input
         # is the byte-identical first element.
@@ -1114,6 +1535,13 @@ def compress(
     n_workers = _resolve_worker_count(options, len(_selected_indices))
     use_pool = n_workers > 1 and len(_selected_indices) >= _PARALLEL_MIN_PAGES
 
+    # Observability hooks for CompressReport.worker_memory_cap_bytes and
+    # worker_peak_rss_max_bytes (schema v5). The use_pool branch overwrites
+    # these; the serial path leaves them at 0 (no per-worker cap applies
+    # when pages run in-process, and the watchdog never spawned).
+    _run_mem_cap: int = 0
+    _run_wd_state: _WatchdogState | None = None
+
     def _page_error_context(page_index: int, exc: BaseException) -> str:
         return f"compression failed on page {page_index + 1}/{tri.pages}: {exc}"
 
@@ -1138,17 +1566,43 @@ def compress(
         import multiprocessing as _mp
 
         _pool_kind = os.environ.get("HANKPDF_POOL", "process").lower()
-        _init_worker()  # also pin parent's OMP/BLAS for consistency
+        _pin_blas_threads()  # parent: env-vars only; never apply RLIMIT to ourselves
         _ex_kwargs: dict[str, Any] = {"max_workers": n_workers}
+        # mem_cap and shared_abort_event are set in the process-pool branch
+        # below; the thread-pool escape hatch (HANKPDF_POOL=thread) skips
+        # them. Applying RLIMIT_AS from a thread initializer would cap the
+        # parent process itself (workers are threads in the same address
+        # space) — incorrect. Tests under HANKPDF_POOL=thread run uncapped.
+        mem_cap = 0
+        shared_abort_event: Any = None
         if _pool_kind == "thread":
             executor_cls: type = ThreadPoolExecutor
             label = "thread (UNSAFE: pdfium not thread-safe, may crash)"
         else:
             executor_cls = ProcessPoolExecutor
-            _ex_kwargs["initializer"] = _init_worker
             available = _mp.get_all_start_methods()
             chosen_method = "forkserver" if "forkserver" in available else "spawn"
+            mem_cap = _compute_worker_mem_cap(len(input_data), n_workers, options)
+            _run_mem_cap = mem_cap
+            # 0 is the documented test escape hatch — skip the floor check.
+            if mem_cap > 0 and mem_cap < (256 * 1024 * 1024):
+                # Less than 256 MB per worker is below the floor for legitimate
+                # 300-DPI rasterization. Fail loud rather than crash mid-job.
+                # Use HostResourceError (NOT MemoryCapExceededError, which means
+                # "a worker died from cap" — no worker has been created yet).
+                _msg = (
+                    f"computed worker memory cap {mem_cap / 1024**2:.0f} MB is below "
+                    "the 256 MB minimum (host RAM pressure). Reduce --max-workers or "
+                    "free memory before retrying."
+                )
+                raise HostResourceError(_msg)
             ctx = _mp.get_context(chosen_method)
+            # Single shared abort event — created from the executor's
+            # mp_context so the underlying semaphore handle is
+            # forkserver/spawn-compatible.
+            shared_abort_event = ctx.Event()
+            _ex_kwargs["initializer"] = _init_worker
+            _ex_kwargs["initargs"] = (mem_cap, shared_abort_event)
             if chosen_method == "forkserver":
                 try:
                     ctx.set_forkserver_preload(
@@ -1194,56 +1648,90 @@ def compress(
         # workers all start simultaneously so the "rasterizing pN" label
         # doesn't mean anything. Only page_done fires (from completion order).
         with executor_cls(**_ex_kwargs) as ex:
-            future_to_winput: dict[Any, _WorkerInput] = {
-                ex.submit(_process_single_page, w): w for w in winputs
-            }
-            # `as_completed` iterates in completion order. `_pos` is 1-indexed
-            # completion position, which is what tqdm wants for the progress bar.
-            # Per-page timeout: we wait at most per_page_timeout_seconds * n_pages
-            # for ALL futures to complete (a proxy for strict per-page — true
-            # per-page is impossible with as_completed since workers start
-            # together). If the total budget expires, we cancel and raise
-            # PerPageTimeoutError naming the laggards.
-            _per_page_budget = options.per_page_timeout_seconds
-            _parallel_total_budget = _per_page_budget * max(1, len(winputs))
+            # Spawn the parent-side RSS watchdog. mem_cap=0 (test escape
+            # hatch or thread pool) returns a stub thread so the join is
+            # safe regardless. The watchdog observes worker RSS and sets
+            # the shared abort_event on cap-overrun; workers cooperatively
+            # exit at the next check_abort() boundary.
+            _wd_state = _WatchdogState()
+            _run_wd_state = _wd_state
+            _watchdog = _start_rss_watchdog(ex, mem_cap, shared_abort_event, _wd_state)
             try:
-                _completed_iter = as_completed(
-                    future_to_winput,
-                    timeout=_parallel_total_budget,
-                )
-                for _pos, fut in enumerate(_completed_iter, start=1):
-                    w = future_to_winput[fut]
-                    try:
-                        result = fut.result()
-                    except KeyboardInterrupt:
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except AssertionError, CompressError:
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except Exception as e:
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        msg = _page_error_context(w.page_index, e)
-                        raise CompressError(msg) from e
-                    _merge_result(_pos, result)
-            except FuturesTimeoutError as e:
-                ex.shutdown(wait=False, cancel_futures=True)
-                _pending = [
-                    fw.page_index + 1 for fut, fw in future_to_winput.items() if not fut.done()
-                ]
-                _pending_display = _format_verifier_failing_pages(
-                    tuple(_pending),
-                    limit=10,
-                )
-                msg = (
-                    f"per-page timeout ({_per_page_budget}s x {len(winputs)} pages) "
-                    f"exceeded; {len(_pending)} page(s) still pending: "
-                    f"{_pending_display}"
-                )
-                raise PerPageTimeoutError(msg) from e
-            except BaseException:  # pragma: no cover — cancellation path
-                ex.shutdown(wait=False, cancel_futures=True)
-                raise
+                future_to_winput: dict[Any, _WorkerInput] = {
+                    ex.submit(_process_single_page, w): w for w in winputs
+                }
+                # `as_completed` iterates in completion order. `_pos` is 1-indexed
+                # completion position, which is what tqdm wants for the progress bar.
+                # Per-page timeout: we wait at most per_page_timeout_seconds * n_pages
+                # for ALL futures to complete (a proxy for strict per-page — true
+                # per-page is impossible with as_completed since workers start
+                # together). If the total budget expires, we cancel and raise
+                # PerPageTimeoutError naming the laggards.
+                _per_page_budget = options.per_page_timeout_seconds
+                _parallel_total_budget = _per_page_budget * max(1, len(winputs))
+                try:
+                    _completed_iter = as_completed(
+                        future_to_winput,
+                        timeout=_parallel_total_budget,
+                    )
+                    for _pos, fut in enumerate(_completed_iter, start=1):
+                        w = future_to_winput[fut]
+                        try:
+                            result = fut.result()
+                        except KeyboardInterrupt:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            raise
+                        except AssertionError, CompressError:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            raise
+                        except BrokenProcessPool, MemoryCapExceededError:
+                            # Race-fix: workers killed faster than the watchdog
+                            # poll cadence (500 ms) won't have their exit code
+                            # in state.exitcodes yet. Drain whatever's in the
+                            # (about-to-clear) process table now so the
+                            # classifier has fresh data. OVERWRITE: don't let
+                            # setdefault mask a real exitcode behind a placeholder.
+                            for _pid, _proc in dict(getattr(ex, "_processes", {})).items():
+                                _ec = getattr(_proc, "exitcode", None)
+                                if _ec is not None:
+                                    _wd_state.exitcodes[_pid] = _ec
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            if _classify_worker_death(_wd_state):
+                                _msg = "per-page worker exceeded memory cap"
+                                raise MemoryCapExceededError(_msg) from None
+                            raise
+                        except Exception as e:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            msg = _page_error_context(w.page_index, e)
+                            raise CompressError(msg) from e
+                        _merge_result(_pos, result)
+                except FuturesTimeoutError as e:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    _pending = [
+                        fw.page_index + 1 for fut, fw in future_to_winput.items() if not fut.done()
+                    ]
+                    _pending_display = _format_verifier_failing_pages(
+                        tuple(_pending),
+                        limit=10,
+                    )
+                    msg = (
+                        f"per-page timeout ({_per_page_budget}s x {len(winputs)} pages) "
+                        f"exceeded; {len(_pending)} page(s) still pending: "
+                        f"{_pending_display}"
+                    )
+                    raise PerPageTimeoutError(msg) from e
+                except BaseException:  # pragma: no cover — cancellation path
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    raise
+            finally:
+                _wd_state.stop_event.set()
+                _watchdog.join(timeout=2)
+                # Liveness check: if the watchdog died, the cap was
+                # effectively unenforced for at least part of the run.
+                # Surface this so users can re-run with --max-workers
+                # reduced.
+                if _wd_state.thread_died:
+                    warnings_list.append("W-WATCHDOG-DIED")
     else:
         # Serial path: dispatch each page through a 1-worker ThreadPoolExecutor
         # so we can enforce per_page_timeout_seconds via future.result(timeout=).
@@ -1420,6 +1908,26 @@ def compress(
     if _verbatim_pages and len(_verbatim_pages) < tri.pages:
         warnings_list.append(f"pages-skipped-verbatim-{len(_verbatim_pages)}")
 
+    # Signature outcome — derived from triage + the opt-in flags. The
+    # passthrough-preserve case never reaches this codepath (it returns
+    # early upstream), so the only options here are the two
+    # invalidation paths or "no signature in the input at all".
+    _sig_state: Literal[
+        "none",
+        "passthrough-preserved",
+        "invalidated-allowed",
+        "certified-invalidated-allowed",
+    ]
+    if tri.is_certified_signature and options.allow_certified_invalidation:
+        _sig_state = "certified-invalidated-allowed"
+        _sig_invalidated = True
+    elif tri.is_signed and options.allow_signed_invalidation:
+        _sig_state = "invalidated-allowed"
+        _sig_invalidated = True
+    else:
+        _sig_state = "none"
+        _sig_invalidated = False
+
     report = CompressReport(
         status=status,
         exit_code=exit_code,
@@ -1439,6 +1947,14 @@ def compress(
         strategy_distribution=dict(strategy_counts),
         build_info=resolve_build_info(),
         correlation_id=correlation_id if correlation_id is not None else _new_correlation_id(),
+        signature_state=_sig_state,
+        signature_invalidated=_sig_invalidated,
+        # Schema v5 observability — see SPEC.md §11. _run_mem_cap is the
+        # cap actually applied (0 when caps disabled / serial path /
+        # thread pool). _run_wd_state.peak_rss is the high-water mark
+        # observed by the parent-side watchdog (0 when no watchdog ran).
+        worker_memory_cap_bytes=_run_mem_cap,
+        worker_peak_rss_max_bytes=_run_wd_state.peak_rss if _run_wd_state else 0,
     )
     return output_bytes, report
 
@@ -1447,9 +1963,18 @@ def compress_stream(
     input_stream: IO[bytes],
     output_stream: IO[bytes],
     options: CompressOptions | None = None,
+    *,
+    correlation_id: str | None = None,
 ) -> CompressReport:
-    """Streaming compression variant. See ``docs/SPEC.md`` §1.2."""
+    """Streaming compression variant. See ``docs/SPEC.md`` §1.2.
+
+    ``correlation_id`` (optional, ``[A-Za-z0-9._:-]{1,64}``) is stamped
+    onto the returned :class:`CompressReport`. Pass the same id your
+    upstream logger prefixes its lines with so the report can be
+    joined back to the calling system's log slice. If omitted, a fresh
+    UUID4 hex is generated.
+    """
     data = input_stream.read()
-    out, report = compress(data, options=options)
+    out, report = compress(data, options=options, correlation_id=correlation_id)
     output_stream.write(out)
     return report

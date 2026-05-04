@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hankpdf"
-version = "0.2.2"
+version = "0.3.0"
 description = "Aggressive, safety-first PDF compressor for scanned documents. CLI tool: PDF in, compressed searchable PDF out."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -42,6 +42,7 @@ dependencies = [
     "numpy>=2.4.0",
     "opencv-python-headless>=4.13.0",
     "scikit-image>=0.26.0",
+    "psutil>=5.9,<8",
     "pytesseract>=0.3.13",
     "tqdm>=4.67",
 ]
@@ -56,7 +57,9 @@ Issues = "https://github.com/hank-ai/hankpdf/issues"
 hankpdf = "hankpdf.cli.main:main"
 
 [project.optional-dependencies]
-# Placeholder — v1 ships no optional extras yet.
+test = [
+    "pyhanko>=0.27,<1",
+]
 
 [dependency-groups]
 dev = [
@@ -68,15 +71,11 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-# Ship both the canonical `hankpdf` package and the legacy `pdf_smasher`
-# deprecation shim. Shim re-exports public API and emits DeprecationWarning;
-# scheduled for removal in v0.3.0.
-packages = ["hankpdf", "pdf_smasher"]
+packages = ["hankpdf"]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "hankpdf/**",
-    "pdf_smasher/**",
     "README.md",
     "LICENSE",
     "NOTICE",
@@ -115,6 +114,9 @@ ignore = [
     "TC001",    # TYPE_CHECKING import shuffling is cosmetic
     "TC002",
     "TC003",
+    "RUF001",   # `×` in strings is the right multiplication sign for engineering math
+    "RUF002",   # `×` in docstrings — same as above
+    "RUF003",   # `×` in comments — same as above
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -123,6 +125,15 @@ ignore = [
     "PLR0912",
     "PLR0915",
     "PLC0415",  # lazy imports to keep top-level import cheap
+    "PLW0603",  # global statements are required for worker process state
+    "BLE001",   # broad exception in psutil/pikepdf fallback paths is by design
+    "PLR2004",  # magic numbers in PDF parsing (coordinate tuple lengths, etc.)
+]
+"hankpdf/sandbox/_apply_win32.py" = [
+    "N801",     # Win32 ctypes Structure names mirror the official Microsoft typedefs
+]
+"hankpdf/sandbox/platform_caps.py" = [
+    "PLC0415",  # platform-conditional imports must live inside the apply() branch
 ]
 "hankpdf/cli/main.py" = [
     "C901",     # main() has many error-class branches by design
@@ -155,6 +166,12 @@ ignore = [
     "ERA001",   # rationale comments in tests are fine
     "FBT",      # boolean positional args in parametrized tests are fine
     "E741",     # short loop vars in tests are fine
+    "BLE001",   # tests catch broad Exception when probing skip conditions
+    "PLW1510",  # subprocess.run check= explicit-arg noise in tests
+    "SLF001",   # tests legitimately reach into private state to verify invariants
+    "PT011",    # pytest.raises(ValueError) without match= is fine in tests
+    "PT006",    # parametrize first-arg style is consistent within each file
+    "B004",     # explicit hasattr(x, "__call__") is intentional in tests
 ]
 "scripts/**" = [
     "T201",     # print() is the UI for scripts
@@ -188,8 +205,18 @@ module = [
     "pytesseract.*",
     "cv2.*",
     "skimage.*",
+    "psutil",
 ]
 ignore_missing_imports = true
+
+# Win32 ctypes module: WinDLL / get_last_error are only present on Windows.
+# Mypy runs cross-platform so it can't see them — but the module is itself
+# only imported when sys.platform == "win32" (see platform_caps.py).
+[[tool.mypy.overrides]]
+module = [
+    "hankpdf.sandbox._apply_win32",
+]
+ignore_errors = true
 
 # ---------------------------------------------------------------------------
 # Pytest

@@ -61,7 +61,7 @@ def test_total_timeout_fires_on_long_run() -> None:
 
     import hankpdf as _pkg
 
-    _real = _pkg._process_single_page  # noqa: SLF001 — accessing to re-dispatch in test
+    _real = _pkg._process_single_page
 
     def _slow_worker(w: object) -> object:
         # Call the real implementation AFTER sleeping to eat the budget.
