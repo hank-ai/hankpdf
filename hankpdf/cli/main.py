@@ -193,6 +193,8 @@ EXIT_CORRUPT = 13
 EXIT_MALICIOUS = 14
 EXIT_CERTIFIED_SIG = 15
 EXIT_DECOMPRESSION_BOMB = 16
+EXIT_ENV_MISSING = 17
+EXIT_MEM_CAP = 18
 EXIT_VERIFIER_FAIL = 20
 EXIT_ENGINE_ERROR = 30
 EXIT_USAGE = 40
@@ -562,15 +564,25 @@ def _build_options(args: argparse.Namespace) -> CompressOptions:
 
 
 def _doctor_report() -> str:
+    """Render the ``--doctor`` diagnostic report.
+
+    Uses :func:`hankpdf._environment.get_environment_report` as the single
+    source of truth so the boot-check failure message and ``--doctor``
+    output never drift apart. Adds PATH lookup (via :mod:`shutil`) for
+    each tool so users can see *where* the binary lives, not just what
+    version we found.
+    """
     import platform
     import shutil
-    import subprocess
 
+    from hankpdf._environment import get_environment_report
     from hankpdf._version import build_info, version_line
 
+    report = get_environment_report()
     lines = [
         version_line(),
         f"platform {platform.platform()}",
+        f"python   {report.python_version}",
     ]
     _info = build_info()
     if _info is not None:
@@ -588,50 +600,39 @@ def _doctor_report() -> str:
         ):
             val = _info.get(key, "?")
             lines.append(f"  {key:20s} {val}")
-    for tool in ("tesseract", "qpdf", "jbig2"):
-        path = shutil.which(tool)
-        if path:
-            try:
-                out = subprocess.run(
-                    [tool, "--version"],
-                    capture_output=True,
-                    check=False,
-                    timeout=5,
-                    text=True,
-                )
-                first_line = (out.stdout or out.stderr).splitlines()[:1]
-                ver = first_line[0] if first_line else "unknown"
-            except subprocess.TimeoutExpired, OSError:
-                ver = "unreachable"
-            lines.append(f"  {tool:12s} {ver}")
-        else:
-            lines.append(f"  {tool:12s} NOT FOUND")
 
-    # JPEG2000 via Pillow's bundled OpenJPEG — probe by attempting encode.
-    # A Pillow wheel built without OpenJPEG silently falls back to JPEG on
-    # the bg_codec=jpeg2000 path; surface that here so users can diagnose.
-    try:
-        import io as _io_probe
+    def _fmt(component: str, tool_name: str, version: str | None) -> str:
+        path = shutil.which(tool_name)
+        if version is None and path is None:
+            return f"  {component:12s} NOT FOUND"
+        if version is None:
+            return f"  {component:12s} unparseable  ({path})"
+        if path is None:
+            return f"  {component:12s} {version}"
+        return f"  {component:12s} {version}  ({path})"
 
-        from PIL import Image as _PILImage
-
-        _buf = _io_probe.BytesIO()
-        _PILImage.new("RGB", (8, 8)).save(_buf, format="JPEG2000")
-        lines.append(f"  {'JPEG2000':12s} available (Pillow/OpenJPEG)")
-    except (OSError, ImportError) as e:
-        lines.append(
-            f"  {'JPEG2000':12s} UNAVAILABLE ({type(e).__name__}) — "
-            "bg_codec=jpeg2000 will fall back to JPEG"
+    lines.append(_fmt("tesseract", "tesseract", report.tesseract))
+    lines.append(_fmt("qpdf", "qpdf", report.qpdf))
+    lines.append(_fmt("jbig2enc", "jbig2", report.jbig2enc))
+    lines.append(
+        f"  {'JPEG2000':12s} "
+        + (
+            report.openjpeg_via_pillow
+            or "UNAVAILABLE — bg_codec=jpeg2000 will fall back to JPEG"
         )
+    )
+    if report.pdfium_revision:
+        lines.append(f"  {'pdfium':12s} {report.pdfium_revision}")
+    lines.append(f"  {'Pillow MAX':12s} {report.pillow_max_image_pixels}")
 
-    # jbig2enc presence: absence drops text-only ratio from ~50x to ~6x.
-    if shutil.which("jbig2") is None:
-        lines.append(
-            f"  {'jbig2enc':12s} NOT FOUND — text-only compression will fall "
-            "back to flate (~6x reduction vs ~50x with jbig2)"
-        )
-    else:
-        lines.append(f"  {'jbig2enc':12s} available")
+    if report.failures:
+        lines.append("")
+        lines.append("FAILURES:")
+        for f in report.failures:
+            lines.append(
+                f"  {f.component}: {f.reason} (found={f.found}, required={f.required})"
+            )
+
     return "\n".join(lines)
 
 
@@ -1004,6 +1005,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.doctor:
         print(_doctor_report())
         return EXIT_OK
+
+    # Env check (skippable via HANKPDF_SKIP_ENV_CHECK=1 envvar). Runs AFTER
+    # --doctor so users on broken systems can still get a diagnostic. The
+    # check is cached process-wide; cost is one round of subprocess --version
+    # probes on the first call.
+    from hankpdf._environment import assert_environment_ready
+    from hankpdf.exceptions import EnvironmentError as _HankpdfEnvironmentError
+
+    try:
+        assert_environment_ready()
+    except _HankpdfEnvironmentError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_ENV_MISSING
 
     if args.input is None or args.output is None:
         print("error: INPUT and -o/--output are required (or pass --doctor)", file=sys.stderr)

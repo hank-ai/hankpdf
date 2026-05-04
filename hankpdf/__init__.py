@@ -817,6 +817,15 @@ def compress(
     fresh UUID4 is generated. Library callers who drive multiple pages
     through one logger should pass the same id they prefix stderr with.
     """
+    # Lazy native-dep boot check (cached for the process lifetime via
+    # functools.cache on get_environment_report). Raises EnvironmentError
+    # with a friendly install hint if tesseract/qpdf/openjpeg are missing
+    # or below their floors. Library callers only pay the subprocess
+    # probe cost once, on first compress() call in the process.
+    from hankpdf._environment import assert_environment_ready
+
+    assert_environment_ready()
+
     t0 = time.monotonic()
     options = options or CompressOptions()
 
