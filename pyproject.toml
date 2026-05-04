@@ -42,6 +42,7 @@ dependencies = [
     "numpy>=2.4.0",
     "opencv-python-headless>=4.13.0",
     "scikit-image>=0.26.0",
+    "psutil>=5.9,<8",
     "pytesseract>=0.3.13",
     "tqdm>=4.67",
 ]
@@ -56,7 +57,9 @@ Issues = "https://github.com/hank-ai/hankpdf/issues"
 hankpdf = "hankpdf.cli.main:main"
 
 [project.optional-dependencies]
-# Placeholder — v1 ships no optional extras yet.
+test = [
+    "pyhanko>=0.27,<1",
+]
 
 [dependency-groups]
 dev = [
