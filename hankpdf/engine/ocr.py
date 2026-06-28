@@ -109,7 +109,7 @@ def tesseract_word_boxes(
             continue
         try:
             conf = float(data["conf"][i])
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             conf = -1.0
         # Clamp confidence to [0, 100]; Tesseract occasionally emits -1 for
         # "rejected" rows which we already filtered above on the text check.

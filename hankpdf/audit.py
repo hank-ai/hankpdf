@@ -42,7 +42,7 @@ def _probe_tool_version(binary: str) -> str:
             timeout=_PROBE_TIMEOUT_SEC,
             text=True,
         )
-    except subprocess.TimeoutExpired, OSError:
+    except (subprocess.TimeoutExpired, OSError):
         return "?"
     first = (out.stdout or out.stderr).splitlines()[:1]
     if not first:

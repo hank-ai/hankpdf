@@ -260,7 +260,7 @@ def _openjpeg_available() -> bool:
             quality_mode="rates",
             quality_layers=[25],
         )
-    except OSError, KeyError, TypeError:
+    except (OSError, KeyError, TypeError):
         return False
     return True
 

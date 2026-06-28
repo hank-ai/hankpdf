@@ -58,7 +58,7 @@ def build_info() -> dict[str, Any] | None:
     try:
         with _BUILD_INFO_PATH.open(encoding="utf-8") as f:
             data = json.load(f)
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict):
         return None
