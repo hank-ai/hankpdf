@@ -76,7 +76,7 @@ def _stream_length(obj: pikepdf.Object) -> int:
         return 0
     try:
         return int(raw)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 0
 
 

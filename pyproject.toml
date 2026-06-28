@@ -7,7 +7,7 @@ name = "hankpdf"
 version = "0.3.0"
 description = "Aggressive, safety-first PDF compressor for scanned documents. CLI tool: PDF in, compressed searchable PDF out."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [
     { name = "Jack Neil" },
@@ -30,6 +30,9 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Multimedia :: Graphics :: Graphics Conversion",
     "Topic :: Office/Business",
@@ -90,7 +93,7 @@ include = [
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py311"
 extend-exclude = [
     "scripts/generate_corpus",
     "tests/corpus/_cache",
@@ -190,7 +193,7 @@ line-ending = "lf"
 # Mypy
 # ---------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.11"
 strict = true
 warn_unused_configs = true
 warn_redundant_casts = true
@@ -208,6 +211,19 @@ module = [
     "psutil",
 ]
 ignore_missing_imports = true
+
+# tifffile is a transitive dependency of scikit-image. It ships py.typed, so
+# mypy follows into its source — which uses PEP 695 `type X = ...` statements
+# that are only valid syntax on Python 3.12+. Since our type-check target is
+# now python_version = "3.11", mypy (correctly) rejects that source as a 3.11
+# syntax error. We don't type-check third-party code, so skip following into
+# it — same treatment the ignore_missing_imports block gives the other
+# untyped deps (cv2, skimage, pikepdf, ...).
+[[tool.mypy.overrides]]
+module = [
+    "tifffile.*",
+]
+follow_imports = "skip"
 
 # Win32 ctypes module: WinDLL / get_last_error are only present on Windows.
 # Mypy runs cross-platform so it can't see them — but the module is itself

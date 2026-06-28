@@ -20,7 +20,7 @@ from hankpdf.engine.codecs.jbig2 import encode_1bit_jbig2
 def _jbig2_available() -> bool:
     try:
         subprocess.run(["jbig2", "--version"], capture_output=True, check=False, timeout=2)
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
     return True
 

@@ -644,7 +644,7 @@ def _enforce_page_axis_cap(input_data: bytes, options: CompressOptions) -> None:
                     continue
                 try:
                     coords = [float(v) for v in box]  # type: ignore[attr-defined]
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     continue
                 if len(coords) < 4:
                     continue
@@ -1681,10 +1681,10 @@ def compress(
                         except KeyboardInterrupt:
                             ex.shutdown(wait=False, cancel_futures=True)
                             raise
-                        except AssertionError, CompressError:
+                        except (AssertionError, CompressError):
                             ex.shutdown(wait=False, cancel_futures=True)
                             raise
-                        except BrokenProcessPool, MemoryCapExceededError:
+                        except (BrokenProcessPool, MemoryCapExceededError):
                             # Race-fix: workers killed faster than the watchdog
                             # poll cadence (500 ms) won't have their exit code
                             # in state.exitcodes yet. Drain whatever's in the
@@ -1765,7 +1765,7 @@ def compress(
                 except KeyboardInterrupt:
                     page_pdfs_by_index.clear()
                     raise
-                except AssertionError, CompressError:
+                except (AssertionError, CompressError):
                     raise
                 except Exception as e:
                     msg = _page_error_context(w.page_index, e)

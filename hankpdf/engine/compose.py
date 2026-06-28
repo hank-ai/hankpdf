@@ -78,7 +78,7 @@ def _jpeg2000_bytes(
             quality_mode="rates",
             quality_layers=quality_layers or _JPEG2000_QUALITY_LAYERS_DEFAULT,
         )
-    except OSError, KeyError, TypeError:
+    except (OSError, KeyError, TypeError):
         return None
     return buf.getvalue()
 
@@ -134,7 +134,7 @@ def _encode_mask_xobject(
             "BitsPerComponent": 1,
             "Filter": pikepdf.Name.JBIG2Decode,
         }
-    except FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired:
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         data = zlib.compress(_pack_1bit_msb(mask), level=9)
         kwargs = {
             "Type": pikepdf.Name.XObject,

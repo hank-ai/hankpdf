@@ -45,7 +45,7 @@ def _install_flaky_partial_writer(
             p = pathlib.Path(str(path))
             if p.parent == tmp_path and p.suffix == ".partial":
                 fd_to_partial[fd] = p
-        except OSError, ValueError:
+        except (OSError, ValueError):
             pass
         return fd
 
