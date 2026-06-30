@@ -20,15 +20,24 @@ Source of word boxes:
 
 from __future__ import annotations
 
+import ctypes
 import io
 from collections.abc import Sequence
+from typing import Any
 
 import pikepdf
 import pypdfium2 as pdfium
+import pypdfium2.raw as pdfium_c
 
 from hankpdf.engine.ocr import WordBox
 
 _HELVETICA_FONT_NAME = pikepdf.Name("/F-HankPDF-Invisible")
+
+# pdfium's per-glyph style probes are a best-effort fidelity nicety, never a
+# correctness requirement: any glyph the font/matrix APIs can't describe (and
+# any older pdfium build missing a symbol) must degrade to ``None``, not raise
+# and abort extraction. These are the failures we tolerate per probe.
+_STYLE_PROBE_ERRORS = (ctypes.ArgumentError, AttributeError, OSError, ValueError, TypeError)
 
 
 def _escape_pdf_string(text: str) -> str:
@@ -236,6 +245,107 @@ def extract_native_word_boxes(
         pdf.close()
 
 
+def _native_char_style(
+    tp_raw: object,
+    index: int,
+    *,
+    page_height_pt: float,
+    sy: float,
+) -> dict[str, Any]:
+    """Probe one glyph's font/size/weight/colour/baseline via pdfium's raw API.
+
+    Returns the optional style fields of :class:`WordBox` as a kwargs dict.
+    Best-effort by contract: each probe is guarded independently so a single
+    unsupported field degrades to ``None`` without losing the others, and no
+    probe ever raises out of here (style is fidelity, never correctness).
+
+    ``baseline_y`` is derived from the text matrix: the text-space origin maps
+    to the matrix translation ``(e, f)`` in page points, which is the glyph's
+    baseline. We convert that to raster pixels (top-left origin) so it shares the
+    coordinate frame of :class:`WordBox`'s ``x``/``y``.
+    """
+    flags = ctypes.c_int(0)
+    name: str | None = None
+    try:
+        needed = pdfium_c.FPDFText_GetFontInfo(tp_raw, index, None, 0, ctypes.byref(flags))
+        if needed and needed > 1:
+            buf = ctypes.create_string_buffer(needed)
+            pdfium_c.FPDFText_GetFontInfo(tp_raw, index, buf, needed, ctypes.byref(flags))
+            # pdfium NUL-terminates; `needed` counts the terminator.
+            name = buf.raw[: needed - 1].decode("utf-8", "replace") or None
+    except _STYLE_PROBE_ERRORS:
+        name = None
+
+    try:
+        size = float(pdfium_c.FPDFText_GetFontSize(tp_raw, index))
+        size_pt: float | None = size if size > 0 else None
+    except _STYLE_PROBE_ERRORS:
+        size_pt = None
+
+    try:
+        weight = int(pdfium_c.FPDFText_GetFontWeight(tp_raw, index))
+        weight_val: int | None = weight if weight > 0 else None
+    except _STYLE_PROBE_ERRORS:
+        weight_val = None
+
+    color: tuple[int, int, int] | None = None
+    try:
+        r = ctypes.c_uint()
+        g = ctypes.c_uint()
+        b = ctypes.c_uint()
+        a = ctypes.c_uint()
+        if pdfium_c.FPDFText_GetFillColor(
+            tp_raw, index, ctypes.byref(r), ctypes.byref(g), ctypes.byref(b), ctypes.byref(a)
+        ):
+            color = (int(r.value), int(g.value), int(b.value))
+    except _STYLE_PROBE_ERRORS:
+        color = None
+
+    baseline_y: float | None = None
+    try:
+        matrix = pdfium_c.FS_MATRIX()
+        if pdfium_c.FPDFText_GetMatrix(tp_raw, index, ctypes.byref(matrix)):
+            baseline_y = (page_height_pt - matrix.f) * sy
+    except _STYLE_PROBE_ERRORS:
+        baseline_y = None
+
+    return {
+        "font_name": name,
+        "font_flags": flags.value or None,
+        "font_size_pt": size_pt,
+        "font_weight": weight_val,
+        "color": color,
+        "baseline_y": baseline_y,
+    }
+
+
+def _emit_word(
+    boxes: list[WordBox],
+    text: str,
+    style: dict[str, Any],
+    *,
+    left: float,
+    bottom: float,
+    right: float,
+    top: float,
+    sx: float,
+    sy: float,
+    page_height_pt: float,
+) -> None:
+    """Append one word-level :class:`WordBox`, converting pt bbox -> raster px.
+
+    ``style`` is the kwargs dict from :func:`_native_char_style` (empty for a
+    textpage with no raw handle), spread onto the box's optional style fields.
+    """
+    x_px = round(left * sx)
+    y_px = round((page_height_pt - top) * sy)
+    w_px = max(1, round((right - left) * sx))
+    h_px = max(1, round((top - bottom) * sy))
+    boxes.append(
+        WordBox(text=text, x=x_px, y=y_px, width=w_px, height=h_px, confidence=100.0, **style)
+    )
+
+
 def _walk_chars_into_words(
     tp: object,
     *,
@@ -253,10 +363,15 @@ def _walk_chars_into_words(
     # of the previous char are part of the same word.
     sx = raster_width_px / page_width_pt
     sy = raster_height_px / page_height_pt
+    tp_raw = getattr(tp, "raw", None)  # ctypes handle for the per-glyph style probe
     n_chars = tp.count_chars()  # type: ignore[attr-defined]
     boxes: list[WordBox] = []
     cur_text: list[str] = []
     cur_left = cur_right = cur_bottom = cur_top = 0.0
+    # A word inherits the style of its first glyph (a dict so flush() can mutate,
+    # not rebind, it through the closure). Empty -> WordBox style fields default
+    # to None, e.g. when the textpage exposes no raw handle.
+    cur_style: dict[str, Any] = {}
     prev_baseline = -1.0
     prev_right = -1.0
     prev_height = 0.0
@@ -265,15 +380,21 @@ def _walk_chars_into_words(
         if not cur_text:
             return
         text = "".join(cur_text)
-        if not text.strip():
-            cur_text.clear()
-            return
-        x_px = round(cur_left * sx)
-        y_px = round((page_height_pt - cur_top) * sy)
-        w_px = max(1, round((cur_right - cur_left) * sx))
-        h_px = max(1, round((cur_top - cur_bottom) * sy))
-        boxes.append(WordBox(text=text, x=x_px, y=y_px, width=w_px, height=h_px, confidence=100.0))
+        if text.strip():
+            _emit_word(
+                boxes,
+                text,
+                cur_style,
+                left=cur_left,
+                bottom=cur_bottom,
+                right=cur_right,
+                top=cur_top,
+                sx=sx,
+                sy=sy,
+                page_height_pt=page_height_pt,
+            )
         cur_text.clear()
+        cur_style.clear()
 
     for i in range(n_chars):
         ch = tp.get_text_range(i, 1)  # type: ignore[attr-defined]
@@ -297,6 +418,10 @@ def _walk_chars_into_words(
             flush()
         if not cur_text:
             cur_left, cur_bottom, cur_right, cur_top = left, bottom, right, top
+            if tp_raw is not None:
+                cur_style.update(
+                    _native_char_style(tp_raw, i, page_height_pt=page_height_pt, sy=sy)
+                )
         else:
             cur_left = min(cur_left, left)
             cur_right = max(cur_right, right)
