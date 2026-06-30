@@ -34,7 +34,20 @@ DEFAULT_OCR_TIMEOUT_SECONDS: float = 120.0
 
 @dataclass(frozen=True)
 class WordBox:
-    """One word of OCR output with its bounding box and confidence."""
+    """One word with its bounding box and confidence.
+
+    The geometry/confidence fields are produced by both the OCR path
+    (:func:`tesseract_word_boxes`) and the native-text path
+    (:func:`hankpdf.engine.text_layer.extract_native_word_boxes`).
+
+    The optional ``font_*``/``color``/``baseline_y`` fields carry the original
+    glyph's style and are populated **only** by native-text extraction — a
+    rasterized scan has no font metadata, so OCR always leaves them ``None``.
+    They let a downstream consumer (e.g. a redactor drawing a replacement) match
+    the original family, size, colour and baseline instead of guessing from the
+    bounding box. Always read them defensively (``getattr``/``is not None``):
+    older hankpdf builds, and any glyph pdfium can't describe, yield ``None``.
+    """
 
     text: str
     x: int
@@ -42,6 +55,13 @@ class WordBox:
     width: int
     height: int
     confidence: float  # 0-100 per Tesseract's scale; -1 for skipped rows in TSV
+    # --- Native-text style (None for OCR output / when pdfium can't supply it).
+    font_name: str | None = None  # pdfium font face name, e.g. "Helvetica"
+    font_flags: int | None = None  # PDF FontDescriptor flags (FixedPitch/Serif/Italic/...)
+    font_size_pt: float | None = None  # nominal font size in points
+    font_weight: int | None = None  # pdfium weight (400 normal, 700 bold); None if unknown
+    color: tuple[int, int, int] | None = None  # text fill RGB, each 0-255
+    baseline_y: float | None = None  # baseline, raster px, top-left origin (x/y's frame)
 
 
 def tesseract_word_boxes(

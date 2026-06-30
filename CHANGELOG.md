@@ -4,6 +4,29 @@ All notable changes to `hankpdf` (formerly `pdf-smasher` on PyPI) are documented
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-30
+
+### Added
+
+- **Native-text glyph style on `WordBox`.** `extract_native_word_boxes`
+  now populates optional `font_name`, `font_flags`, `font_size_pt`,
+  `font_weight`, `color` and `baseline_y` fields on each `WordBox`,
+  probed per glyph via pdfium's font/matrix APIs (font face + descriptor
+  flags, point size, weight, fill colour, and the baseline from the text
+  matrix). OCR word boxes leave them `None` — a rasterized scan has no
+  font metadata. This lets a downstream consumer (e.g. a redactor) re-draw
+  replacement text matched to the original family, size, colour and
+  baseline instead of guessing from the bounding box. Backward-compatible:
+  the new fields default to `None`, so existing `WordBox` construction and
+  equality are unaffected. Style probing is best-effort — any glyph pdfium
+  can't describe degrades to `None` rather than failing extraction.
+
+## [0.3.1] - 2026-06-29
+
+### Changed
+
+- Lowered the supported Python floor to `>=3.11` (was `>=3.14`).
+
 ## [0.3.0] - 2026-05-03
 
 ### Removed (BREAKING)
