@@ -1,10 +1,19 @@
 version: 2
+# Cadence + grouping tuned to keep the PR volume low: MONTHLY, and every
+# ecosystem's updates are collapsed into a SINGLE grouped PR (one PR per
+# ecosystem per month instead of one per package). Security updates are
+# unaffected — Dependabot still opens those immediately, out of band, when a
+# real advisory lands. Bump an interval back to "weekly" only if a specific
+# ecosystem needs to move faster.
 updates:
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns: ["*"]
     labels:
       - "dependencies"
       - "python"
@@ -12,8 +21,11 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]
     labels:
       - "dependencies"
       - "ci"
@@ -24,8 +36,11 @@ updates:
   - package-ecosystem: "docker"
     directory: "/docker"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
+    groups:
+      docker:
+        patterns: ["*"]
     labels:
       - "dependencies"
       - "docker"
@@ -35,8 +50,11 @@ updates:
   - package-ecosystem: "pre-commit"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
+    groups:
+      pre-commit:
+        patterns: ["*"]
     labels:
       - "dependencies"
       - "pre-commit"
