@@ -86,7 +86,7 @@ FROM python:3.14-slim-trixie@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188
 ARG HANKPDF_VERSION=0.0.0
 ARG GIT_SHA=unknown
 ARG BUILD_DATE=unknown
-ARG BASE_IMAGE_DIGEST=sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033
+ARG BASE_IMAGE_DIGEST=sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856
 
 LABEL org.opencontainers.image.source="https://github.com/hank-ai/hankpdf"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
