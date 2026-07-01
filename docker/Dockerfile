@@ -24,7 +24,7 @@
 # form-field values, and encryption keys. SECURITY.md and docs/ROADMAP.md
 # mandate qpdf >= 11.6.3; trixie ships qpdf 12.2.0. The build-time assert
 # in the runtime stage fails the image build if the floor ever regresses.
-FROM python:3.14-slim-trixie@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856 AS builder
+FROM python:3.14-slim-trixie@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS builder
 
 # Pin every apt package to the exact version currently in trixie/main
 # (as of Wave 5). Pinning matters for reproducibility: without `=<version>`,
@@ -78,7 +78,7 @@ RUN JBIG2ENC_COMMIT="$(python3 -c 'import json; print(json.load(open("/tmp/versi
 # -----------------------------------------------------------------------------
 # Same base + digest as the builder — see note above. If you regenerate the
 # digest, update BOTH FROM lines in lockstep.
-FROM python:3.14-slim-trixie@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856 AS runtime
+FROM python:3.14-slim-trixie@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS runtime
 
 # Build metadata passed from the docker workflow. Defaults keep local
 # `docker build` working without requiring every build-arg on the CLI;
