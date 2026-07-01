@@ -24,7 +24,7 @@
 # form-field values, and encryption keys. SECURITY.md and docs/ROADMAP.md
 # mandate qpdf >= 11.6.3; trixie ships qpdf 12.2.0. The build-time assert
 # in the runtime stage fails the image build if the floor ever regresses.
-FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033 AS builder
+FROM python:3.14-slim-trixie@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856 AS builder
 
 # Pin every apt package to the exact version currently in trixie/main
 # (as of Wave 5). Pinning matters for reproducibility: without `=<version>`,
@@ -38,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libtool=2.5.4-4 \
         pkg-config=1.8.1-4 \
         libleptonica-dev=1.84.1-4 \
-        libpng-dev=1.6.48-1+deb13u4 \
+        libpng-dev=1.6.48-1+deb13u5 \
         libjpeg-dev=1:2.1.5-4 \
         libtiff-dev=4.7.0-3+deb13u2 \
         libwebp-dev=1.5.0-0.1 \
@@ -78,7 +78,7 @@ RUN JBIG2ENC_COMMIT="$(python3 -c 'import json; print(json.load(open("/tmp/versi
 # -----------------------------------------------------------------------------
 # Same base + digest as the builder — see note above. If you regenerate the
 # digest, update BOTH FROM lines in lockstep.
-FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033 AS runtime
+FROM python:3.14-slim-trixie@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856 AS runtime
 
 # Build metadata passed from the docker workflow. Defaults keep local
 # `docker build` working without requiring every build-arg on the CLI;
@@ -86,7 +86,7 @@ FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d78
 ARG HANKPDF_VERSION=0.0.0
 ARG GIT_SHA=unknown
 ARG BUILD_DATE=unknown
-ARG BASE_IMAGE_DIGEST=sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033
+ARG BASE_IMAGE_DIGEST=sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856
 
 LABEL org.opencontainers.image.source="https://github.com/hank-ai/hankpdf"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
@@ -123,7 +123,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr-eng=1:4.1.0-2 \
         qpdf=12.2.0-1 \
         libleptonica-dev=1.84.1-4 \
-        libpng16-16t64=1.6.48-1+deb13u4 \
+        libpng16-16t64=1.6.48-1+deb13u5 \
         libjpeg62-turbo=1:2.1.5-4 \
         libtiff6=4.7.0-3+deb13u2 \
         libwebp7=1.5.0-0.1 \
