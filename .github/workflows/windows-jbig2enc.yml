@@ -56,7 +56,7 @@ jobs:
         shell: msys2 {0}
     steps:
       - name: Checkout (workflow file only)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v6
         with:
           persist-credentials: false
 
@@ -433,7 +433,7 @@ jobs:
       contents: write       # required by softprops/action-gh-release
     steps:
       - name: Checkout (for JBIG2ENC_COMMIT lookup in release body)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v6
         with:
           persist-credentials: false
       - name: Read pinned JBIG2ENC_COMMIT
@@ -448,7 +448,7 @@ jobs:
           name: ${{ env.BUNDLE_NAME }}
           path: dist
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
           files: |
             dist/${{ env.BUNDLE_NAME }}.zip
