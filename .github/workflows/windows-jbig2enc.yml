@@ -56,7 +56,7 @@ jobs:
         shell: msys2 {0}
     steps:
       - name: Checkout (workflow file only)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v6
         with:
           persist-credentials: false
 
@@ -412,7 +412,7 @@ jobs:
 
       - name: Attest build provenance (SLSA v1)
         if: startsWith(github.ref, 'refs/tags/jbig2-windows-v')
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           # Both the zip and the installer carry their own signed
           # provenance. Users can verify via `gh attestation verify`.
@@ -433,7 +433,7 @@ jobs:
       contents: write       # required by softprops/action-gh-release
     steps:
       - name: Checkout (for JBIG2ENC_COMMIT lookup in release body)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v6
         with:
           persist-credentials: false
       - name: Read pinned JBIG2ENC_COMMIT
@@ -448,7 +448,7 @@ jobs:
           name: ${{ env.BUNDLE_NAME }}
           path: dist
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           files: |
             dist/${{ env.BUNDLE_NAME }}.zip
