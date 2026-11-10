@@ -29,7 +29,9 @@ FROM python:3.14-slim-trixie@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d
 # Pin every apt package to the exact version currently in trixie/main
 # (as of Wave 5). Pinning matters for reproducibility: without `=<version>`,
 # a future security update can change the bits we build jbig2 against.
-# Dependabot's docker ecosystem proposes bumps as trixie refreshes.
+# Dependabot bumps only the base-image digest. It does not refresh these
+# apt pins. When a pinned version leaves the archive, the build fails with
+# "Version ... was not found": refresh every pin from `apt-cache policy`.
 # Discover versions via `apt-cache policy <pkg>` inside the builder stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential=12.12 \
@@ -38,12 +40,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libtool=2.5.4-4 \
         pkg-config=1.8.1-4 \
         libleptonica-dev=1.84.1-4 \
-        libpng-dev=1.6.48-1+deb13u5 \
+        libpng-dev=1.6.48-1+deb13u6 \
         libjpeg-dev=1:2.1.5-4 \
-        libtiff-dev=4.7.0-3+deb13u2 \
+        libtiff-dev=4.7.0-3+deb13u3 \
         libwebp-dev=1.5.0-0.1 \
-        zlib1g-dev=1:1.3.dfsg+really1.3.1-1+b1 \
-        ca-certificates=20250419 \
+        zlib1g-dev=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+        ca-certificates=20250419+deb13u1 \
         git=1:2.47.3-0+deb13u1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -86,7 +88,7 @@ FROM python:3.14-slim-trixie@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d
 ARG HANKPDF_VERSION=0.0.0
 ARG GIT_SHA=unknown
 ARG BUILD_DATE=unknown
-ARG BASE_IMAGE_DIGEST=sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856
+ARG BASE_IMAGE_DIGEST=unknown
 
 LABEL org.opencontainers.image.source="https://github.com/hank-ai/hankpdf"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
@@ -123,9 +125,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr-eng=1:4.1.0-2 \
         qpdf=12.2.0-1 \
         libleptonica-dev=1.84.1-4 \
-        libpng16-16t64=1.6.48-1+deb13u5 \
+        libpng16-16t64=1.6.48-1+deb13u6 \
         libjpeg62-turbo=1:2.1.5-4 \
-        libtiff6=4.7.0-3+deb13u2 \
+        libtiff6=4.7.0-3+deb13u3 \
         libwebp7=1.5.0-0.1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
