@@ -1421,17 +1421,16 @@ def compress(
     bg_target_dpi = options.target_bg_dpi
     is_safe = options.mode == "safe"
 
-    import pypdfium2 as pdfium
+    from hankpdf.engine._pdfium import open_document
 
-    # We need page dimensions — open with pdfium once for sizing.
-    pdf_dims = pdfium.PdfDocument(input_data, password=options.password)
+    # We need page dimensions: open with pdfium once for sizing.
+    # open_document releases its hold on input_data on exit; a bare
+    # PdfDocument keeps one more reference to the whole input for the run.
     page_sizes: list[tuple[float, float]] = []
-    try:
+    with open_document(input_data, password=options.password) as pdf_dims:
         for i in range(tri.pages):
             w, h = pdf_dims[i].get_size()
             page_sizes.append((float(w), float(h)))
-    finally:
-        pdf_dims.close()
 
     # Split the source PDF into per-page byte slices. Each worker (parallel
     # or serial) gets only its own 1-page PDF, never the whole source.

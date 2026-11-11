@@ -6,10 +6,10 @@ pdfium is not thread-safe (see docs/ARCHITECTURE.md §3 and §8.1).
 
 from __future__ import annotations
 
-import pypdfium2 as pdfium
 from PIL import Image
 
 from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.engine._pdfium import open_document
 from hankpdf.engine._render_safety import check_render_size
 
 ensure_capped()
@@ -42,8 +42,9 @@ def rasterize_page(
         RGB-mode image. 8 bits per channel — pdfium's public render API
         maxes out at 8-bit depth.
     """
-    pdf = pdfium.PdfDocument(pdf_bytes, password=password)
-    try:
+    # open_document releases pdf_bytes on exit. A bare PdfDocument keeps the
+    # whole input alive after close() (see hankpdf.engine._pdfium).
+    with open_document(pdf_bytes, password=password) as pdf:
         if page_index < 0 or page_index >= len(pdf):
             msg = f"page_index {page_index} out of range for {len(pdf)}-page document"
             raise IndexError(msg)
@@ -54,9 +55,9 @@ def rasterize_page(
         target_h = round(height_pt * dpi / _POINTS_PER_INCH)
         scale = dpi / _POINTS_PER_INCH
         bitmap = page.render(scale=scale)
+        # convert() copies the pixels, so the image does not depend on the
+        # bitmap after the document closes.
         pil: Image.Image = bitmap.to_pil().convert("RGB")
         if pil.size != (target_w, target_h):
             pil = pil.resize((target_w, target_h), Image.Resampling.LANCZOS)
         return pil
-    finally:
-        pdf.close()

@@ -21,12 +21,12 @@ from collections.abc import Callable, Iterator
 from typing import Literal
 
 import PIL.Image
-import pypdfium2 as pdfium
 
 from hankpdf._limits import (
     MAX_BOMB_PIXELS as _MAX_BOMB_PIXELS,  # noqa: F401  — re-exported for tests/unit/test_pillow_hardening.py
 )
 from hankpdf._pillow_hardening import ensure_capped
+from hankpdf.engine._pdfium import open_document
 from hankpdf.engine._render_safety import check_render_size
 from hankpdf.engine.rasterize import rasterize_page
 from hankpdf.exceptions import DecompressionBombError
@@ -166,16 +166,14 @@ def _page_size_points(
     """Open the PDF briefly and return (width_pt, height_pt) for the given
     page WITHOUT rasterizing. Used for the pre-allocation pixel-budget check.
     """
-    doc = pdfium.PdfDocument(pdf_bytes, password=password)
-    try:
+    # open_document releases pdf_bytes on exit (see hankpdf.engine._pdfium).
+    with open_document(pdf_bytes, password=password) as doc:
         page = doc[page_index]
         try:
             size = page.get_size()  # (width_pt, height_pt)
             return float(size[0]), float(size[1])
         finally:
             page.close()
-    finally:
-        doc.close()
 
 
 def _iter_pages_impl(

@@ -26,9 +26,9 @@ from collections.abc import Sequence
 from typing import Any
 
 import pikepdf
-import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 
+from hankpdf.engine._pdfium import open_document
 from hankpdf.engine.ocr import WordBox
 
 _HELVETICA_FONT_NAME = pikepdf.Name("/F-HankPDF-Invisible")
@@ -224,8 +224,8 @@ def extract_native_word_boxes(
     case. Confidence is set to ``100.0`` — native extraction is faithful
     by construction (no recognition step).
     """
-    pdf = pdfium.PdfDocument(pdf_bytes, password=password)
-    try:
+    # open_document releases pdf_bytes on exit (see hankpdf.engine._pdfium).
+    with open_document(pdf_bytes, password=password) as pdf:
         page = pdf[page_index]
         page_width_pt, page_height_pt = page.get_size()
         if page_width_pt <= 0 or page_height_pt <= 0:
@@ -241,8 +241,6 @@ def extract_native_word_boxes(
             )
         finally:
             tp.close()
-    finally:
-        pdf.close()
 
 
 def _native_char_style(
