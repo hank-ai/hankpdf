@@ -4,6 +4,19 @@ All notable changes to `hankpdf` (formerly `pdf-smasher` on PyPI) are documented
 
 ## [Unreleased]
 
+### Fixed
+
+- **Memory: a call that opens a document from memory releases it when it
+  returns.** `rasterize_page`, `extract_native_word_boxes` and the
+  page-size check of the image export kept their input alive after the
+  call, until the Python cycle collector ran. A caller that reads the file
+  again for each call (for example `rasterize_page(path.read_bytes(),
+  page_index=i)` in a loop) then kept one more copy of the file per call:
+  5.0 GB after 16 calls on a 327 MB file, now 0.36 GB. The loops of the
+  engine itself (the CLI, the image export) pass one shared object and did
+  not grow. The workers of `compress` held each page slice longer than
+  they needed.
+
 ## [0.4.0] - 2026-06-30
 
 ### Added

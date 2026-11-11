@@ -21,8 +21,8 @@ import time
 from pathlib import Path
 
 import pikepdf
-import pypdfium2 as pdfium
 
+from hankpdf.engine._pdfium import open_document
 from hankpdf.engine.background import extract_background
 from hankpdf.engine.compose import compose_mrc_page
 from hankpdf.engine.foreground import extract_foreground
@@ -34,20 +34,14 @@ from hankpdf.engine.text_layer import add_text_layer
 
 def _page_size_pt(pdf_bytes: bytes, page_index: int) -> tuple[float, float]:
     """Return (width_pt, height_pt) for the given page."""
-    pdf = pdfium.PdfDocument(pdf_bytes)
-    try:
+    with open_document(pdf_bytes) as pdf:
         w, h = pdf[page_index].get_size()
         return float(w), float(h)
-    finally:
-        pdf.close()
 
 
 def _page_count(pdf_bytes: bytes) -> int:
-    pdf = pdfium.PdfDocument(pdf_bytes)
-    try:
+    with open_document(pdf_bytes) as pdf:
         return len(pdf)
-    finally:
-        pdf.close()
 
 
 def _compress_page(
